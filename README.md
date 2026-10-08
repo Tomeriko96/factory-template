@@ -12,7 +12,7 @@ approve → merge/escalate), plus de meta-prompt die hem per repo tailort.
 ```text
 .claude/skills/factory/SKILL.md     orchestrator-loop (basis: 4 reviewers, MAX_ROUNDS 3, MAX_RESUMES 2)
 .claude/agents/                     spec-writer, builder, approver, reviewer-{security,code,ux,ui}
-factory/{backlog.md,factory-watch}   # factory-watch = CLI-board, --tmux voor split-pane
+factory/{backlog.md,factory-watch,issues.json.example}   # factory-watch = CLI-board, --tmux voor split-pane; issues.json = issue-modus
 ```
 
 De basis bevat bewust **niet**: `/factory resume`, timestamps in `job.json`, taalregel,

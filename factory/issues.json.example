@@ -1,0 +1,5 @@
+{
+  "label": "factory:ready",
+  "allowed_authors": ["<forge-login>"],
+  "report": false
+}

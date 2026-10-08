@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Factory board</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#ddd;--ok:#1a7f37;--bad:#cf222e}
+@media(prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee;--mut:#999;--line:#333;--ok:#3fb950;--bad:#f85149}}
+body{background:var(--bg);color:var(--fg);font:14px system-ui;margin:16px}
+table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-weight:500}.PASS{color:var(--ok)}.CHANGES{color:var(--bad)}button{font:inherit}
+</style></head><body>
+<h1>Factory board</h1>
+<p><button id="pick">Kies factory/jobs/…</button> <span id="st" style="color:var(--mut)"></span></p>
+<table><thead><tr><th>Job</th><th>Stage</th><th>Ronde</th><th>Poort</th><th>Reviews</th><th>Bijgewerkt</th></tr></thead><tbody id="b"></tbody></table>
+<script>
+let dir;
+const esc=s=>String(s??"-").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+async function load(){
+  const rows=[];
+  for await(const [n,h] of dir.entries()){
+    if(h.kind!=="directory")continue;
+    try{const j=JSON.parse(await (await (await h.getFileHandle("job.json")).getFile()).text());j.id??=n;rows.push(j)}catch{}
+  }
+  b.innerHTML=rows.length?rows.map(j=>`<tr><td>${esc(j.id)}</td><td>${esc(j.stage)}</td><td>${esc(j.round)}</td><td>${esc(j.port)}</td><td>${
+    Object.entries(j.reviews||{}).map(([k,v])=>`<span class="${esc(v)}">${esc(k)} ${v==="PASS"?"✓":v==="CHANGES"?"✗":"·"}</span>`).join(" ")||"-"}</td><td>${esc(j.updated)}</td></tr>`).join(""):"<tr><td colspan=6>no jobs yet</td></tr>";
+  st.textContent="ververst "+new Date().toLocaleTimeString();
+}
+pick.onclick=async()=>{try{dir=await showDirectoryPicker();await load();setInterval(load,3000)}catch(e){st.textContent=e.message}};
+</script></body></html>

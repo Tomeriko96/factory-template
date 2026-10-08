@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Factory board: toont alle jobs uit factory/jobs/*/job.json.
+
+  factory-watch          live board (ververst elke 2s, ctrl-c stopt)
+  factory-watch --once   één keer printen en stoppen
+Onbekende keys in job.json worden genegeerd; ontbrekende velden tonen '-'.
+"""
+import json, os, subprocess, sys, time
+from datetime import datetime, timezone
+
+def root():
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"],
+                                      stderr=subprocess.DEVNULL, text=True).strip()
+        return out
+    except Exception:
+        return os.getcwd()
+
+def load(jobs_dir):
+    jobs = []
+    if not os.path.isdir(jobs_dir):
+        return jobs
+    for name in sorted(os.listdir(jobs_dir)):
+        p = os.path.join(jobs_dir, name, "job.json")
+        try:
+            with open(p) as f:
+                j = json.load(f)
+        except (OSError, ValueError):
+            continue
+        j.setdefault("id", name)
+        jobs.append(j)
+    return jobs
+
+def age(iso):
+    try:
+        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        s = int((datetime.now(timezone.utc) - t).total_seconds())
+        return f"{s//3600}h{s%3600//60:02d}m" if s >= 3600 else f"{s//60}m{s%60:02d}s"
+    except Exception:
+        return "-"
+
+def render(jobs):
+    if not jobs:
+        return "factory board — no jobs yet"
+    sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
+    lines = [f"{'JOB':<32} {'STAGE':<12} {'RND':>3} {'PORT':>5}  REVIEWS               UPDATED"]
+    for j in jobs:
+        revs = j.get("reviews") or {}
+        r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"
+        lines.append(f"{str(j['id'])[:32]:<32} {str(j.get('stage', '-')):<12} "
+                     f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
+                     f"{r:<21} {age(j['updated']) if j.get('updated') else '-'}")
+    return "\n".join(lines)
+
+def main():
+    jobs_dir = os.path.join(root(), "factory", "jobs")
+    if "--once" in sys.argv:
+        print(render(load(jobs_dir)))
+        return
+    try:
+        while True:
+            print("\033[2J\033[H" + render(load(jobs_dir)) + "\n\n(ctrl-c om te stoppen)")
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+
+if __name__ == "__main__":
+    main()

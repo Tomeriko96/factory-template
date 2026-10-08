@@ -7,16 +7,22 @@ approve → merge/escalate), plus de meta-prompt die hem per repo tailort.
   privacy-regel voor alle archetypes, `--light`-modus, lokale-merge-regel,
   standaard smoke-test.
 
-## Nog te doen (template-inhoud)
-
-`SCAFFOLD_PROMPT.md` verwacht deze files, die hier nog gemaakt moeten worden:
+## Inhoud
 
 ```text
-.claude/skills/factory/SKILL.md
-.claude/agents/{spec-writer,builder,approver}.md
-.claude/agents/reviewer-{security,code,ux,ui}.md
+.claude/skills/factory/SKILL.md     orchestrator-loop (basis: 4 reviewers, MAX_ROUNDS 3, MAX_RESUMES 2)
+.claude/agents/                     spec-writer, builder, approver, reviewer-{security,code,ux,ui}
 factory/{backlog.md,dashboard.html,factory-watch}
 ```
 
-Tag elke stabiele stand (`git tag v0.1.0`): de scaffold schrijft
-`git describe --tags --always` als template-versie in `factory/SETUP.md`.
+De basis bevat bewust **niet**: `/factory resume`, timestamps in `job.json`, taalregel,
+`--light`, en de lokale-merge-regel. Die voegt `SCAFFOLD_PROMPT.md` per repo toe
+(bijlagen A, B, D, E), samen met de repo-specifieke reviewers (bijlage C).
+
+## Beperkingen
+
+Deze template is geschreven op basis van de loop-beschrijving, niet getest met een
+echte `/factory`-run. Draai de smoke-test uit Fase 4 van de scaffold in een eerste repo
+en verwerk bevindingen hier terug. Tag stabiele standen (`git tag v0.1.0`): de
+scaffold schrijft `git describe --tags --always` als template-versie in
+`factory/SETUP.md`.

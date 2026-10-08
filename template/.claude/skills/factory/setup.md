@@ -12,9 +12,10 @@ inspect the repo and write exactly two files: `.factory/config.json` and
   smoke-test branch in step 4, which you delete again; the smoke test always uses
   `local` delivery).
 - First check the install is really local-only:
-  `git check-ignore -q .factory/VERSION .claude/skills/factory/SKILL.md .claude/agents/factory-builder.md`
-  must succeed, and `git status --porcelain` must not list any of those paths. If not,
-  stop: tell the user to re-run `factory-init`.
+  `for p in .factory/VERSION .claude/skills/factory/SKILL.md .claude/agents/factory-builder.md; do git check-ignore -q "$p" || echo "NOT ignored: $p"; done`
+  must print nothing (`check-ignore -q` takes one path at a time), and
+  `git status --porcelain` must not list any of those paths. If not, stop: tell the
+  user to re-run `factory-init`.
 
 ## 1. Inspect (read-only)
 

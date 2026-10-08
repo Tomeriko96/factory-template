@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
-"""Factory board: toont alle jobs uit factory/jobs/*/job.json.
+"""Factory board: shows every job in .factory/jobs/*/job.json.
 
-  factory-watch          live board (ververst elke 2s, ctrl-c stopt)
-  factory-watch --once   één keer printen en stoppen
-  factory-watch --tmux   open het board in een split-pane onderaan (binnen tmux)
-  factory-watch <job-id> toon detail: bestanden in de jobmap + laatste regels build/decision
-Onbekende keys in job.json worden genegeerd; ontbrekende velden tonen '-'.
+  .factory/watch          live board (refreshes every 2s, ctrl-c stops)
+  .factory/watch --once   print once and exit
+  .factory/watch --tmux   open the board in a split pane at the bottom (inside tmux)
+  .factory/watch <job-id> detail: files in the job folder + first lines of decision.md
+Unknown keys in job.json are ignored; missing fields show '-'.
 """
 import json, os, subprocess, sys, time
 from datetime import datetime, timezone
 
-def root():
-    try:
-        out = subprocess.check_output(["git", "rev-parse", "--show-toplevel"],
-                                      stderr=subprocess.DEVNULL, text=True).strip()
-        return out
-    except Exception:
-        return os.getcwd()
+HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 
 def load(jobs_dir):
     jobs = []
@@ -41,7 +35,7 @@ def age(iso):
     except Exception:
         return "-"
 
-COL = {"needs-human": "\033[1;31m", "merged": "\033[32m", "review": "\033[33m",
+COL = {"needs-human": "\033[1;31m", "merged": "\033[32m", "pr-open": "\033[32m", "pushed": "\033[32m", "review": "\033[33m",
        "build": "\033[36m", "approve": "\033[35m", "spec": "\033[34m"}
 
 def paint(text, stage):
@@ -52,7 +46,7 @@ def paint(text, stage):
 def detail(jobs_dir, job_id):
     d = os.path.join(jobs_dir, job_id)
     if not os.path.isdir(d):
-        return f"geen job '{job_id}'"
+        return f"no job '{job_id}'"
     out = [f"== {job_id}"]
     for dp, _, fs in sorted(os.walk(d)):
         for f in sorted(fs):
@@ -65,24 +59,25 @@ def detail(jobs_dir, job_id):
 
 def render(jobs):
     if not jobs:
-        return "factory board — no jobs yet"
+        return "factory board: no jobs yet"
     sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
-    lines = [f"{'JOB':<32} {'STAGE':<12} {'RND':>3} {'PORT':>5}  REVIEWS               UPDATED"]
+    lines = [f"{'JOB':<32} {'MODE':<5} {'STAGE':<12} {'RND':>3} {'PORT':>5}  {'REVIEWS':<38} UPDATED"]
     for j in jobs:
         revs = j.get("reviews") or {}
         r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"
-        lines.append(paint(f"{str(j['id'])[:32]:<32} {str(j.get('stage', '-')):<12} "
+        lines.append(paint(f"{str(j['id'])[:32]:<32} {str(j.get('mode', '-')):<5} "
+                           f"{str(j.get('stage', '-')):<12} "
                            f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
-                           f"{r:<21} {age(j['updated']) if j.get('updated') else '-'}",
+                           f"{r:<38} {age(j['updated']) if j.get('updated') else '-'}",
                            j.get("stage")))
     return "\n".join(lines)
 
 def main():
-    jobs_dir = os.path.join(root(), "factory", "jobs")
+    jobs_dir = os.path.join(HERE, "jobs")
     if "--tmux" in sys.argv:
         if not os.environ.get("TMUX"):
-            sys.exit("niet in tmux; draai gewoon factory-watch")
-        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", root(),
+            sys.exit("not inside tmux; just run .factory/watch")
+        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", os.path.dirname(HERE),
                         os.path.abspath(__file__)])
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -94,7 +89,7 @@ def main():
         return
     try:
         while True:
-            print("\033[2J\033[H" + render(load(jobs_dir)) + "\n\n(ctrl-c om te stoppen)")
+            print("\033[2J\033[H" + render(load(jobs_dir)) + "\n\n(ctrl-c to stop)")
             time.sleep(2)
     except KeyboardInterrupt:
         pass

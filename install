@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Install the factory into a git repo, local-only: nothing is ever committed.
+#
+#   install [<repo>]            install or update (default: current directory); without
+#                               <repo> and without a config, then starts /factory setup
+#   install --no-setup [<repo>] install or update only
+#   install --remove [<repo>]   remove it again (refuses while jobs are unfinished)
+#   install --link              put `factory-init` on PATH (~/.local/bin symlink)
+#
+# Files go to .claude/skills/factory/, .claude/agents/factory-*.md and .factory/, and are
+# excluded via .git/info/exclude (not .gitignore, so not even that is committed).
+# Update = re-run: generic files are replaced; .factory/config.json, repo.md,
+# backlog.md and jobs/ are kept. Afterwards: claude → /factory setup.
+set -euo pipefail
+
+TEMPLATE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+SRC="$TEMPLATE/template"
+PATTERNS=("/.factory/" "/.claude/skills/factory/" "/.claude/agents/factory-*.md")
+
+die() { echo "factory: $*" >&2; exit 1; }
+
+remove=0 setup=1 target="."
+for a in "$@"; do
+  case "$a" in
+    --remove) remove=1 ;;
+    --no-setup) setup=0 ;;
+    --link)
+      mkdir -p "$HOME/.local/bin"
+      ln -sfn "$TEMPLATE/install" "$HOME/.local/bin/factory-init"
+      echo "linked $HOME/.local/bin/factory-init -> $TEMPLATE/install"
+      case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH" ;; esac
+      exit 0 ;;
+    -h|--help) sed -n '2,13p' "$TEMPLATE/install" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) die "unknown option $a" ;;
+    *) target="$a"; setup=0 ;;
+  esac
+done
+
+repo="$(git -C "$target" rev-parse --show-toplevel 2>/dev/null)" || die "not a git repo: $target"
+common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)"
+[ "$common" = "$(git -C "$repo" rev-parse --path-format=absolute --git-dir)" ] \
+  || die "run this in the main checkout, not in a linked worktree"
+[ "$repo" != "$TEMPLATE" ] || die "refusing to install into the template repo itself"
+exclude="$common/info/exclude"
+
+strip_block() {
+  [ -f "$exclude" ] && sed -i '/^# factory:begin/,/^# factory:end/d' "$exclude" || true
+}
+
+if (( remove )); then
+  open_jobs=""
+  for j in "$repo"/.factory/jobs/*/job.json; do
+    [ -f "$j" ] || continue
+    grep -Eq '"stage"[[:space:]]*:[[:space:]]*"(merged|pushed|pr-open)"' "$j" || open_jobs+=" $(basename "$(dirname "$j")")"
+  done
+  [ -z "$open_jobs" ] || die "unfinished jobs:$open_jobs. Finish (/factory approve) or delete them first."
+  rm -rf "$repo/.factory" "$repo/.claude/skills/factory"
+  rm -f "$repo"/.claude/agents/factory-*.md
+  rmdir "$repo/.claude/skills" "$repo/.claude/agents" "$repo/.claude" 2>/dev/null || true
+  strip_block
+  git -C "$repo" worktree prune
+  echo "factory removed from $repo"
+  exit 0
+fi
+
+tracked="$(git -C "$repo" ls-files -- .factory .claude/skills/factory '.claude/agents/factory-*.md')"
+[ -z "$tracked" ] || die "these paths are tracked in git, so a local-only install is impossible:
+$tracked"
+
+# exclude first, so the files never show up as untracked
+mkdir -p "$(dirname "$exclude")"
+strip_block
+{
+  echo "# factory:begin (local-only, managed by factory-template/install)"
+  printf '%s\n' "${PATTERNS[@]}"
+  echo "# factory:end"
+} >> "$exclude"
+
+mkdir -p "$repo/.claude/skills" "$repo/.claude/agents" "$repo/.factory/jobs"
+rm -rf "$repo/.claude/skills/factory"
+cp -R "$SRC/.claude/skills/factory" "$repo/.claude/skills/factory"
+rm -f "$repo"/.claude/agents/factory-*.md
+cp "$SRC"/.claude/agents/factory-*.md "$repo/.claude/agents/"
+cp "$SRC/.factory/shoot" "$SRC/.factory/watch" "$repo/.factory/"
+chmod +x "$repo/.factory/shoot" "$repo/.factory/watch"
+[ -f "$repo/.factory/backlog.md" ] || cp "$SRC/.factory/backlog.md" "$repo/.factory/"
+git -C "$TEMPLATE" describe --tags --always --dirty > "$repo/.factory/VERSION" 2>/dev/null \
+  || echo unknown > "$repo/.factory/VERSION"
+
+# verify: everything ignored, nothing visible to git
+for p in .factory/VERSION .claude/skills/factory/SKILL.md .claude/agents/factory-builder.md; do
+  git -C "$repo" check-ignore -q "$p" \
+    || die "$p is NOT ignored by git (a .gitignore negation?). Run: install --remove"
+done
+leak="$(git -C "$repo" status --porcelain --untracked-files=all -- .factory .claude | grep -E 'factory' || true)"
+[ -z "$leak" ] || die "git still sees factory files:
+$leak"
+
+echo "factory $(cat "$repo/.factory/VERSION") installed in $repo (local-only, git-excluded)"
+if [ -f "$repo/.factory/config.json" ]; then
+  echo "config kept; run /factory setup again only to re-tailor"
+elif (( setup )) && [ -t 0 ] && command -v claude >/dev/null; then
+  echo "starting claude (opus) with /factory setup …"
+  cd "$repo" && exec claude --model opus "/factory setup"
+else
+  echo "next: start claude in the repo and run /factory setup"
+fi

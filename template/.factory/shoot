@@ -1,0 +1,103 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright==1.63.0"]
+# ///
+"""Headless screenshots + basic checks of a running app, for the ui/ux reviewers.
+
+  .factory/shoot <base-url> --out <dir> [--path /] [--path /x] [--widths 375,1280]
+                 [--scheme light|dark|both] [--wait 1500]
+
+Per path × width (× colour scheme): <dir>/<slug>-<width>[-dark].png (full page).
+<dir>/shoot.json holds per shot: status, title, console errors, page errors, failed
+requests, horizontal overflow and a11y counts (img without alt, form fields without a
+label, buttons/links without a name).
+Exit code 1 if a page does not load (no response or status >= 400).
+No browser yet: `uv run --with playwright==1.63.0 playwright install chromium`.
+"""
+import argparse, json, os, re, sys
+from playwright.sync_api import sync_playwright
+
+CHECKS = """() => {
+  const named = el => (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby')
+    || el.getAttribute('title') || el.textContent || '').trim().length > 0;
+  const labelled = el => el.labels?.length > 0 || el.getAttribute('aria-label')
+    || el.getAttribute('aria-labelledby') || el.getAttribute('title');
+  const fields = [...document.querySelectorAll('input, select, textarea')]
+    .filter(el => !['hidden', 'submit', 'button', 'reset'].includes(el.type));
+  return {
+    overflow_x: document.documentElement.scrollWidth > window.innerWidth + 1,
+    scroll_width: document.documentElement.scrollWidth,
+    img_no_alt: document.querySelectorAll('img:not([alt])').length,
+    field_no_label: fields.filter(el => !labelled(el)).length,
+    control_no_name: [...document.querySelectorAll('button, a[href], [role=button]')]
+      .filter(el => !named(el) && !el.querySelector('img[alt]:not([alt=""])')).length,
+  };
+}"""
+
+def slug(path):
+    return re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-") or "root"
+
+def shoot(page, url, out, name, wait):
+    rec = {"url": url, "shot": None, "status": None, "console_errors": [],
+           "page_errors": [], "failed_requests": []}
+    page.on("console", lambda m: m.type == "error" and rec["console_errors"].append(m.text[:300]))
+    page.on("pageerror", lambda e: rec["page_errors"].append(str(e)[:300]))
+    page.on("requestfailed", lambda r: rec["failed_requests"].append(f"{r.method} {r.url} {r.failure}"))
+    page.on("response", lambda r: r.status >= 400 and rec["failed_requests"].append(f"{r.status} {r.url}"))
+    try:
+        resp = page.goto(url, wait_until="networkidle", timeout=30000)
+    except Exception as e:  # timeout or no connection
+        rec["error"] = str(e).splitlines()[0]
+        return rec
+    page.wait_for_timeout(wait)
+    rec["status"] = resp.status if resp else None
+    rec["title"] = page.title()
+    rec.update(page.evaluate(CHECKS))
+    rec["shot"] = os.path.join(out, name + ".png")
+    page.screenshot(path=rec["shot"], full_page=True)
+    return rec
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("base")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--path", action="append", default=[])
+    ap.add_argument("--widths", default="375,1280")
+    ap.add_argument("--scheme", choices=["light", "dark", "both"], default="light")
+    ap.add_argument("--wait", type=int, default=1500, help="ms after networkidle (e.g. Streamlit)")
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+    widths = [int(w) for w in a.widths.split(",")]
+    schemes = ["light", "dark"] if a.scheme == "both" else [a.scheme]
+    results = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        for scheme in schemes:
+            for w in widths:
+                ctx = browser.new_context(viewport={"width": w, "height": 900}, color_scheme=scheme)
+                for path in a.path or ["/"]:
+                    name = f"{slug(path)}-{w}" + ("-dark" if scheme == "dark" else "")
+                    page = ctx.new_page()
+                    rec = shoot(page, a.base.rstrip("/") + path, a.out, name, a.wait)
+                    rec.update(width=w, scheme=scheme)
+                    results.append(rec)
+                    page.close()
+                ctx.close()
+        browser.close()
+    with open(os.path.join(a.out, "shoot.json"), "w") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    bad = 0
+    for r in results:
+        ok = r["shot"] and r["status"] and r["status"] < 400
+        bad += not ok
+        flags = [k for k in ("console_errors", "page_errors", "failed_requests") if r[k]]
+        flags += [k for k in ("overflow_x",) if r.get(k)]
+        flags += [f"{k}={r[k]}" for k in ("img_no_alt", "field_no_label", "control_no_name") if r.get(k)]
+        print(f"{'ok ' if ok else 'ERR'} {r['status'] or '-':>3} {r['width']:>5} {r['scheme']:<5} "
+              f"{r['url']}  {r.get('error') or ' '.join(flags) or 'clean'}")
+    print(f"→ {os.path.join(a.out, 'shoot.json')}")
+    sys.exit(1 if bad else 0)
+
+if __name__ == "__main__":
+    main()

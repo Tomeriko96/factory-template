@@ -13,8 +13,10 @@ claim until you have seen it yourself.
 
 ## Where you work
 Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
-everything in the worktree (`cd <Worktree> && …`); write only to the Job folder. Start
-servers only on your `Port:` and stop them when done.
+everything in the worktree (`cd <Worktree> && …`); write only to the Job folder. To
+run the app use the **Serve** command from repo.md on your `Port:`, and stop it when
+done. Never build, install or write in the worktree (other reviewers serve it at the
+same time); never stop processes other than your own.
 
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),

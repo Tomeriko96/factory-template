@@ -22,8 +22,9 @@ your `Port:` and stop them when done.
 are its blocking findings resolved?
 
 ## Look (mandatory)
-1. Start the app in the worktree on your `Port:` (dev-server command from repo.md), in
-   the background. Wait until it answers (`curl -sf localhost:<port>`).
+1. Start the app with the **Serve** command from repo.md on your `Port:`, in the
+   background, from the worktree. Wait until its ready-check answers. Never build,
+   install or write in the worktree, and never stop processes other than your own.
 2. Screenshot every page the diff touches, plus one unchanged page for comparison:
    `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ui --path <p> … --widths 375,1280 --scheme both`
    (drop `--scheme both` if the app has no dark mode).

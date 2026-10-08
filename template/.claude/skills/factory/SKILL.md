@@ -279,7 +279,8 @@ Save the URL as `pr_url`, stage `pr-open`, report the URL. Creating the PR/MR fa
 stage `pushed` and report the error (the branch is already up).
 
 ### Always
-- Push only `factory/<job-id>` branches. Never push `base` or any other branch, never
+- Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
+  remote, e.g. a public mirror). Never push `base` or any other branch, never
   force-push, never merge, approve or close a PR/MR, never delete remote branches.
   Merging the PR/MR is always a human's job.
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.

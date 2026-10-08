@@ -23,12 +23,16 @@ except to write `build.md` in the Job folder. You never push.
    one-line reason in build.md.
 
 ## Do
+0. Fresh worktree (round 1, or dependencies missing): run **Worktree setup** from
+   repo.md. Never copy, print or read secret files; pass them by path as repo.md says.
 1. Implement according to the spec; keep the diff small and in the repo's style.
 2. Add tests for new behaviour.
-3. Run the validation from repo.md until it passes. Run a dev server only on your
-   `Port:` and stop it afterwards.
+3. Run the validation from repo.md until it passes. Run a server only on your `Port:`
+   and stop it afterwards; never stop other processes.
 4. Commit in the worktree: small, clear commits in English, following the repo's commit
    convention. Never commit anything under `.factory/` or `.claude/`.
+5. Run **Prepare** from repo.md after your last commit, so the reviewers can serve the
+   app without building. Note in build.md that it ran.
 
 ## Write `round-N/build.md`
 - **Summary**: what was built.

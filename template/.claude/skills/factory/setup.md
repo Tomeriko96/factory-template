@@ -20,13 +20,21 @@ inspect the repo and write exactly two files: `.factory/config.json` and
 
 - `git rev-parse --show-toplevel`, `git branch --show-current`, `git status --porcelain`
   (remember this output: it must be identical at the end).
-- `git remote -v` → **forge**: github.com → `github`; git.ia.surf.nl / gitlab.com →
-  `gitlab`; none → `none`.
+- `git remote -v`. **Delivery remote** = the remote the team opens PRs/MRs on (usually
+  `origin`; with several remotes, e.g. a private GitLab plus a public GitHub mirror,
+  check README/AGENTS.md/CONTRIBUTING.md and ask if unclear). **Forge** follows that
+  remote: github.com → `github`; git.ia.surf.nl / gitlab.com → `gitlab`; none → `none`.
+  Every other remote goes into repo.md under "Never push to".
 - `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md` (if present).
 - Stack: `pyproject.toml`, `uv.lock`, `package.json`, `DESCRIPTION` (R), `go.mod`,
   `Cargo.toml`, `*.csproj`, …
 - CI: `.github/workflows/*` or `.gitlab-ci.yml` + `.gitlab/*.yaml`. Which checks run?
-- Setup, test, lint, build and dev-server commands (config + README + AGENTS.md).
+- Setup, test, lint, build and dev-server commands (config + README + AGENTS.md,
+  Makefile, package.json scripts). Read what each one really does: a `make dev` that
+  first runs `pkill`, a hard-coded port or a dev proxy to a fixed backend port all
+  break parallel reviewers (see Serve below).
+- Untracked runtime files the app needs (`git status --ignored --short`): `.env`,
+  local databases, data folders. They are not in a job worktree.
 - Data scan (decides archetype and extra reviewers): grep for BSN, PGN, ONR,
   onderwijsnummer, persoonsgegevens, AVG, GDPR, privacy, mask, upload, prompt,
   tool_call, litellm, bekostiging, indicator, JR, DR, quality.json, parquet, star schema.
@@ -79,6 +87,24 @@ locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge
 → `local`. `draft: true` unless the user wants ready-for-review PRs. Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
+**Running the app in a worktree** (skip for archetypes without a server). Several
+reviewers serve the same worktree at the same time, each on its own port, so define:
+
+- **Worktree setup**: run once per new worktree by the builder (install dependencies).
+  Untracked runtime files are never copied: pass them by path instead, e.g.
+  `uv run --env-file <Repo>/.env …`, `docker run --env-file …`, or an env var pointing at
+  the file in the main checkout. Never print or read secret files.
+- **Prepare**: run by the builder at the end of every round, after its last commit
+  (e.g. build the frontend), so serving needs no build.
+- **Serve**: one command with `{port}` that reviewers run; it must (1) start a single
+  process tree on `{port}` only, (2) talk only to services on that same port, never to
+  a fixed dev-proxy port, (3) never stop or signal other processes (no `pkill`,
+  no `make stop`), (4) never write into the worktree (no build, no install). Prefer the
+  production-like path (backend serving the built frontend) over a dev server with a
+  proxy. If no such command exists without a code change, say so in repo.md and to the
+  user (that code change is a good first factory job); until then use `"reviewers"`
+  without ux/ui.
+
 ## 3. Write
 
 `.factory/config.json`:
@@ -107,11 +133,15 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Forge / CI: <GitHub Actions | GitLab CI | none> — <which checks>
 - Setup fresh checkout: <commands, run in the worktree>
 - Validate: <test> · <lint> · <build>
-- Dev server: <command with {port}>, ready when <url/curl check> answers
+- Worktree setup (builder, once): <commands>
+- Prepare (builder, end of every round): <commands, e.g. frontend build>
+- Serve (reviewers, per port): <command with {port}>; ready when `curl -sf http://localhost:{port}<path>` answers
+- Runtime files: <how the app gets .env/db/data from the main checkout, by path only>
 - Pages to screenshot by default: <paths, e.g. / /upload>
 - Conventions: <commit style, code style, anything agents must respect>
 - Commits: in English, following the repo's commit convention
-- Notes: <port conflicts, slow tests, data that must never be touched>
+- Delivery remote: <remote> · Never push to: <other remotes, or "none">
+- Notes: <port conflicts, slow tests, costs (e.g. real LLM calls), data that must never be touched>
 ```
 
 ## 4. Verify (run and report the output)
@@ -119,7 +149,9 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - `.factory/watch --once` → "factory board: no jobs yet".
 - `ls .claude/agents/factory-reviewer-*.md` covers `config.reviewers`.
 - `git status --porcelain` is identical to step 1: nothing tracked changed.
-- With ux/ui: start the dev server on a free port, run
+- With ux/ui: run Worktree setup + Prepare + Serve in a throwaway worktree
+  (`git worktree add --detach /tmp/factory-serve-check HEAD`, removed afterwards) on a
+  free port — this proves Serve works outside the main checkout — then run
   `.factory/shoot http://localhost:<port> --out /tmp/factory-shoot-check`, expect exit 0
   and **look at one screenshot** with Read (the app is really visible). Stop the server.
   Missing browser: `uv run --with playwright==1.63.0 playwright install chromium`.

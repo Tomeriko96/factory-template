@@ -22,8 +22,9 @@ your `Port:` and stop them when done.
 are its blocking findings resolved?
 
 ## Walk through (mandatory)
-1. Start the app in the worktree on your `Port:` (dev-server command from repo.md), in
-   the background. Wait until it answers (`curl -sf localhost:<port>`).
+1. Start the app with the **Serve** command from repo.md on your `Port:`, in the
+   background, from the worktree. Wait until its ready-check answers. Never build,
+   install or write in the worktree, and never stop processes other than your own.
 2. Static state of the touched pages:
    `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> …`
 3. Flows from spec.md (clicking, filling forms, invalid input): write a short

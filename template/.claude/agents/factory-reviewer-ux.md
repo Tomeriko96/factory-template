@@ -22,17 +22,20 @@ your `Port:` and stop them when done.
 are its blocking findings resolved?
 
 ## Walk through (mandatory)
-1. Start the app with the **Serve** command from repo.md on your `Port:`, in the
-   background, from the worktree. Wait until its ready-check answers. Never build,
-   install or write in the worktree, and never stop processes other than your own.
+1. Start the app on your `Port:` with the **Serve** command from repo.md, always via
+   `<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <ready path> -- <Serve command>`.
+   It refuses a port that is already in use and waits until the app answers. Never
+   build, install or write in the worktree.
 2. Static state of the touched pages:
    `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> …`
 3. Flows from spec.md (clicking, filling forms, invalid input): write a short
    Playwright script to `<Job>/round-N/shots/ux/flow.py` (headless Chromium,
    `page.screenshot` per step into the same folder) and run it with
-   `uv run --quiet --with playwright==1.63.0 python -I <Job>/round-N/shots/ux/flow.py`.
+   `uv run --quiet --no-project --python 3 --with playwright==1.63.0 python -I <Job>/round-N/shots/ux/flow.py`
+   (`--no-project` keeps uv out of the worktree's project; `--python 3` ignores its pin).
    Also test the keyboard: reach the main action with only `Tab` + `Enter`.
-4. **Look at the screenshots** with Read and read `shots/ux/shoot.json`. Stop the server.
+4. **Look at the screenshots** with Read and read `shots/ux/shoot.json`. Stop the app:
+   `<Repo>/.factory/serve stop <port>`. Never stop processes another way.
 
 If starting or walking through fails: `VERDICT: CHANGES` with one blocking finding
 "flow cannot be walked through" + the error. Never judge UX from the code alone.

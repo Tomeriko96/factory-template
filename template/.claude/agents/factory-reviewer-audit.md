@@ -14,8 +14,9 @@ claim until you have seen it yourself.
 ## Where you work
 Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
 everything in the worktree (`cd <Worktree> && …`); write only to the Job folder. To
-run the app use the **Serve** command from repo.md on your `Port:`, and stop it when
-done. Never build, install or write in the worktree (other reviewers serve it at the
+run the app use the **Serve** command from repo.md on your `Port:`, via
+`<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <path> -- <Serve command>`,
+and stop it with `<Repo>/.factory/serve stop <port>`. Never build, install or write in the worktree (other reviewers serve it at the
 same time); never stop processes other than your own.
 
 ## Read

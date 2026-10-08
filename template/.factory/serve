@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Start and stop an app server for one reviewer, safely, by port.
+
+  .factory/serve start <port> --cwd <worktree> [--ready /path] [--timeout 120] -- <command…>
+  .factory/serve stop <port>
+  .factory/serve status
+
+start: refuses if <port> is already in use (you would test someone else's server),
+runs <command> (with {port} replaced) in its own process group, writes its log to
+.factory/run/<port>.log, waits until http://localhost:<port><ready> answers < 500, and
+exits 0. Exit 1 if the server dies or never becomes ready (the group is stopped, the
+log tail is printed).
+stop: stops exactly the process group that `start` created (TERM, then KILL after 10s)
+and checks the port is free again. Never touches other processes.
+"""
+import argparse, json, os, signal, socket, subprocess, sys, time, urllib.error, urllib.request
+
+RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run")
+
+def in_use(port):
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+def ready(port, path):
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
+            return r.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500
+    except Exception:
+        return False
+
+def state_file(port):
+    return os.path.join(RUN, f"{port}.json")
+
+def alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+def kill_group(pgid):
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return True
+        end = time.time() + wait
+        while time.time() < end:
+            if not alive(pgid):
+                return True
+            time.sleep(0.2)
+    return not alive(pgid)
+
+def tail(path, n=20):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return ""
+
+def start(a):
+    cmd = [c.replace("{port}", str(a.port)) for c in a.command]
+    if not cmd:
+        sys.exit("serve: no command after --")
+    if os.path.exists(state_file(a.port)):
+        sys.exit(f"serve: port {a.port} is already managed; run: .factory/serve stop {a.port}")
+    if in_use(a.port):
+        sys.exit(f"serve: port {a.port} is already in use by another process; pick your own port")
+    os.makedirs(RUN, exist_ok=True)
+    log = os.path.join(RUN, f"{a.port}.log")
+    with open(log, "w") as f:
+        p = subprocess.Popen(cmd, cwd=a.cwd, stdout=f, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+    with open(state_file(a.port), "w") as f:
+        json.dump({"pgid": p.pid, "cmd": cmd, "cwd": a.cwd, "log": log}, f)
+    end = time.time() + a.timeout
+    while time.time() < end:
+        if p.poll() is not None:
+            break
+        if ready(a.port, a.ready):
+            print(f"serve: ready on http://localhost:{a.port}{a.ready} (pgid {p.pid}, log {log})")
+            return
+        time.sleep(0.5)
+    why = f"exited with {p.returncode}" if p.poll() is not None else f"not ready after {a.timeout}s"
+    kill_group(p.pid)
+    os.remove(state_file(a.port))
+    sys.exit(f"serve: server {why}\n--- {log} (tail)\n{tail(log)}")
+
+def stop(a):
+    sf = state_file(a.port)
+    if not os.path.exists(sf):
+        sys.exit(f"serve: nothing started on port {a.port} by serve")
+    with open(sf) as f:
+        pgid = json.load(f)["pgid"]
+    ok = kill_group(pgid)
+    os.remove(sf)
+    time.sleep(0.3)
+    if not ok or in_use(a.port):
+        sys.exit(f"serve: port {a.port} still in use after stopping group {pgid}")
+    print(f"serve: stopped port {a.port}")
+
+def status(_):
+    if not os.path.isdir(RUN):
+        print("serve: nothing running")
+        return
+    for name in sorted(os.listdir(RUN)):
+        if name.endswith(".json"):
+            with open(os.path.join(RUN, name)) as f:
+                s = json.load(f)
+            port = name[:-5]
+            print(f"{port:>5}  {'up  ' if alive(s['pgid']) else 'dead'}  {s['cwd']}  {' '.join(s['cmd'])[:80]}")
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="action", required=True)
+    s = sub.add_parser("start")
+    s.add_argument("port", type=int)
+    s.add_argument("--cwd", required=True)
+    s.add_argument("--ready", default="/")
+    s.add_argument("--timeout", type=int, default=120)
+    t = sub.add_parser("stop")
+    t.add_argument("port", type=int)
+    sub.add_parser("status")
+    argv = sys.argv[1:]
+    cut = argv.index("--") if "--" in argv else len(argv)
+    a = ap.parse_args(argv[:cut])
+    a.command = argv[cut + 1:]
+    {"start": start, "stop": stop, "status": status}[a.action](a)
+
+if __name__ == "__main__":
+    main()

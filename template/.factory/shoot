@@ -1,4 +1,4 @@
-#!/usr/bin/env -S uv run --quiet --script
+#!/usr/bin/env -S uv run --quiet --python 3 --script
 # /// script
 # requires-python = ">=3.10"
 # dependencies = ["playwright==1.63.0"]
@@ -13,7 +13,8 @@ Per path × width (× colour scheme): <dir>/<slug>-<width>[-dark].png (full page
 requests, horizontal overflow and a11y counts (img without alt, form fields without a
 label, buttons/links without a name).
 Exit code 1 if a page does not load (no response or status >= 400).
-No browser yet: `uv run --with playwright==1.63.0 playwright install chromium`.
+No browser yet: `uv run --no-project --python 3 --with playwright==1.63.0 playwright install chromium`.
+`--python 3` keeps uv from following the repo's .python-version pin.
 """
 import argparse, json, os, re, sys
 from playwright.sync_api import sync_playwright

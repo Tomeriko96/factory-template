@@ -38,8 +38,8 @@ and re-run `factory-init` in each repo.
 .claude/skills/factory/      SKILL.md (orchestrator) + setup.md (/factory setup)
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
-.factory/                    config.json + repo.md (written by setup), backlog.md, shoot, watch,
-                             VERSION, jobs/
+.factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
+                             watch, VERSION, jobs/, run/
 ```
 
 Job worktrees go to `../<repo>-worktrees/<job-id>`, outside the repo. Excluded files
@@ -53,7 +53,7 @@ After the approver says MERGE, `config.delivery.mode` decides:
 |---|---|---|
 | `local` | `git merge --no-ff` into the base branch, in this clone | `merged` |
 | `push` | push `factory/<id>` to the remote | `pushed` |
-| `pr` (recommended) | push + open a (draft) PR/MR with the approver's body: summary, verified acceptance criteria, validation, leftovers, `Closes #<nr>` | `pr-open` |
+| `pr` (recommended) | push + open a (draft) PR/MR with the approver's body: summary, verified acceptance criteria, validation, leftovers, `Closes #<nr>` (or `Refs #<nr>` for mirrored repos, `issues.link`) | `pr-open` |
 
 The factory only ever pushes `factory/*` branches: never the base branch, never
 `--force`. It never merges, approves or closes a PR/MR. Review comments go back in with
@@ -75,7 +75,10 @@ afterwards with `git check-ignore` that git really ignores them.
 - **Reviews stay in the container.** `reviewer-audit` re-measures every claim and
   acceptance criterion (claim → command → measurement table, explicit withdrawals of
   measurement artefacts). ui/ux look at the running app via headless Chromium
-  (`.factory/shoot`: screenshots + overflow, a11y and console checks).
+  (`.factory/shoot`: screenshots + overflow, a11y and console checks). Servers are
+  started and stopped only through `.factory/serve` (own process group per port,
+  refuses a busy port, waits for readiness), so parallel reviewers never test or kill
+  each other's server.
 - **Severity.** Findings are `[blocking]` or `[non-blocking]`; only blocking findings
   trigger another round. Non-blocking ones end up as Leftovers in `decision.md`.
 - **Everything in English.** Artifacts, reports and commit messages.

@@ -14,8 +14,11 @@ The factory's own files are **local-only**: everything it installs and produces 
 excluded via `.git/info/exclude` and never committed. Job branches contain only code;
 what happens to them after approval is set by `config.delivery` (see Delivery). The
 factory never pushes anything but `factory/<job-id>` branches, never merges a PR/MR and
-never edits tracked files outside a job branch. Write every artifact and every report in
-English.
+never edits tracked files outside a job branch.
+
+**Language:** factory artifacts, reports, commit messages and PR/MR text are always in
+English. Changes *inside* existing human-facing text (a Dutch README, UI copy, docs)
+follow the language of that file, so it does not end up mixed.
 
 ## Config
 
@@ -29,13 +32,16 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false },
+  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true }
 }
 ```
 
 - `reviewers` is the full-review set. Name `x` is agent `factory-reviewer-x`.
-- `issues` is `null` when issue mode is off.
+- `issues` is `null` when issue mode is off. `issues.link` is the keyword that
+  references the issue in PR/MR bodies: `Closes` (closes it on merge) or `Refs` (link
+  only; required when merge commits are mirrored to another forge, where `Closes #N`
+  would close an unrelated issue with the same number). Missing → `Closes`.
 - `delivery.mode`: `local` (merge into `base` locally), `push` (push the job branch) or
   `pr` (push + open a PR/MR). Missing → `local`.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
@@ -131,7 +137,7 @@ Branch: factory/<job-id>
 2. **Spec:** spawn `factory-spec-writer`, prompt `<paths> Feature: <feature>`. Wait
    until `spec.md` exists. Stage → `build`.
 3. **Build round N** (N = round + 1): spawn `factory-builder`, prompt
-   `<paths> Build round N. Port: <port>.` Wait until `round-N/build.md` exists.
+   `<paths> Build round N. Port: <port>. Mode: <mode>.` Wait until `round-N/build.md` exists.
    Stage → `review`, round = N.
 4. **Review round N:** spawn one `factory-reviewer-<name>` per reviewer in the set, **all
    in one message** (parallel). Prompt: `<paths> Review round N. Port: <port + offset>.`
@@ -155,7 +161,8 @@ schema/definition changes: propose the full loop instead. Same as above with
 (`git diff --name-only <base>...<branch>`) touch auth, secrets, input parsing or
 dependencies, plus `privacy` if it is in `config.reviewers` and the files touch
 personal-data paths. No `audit` in light mode: the approver measures the acceptance
-criteria itself.
+criteria itself. If the change touches only docs (see "Validate (docs-only)" in
+repo.md), the builder runs only those quick checks instead of the full validation.
 
 ### `/factory next`
 If `config.issues` is set: take the lowest-numbered open issue with label
@@ -184,7 +191,7 @@ remote is ahead (someone pushed to the PR); diverged → stage `needs-human`. Af
 rounds are approved, delivery pushes to the same branch, so an open PR/MR updates
 itself. Write `<note>` to `rework.md`, reset the round budget so at least
 one more round fits (`MAX_ROUNDS` counts afresh per rework), spawn the builder with
-`<paths> Build round N+1. Port: <port>. Also read rework.md.`
+`<paths> Build round N+1. Port: <port>. Mode: <mode>. Also read rework.md.`
 
 ### `/factory resume <id>`
 - Read `job.json`. `merged`/`pushed`/`pr-open` → nothing to do (point to `rework`).
@@ -225,8 +232,8 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
 at: start (job-id), `needs-human` (reason) and delivery (PR/MR url, or branch + commit
 sha), and swap the label to `factory:in-progress` at start. Never post code, diffs or
 review text. The factory never closes issues itself: in `pr` mode the PR/MR body gets
-`Closes #<nr>` so the issue closes when a human merges it; otherwise give the user that
-line.
+`<issues.link> #<nr>` (so with `Closes`, the issue closes when a human merges it);
+otherwise give the user that line. Commits reference the issue with `Refs #<nr>` only.
 
 ## Severity
 
@@ -264,7 +271,7 @@ is up to the user.
 ### `pr`
 Steps 1–3 of `push`, then open the PR/MR from the approver's `## PR` section of
 `decision.md` (title on its first line, body below). Write the body to
-`<Job>/pr-body.md`, append `Closes #<nr>` if the job came from an issue, and end it
+`<Job>/pr-body.md`, append `<issues.link> #<nr>` if the job came from an issue, and end it
 with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 - `github`: if `gh pr view factory/<job-id> --json url` already finds one, reuse it.
@@ -288,8 +295,14 @@ stage `pushed` and report the error (the branch is already up).
 ## Rules
 
 - Do not read full diffs or code yourself; rely on the agents' files.
+- `.factory/repo.md` is yours to correct: when an agent's file shows it is wrong or
+  incomplete (a missing setup flag, a check CI runs that repo.md lacks), fix that line
+  and report the change in one line. Never edit `config.json` without the user.
 - An agent that returns without its file: respawn it (max `MAX_RESUMES`).
 - Never run two builders in the same worktree.
 - Never edit files in the worktree yourself.
 - Screenshots are made with `.factory/shoot` (headless Chromium in this container); no
   code or app data goes to external review services.
+- Agents start and stop app servers only with `.factory/serve`, each on its own port.
+  `.factory/serve status` shows what is running; after an aborted job, stop leftovers
+  with `.factory/serve stop <port>`.

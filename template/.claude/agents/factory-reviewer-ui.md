@@ -22,14 +22,15 @@ your `Port:` and stop them when done.
 are its blocking findings resolved?
 
 ## Look (mandatory)
-1. Start the app with the **Serve** command from repo.md on your `Port:`, in the
-   background, from the worktree. Wait until its ready-check answers. Never build,
-   install or write in the worktree, and never stop processes other than your own.
+1. Start the app on your `Port:` with the **Serve** command from repo.md, always via
+   `<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <ready path> -- <Serve command>`.
+   It refuses a port that is already in use and waits until the app answers. Never
+   build, install or write in the worktree.
 2. Screenshot every page the diff touches, plus one unchanged page for comparison:
    `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ui --path <p> … --widths 375,1280 --scheme both`
    (drop `--scheme both` if the app has no dark mode).
 3. **Look at every screenshot** with Read (it is an image) and read `shots/ui/shoot.json`.
-4. Stop the server.
+4. Stop it: `<Repo>/.factory/serve stop <port>`. Never stop processes another way.
 
 If starting or screenshotting fails: `VERDICT: CHANGES` with one blocking finding
 "app cannot be viewed" + the error. Never judge UI from the code alone.

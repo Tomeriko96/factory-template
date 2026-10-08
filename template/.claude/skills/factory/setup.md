@@ -78,10 +78,14 @@ and audit on opus; the rest on sonnet). Do not change them. Advise the user to r
 and say why in `repo.md`.
 
 **Issues:** forge `github`/`gitlab` → `issues` =
-`{"label": "factory:ready", "allowed_authors": ["<login>"], "report": false}` with the
-logged-in user only (`gh api user --jq .login` / `glab api user --jq .username`). Never
+`{"label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes"}`
+with the logged-in user only (`gh api user --jq .login` / `glab api user --jq .username`). Never
 add other authors unless the user asks. Forge `none`, or the user does not want issue
-mode → `"issues": null` (then `next` uses `backlog.md`).
+mode → `"issues": null` (then `next` uses `backlog.md`). Set `"link": "Refs"` when the
+repo is mirrored to another forge (a second remote on another host, or docs that say
+commits are mirrored): `Closes #N` would close an unrelated issue there. Check the label
+exists (`gh label list` / `glab label list`); if not, tell the user (creating it is
+their call, it changes the forge).
 
 **Delivery** (ask the user once, recommend `pr`): `local` (merge into the base branch
 locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge `none`
@@ -97,7 +101,9 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   the file in the main checkout. Never print or read secret files.
 - **Prepare**: run by the builder at the end of every round, after its last commit
   (e.g. build the frontend), so serving needs no build.
-- **Serve**: one command with `{port}` that reviewers run; it must (1) start a single
+- **Serve**: one command with `{port}` that reviewers run through `.factory/serve`
+  (own process group, refuses a busy port, waits for the ready path, stops exactly
+  that group); it must (1) start a single
   process tree on `{port}` only, (2) talk only to services on that same port, never to
   a fixed dev-proxy port, (3) never stop or signal other processes (no `pkill`,
   no `make stop`), (4) never write into the worktree (no build, no install). Prefer the
@@ -117,7 +123,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false },
+  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true }
 }
 ```
@@ -133,14 +139,17 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Reviewers: <list> — <one line why, incl. privacy rule>
 - Forge / CI: <GitHub Actions | GitLab CI | none> — <which checks>
 - Setup fresh checkout: <commands, run in the worktree>
-- Validate: <test> · <lint> · <build>
+- Validate: <test> · <lint> · <build> (match what CI runs, incl. install extras)
+- Validate (docs-only): <which paths count as docs, e.g. *.md, docs/> → <quick checks, e.g. mkdocs build --strict, or "none">
 - Worktree setup (builder, once): <commands>
 - Prepare (builder, end of every round): <commands, e.g. frontend build>
-- Serve (reviewers, per port): <command with {port}>; ready when `curl -sf http://localhost:{port}<path>` answers
+- Serve (reviewers, per port): <command with {port}> · ready path: <e.g. /health>
+  (agents run it as `.factory/serve start <port> --cwd <worktree> --ready <path> -- <command>`)
 - Runtime files: <how the app gets .env/db/data from the main checkout, by path only>
 - Pages to screenshot by default: <paths, e.g. / /upload>
 - Conventions: <commit style, code style, anything agents must respect>
-- Commits: in English, following the repo's commit convention
+- Commits: in English, following the repo's commit convention; issues as `Refs #N`.
+  Edits inside existing text stay in that file's language.
 - Delivery remote: <remote> · Never push to: <other remotes, or "none">
 - Notes: <port conflicts, slow tests, costs (e.g. real LLM calls), data that must never be touched>
 ```
@@ -152,10 +161,14 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - `git status --porcelain` is identical to step 1: nothing tracked changed.
 - With ux/ui: run Worktree setup + Prepare + Serve in a throwaway worktree
   (`git worktree add --detach /tmp/factory-serve-check HEAD`, removed afterwards) on a
-  free port — this proves Serve works outside the main checkout — then run
+  free port, started with `.factory/serve start` and stopped with `.factory/serve stop`
+  — this proves Serve works outside the main checkout — then run
   `.factory/shoot http://localhost:<port> --out /tmp/factory-shoot-check`, expect exit 0
-  and **look at one screenshot** with Read (the app is really visible). Stop the server.
-  Missing browser: `uv run --with playwright==1.63.0 playwright install chromium`.
+  and **look at one screenshot** with Read (the app is really visible).
+  Missing browser: `uv run --no-project --python 3 --with playwright==1.63.0 playwright install chromium`.
+- Any `uv run` you or the agents use for factory tooling (not the app) needs
+  `--no-project --python 3`, so it neither syncs the repo's project nor follows its
+  `.python-version` pin.
 - **Smoke test** (default; skip only if the user declines): `git switch -c
   factory-smoketest`, run `/factory --light <trivial change, e.g. a README typo>`, check
   that spec → build → review → decision complete. Then clean up: `git switch -`,

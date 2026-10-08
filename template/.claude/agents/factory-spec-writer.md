@@ -31,4 +31,5 @@ the worktree (`cd <Worktree> && …`); write only to the Job folder.
 - **Open questions**: only if truly blocking; otherwise pick a reasonable default and
   note it.
 
-Keep it under ~80 lines, in English. Ask the user no questions.
+Keep it under ~80 lines, in English. Ask the user no questions. If the feature changes
+existing human-facing text, say in the Approach that it stays in that file's language.

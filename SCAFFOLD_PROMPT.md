@@ -128,7 +128,7 @@ andere forge.
    - `.claude/skills/factory/SKILL.md`
    - `.claude/agents/`: `spec-writer.md`, `builder.md`, `approver.md` + alleen de
      gekozen reviewer-files
-   - `factory/backlog.md`, `factory/dashboard.html`, `factory/factory-watch`
+   - `factory/backlog.md`, `factory/factory-watch`
      (`chmod +x factory/factory-watch`)
    - **Niet kopiëren:** `factory/jobs/` (voorbeeld-jobs), `BUILD_PROMPT.md`,
      de README van de template (schrijf zelf `factory/SETUP.md`, zie stap 7).
@@ -148,7 +148,7 @@ andere forge.
      nooit, en opent geen PR/MR.
    - `MAX_RESUMES` blijft 2, tenzij de user anders vraagt.
 
-3. Patch agent-frontmatter: `spec-writer.md` → `model: sonnet`; check alle agents
+3. Check agent-frontmatter (`spec-writer` staat in de template al op sonnet): alle agents
    tegen de modelmatrix (`grep -H "^model:" .claude/agents/*.md`).
 
 4. Voeg repo-specifieke agents toe (alleen de gekozen uit de matrix): gebruik de
@@ -166,7 +166,7 @@ andere forge.
    - CI: <GitHub Actions | GitLab CI> — <welke checks>
    - Taal: artefacten in <TAAL>
    - Factory-commando's: /factory <feature> · /factory --light <feature> · /factory next · /factory approve <id> · /factory rework <id> <note> · /factory resume <id>
-   - Board: factory/factory-watch (CLI/tmux) — dashboard.html is optioneel
+   - Board: factory/factory-watch (CLI; in tmux: factory/factory-watch --tmux)
    - Job-state: factory/jobs/ (gitignored)
    - De factory pusht nooit; PR/MR is aan de user
    ```
@@ -232,7 +232,7 @@ Toevoegen aan SKILL.md onder Commands.
 
 Vul aan: `"started": "<ISO8601>"`, `"updated": "<ISO8601>"`,
 `"history": [{"stage": "<stage>", "at": "<ISO8601>"}]`. Herschrijf het hele file bij
-elke stage-wissel; `updated` en `history` bij elke verandering. Watcher/dashboard
+elke stage-wissel; `updated` en `history` bij elke verandering. Het board (factory-watch)
 negeren onbekende keys.
 
 ## Bijlage C — Templates voor repo-specifieke reviewers

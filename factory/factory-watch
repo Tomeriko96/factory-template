@@ -3,6 +3,8 @@
 
   factory-watch          live board (ververst elke 2s, ctrl-c stopt)
   factory-watch --once   één keer printen en stoppen
+  factory-watch --tmux   open het board in een split-pane onderaan (binnen tmux)
+  factory-watch <job-id> toon detail: bestanden in de jobmap + laatste regels build/decision
 Onbekende keys in job.json worden genegeerd; ontbrekende velden tonen '-'.
 """
 import json, os, subprocess, sys, time
@@ -39,6 +41,28 @@ def age(iso):
     except Exception:
         return "-"
 
+COL = {"needs-human": "\033[1;31m", "merged": "\033[32m", "review": "\033[33m",
+       "build": "\033[36m", "approve": "\033[35m", "spec": "\033[34m"}
+
+def paint(text, stage):
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"{COL.get(stage, '')}{text}\033[0m"
+
+def detail(jobs_dir, job_id):
+    d = os.path.join(jobs_dir, job_id)
+    if not os.path.isdir(d):
+        return f"geen job '{job_id}'"
+    out = [f"== {job_id}"]
+    for dp, _, fs in sorted(os.walk(d)):
+        for f in sorted(fs):
+            out.append("  " + os.path.relpath(os.path.join(dp, f), d))
+    for f in ("decision.md",):
+        p = os.path.join(d, f)
+        if os.path.exists(p):
+            out += ["", f"-- {f}"] + open(p).read().splitlines()[:12]
+    return "\n".join(out)
+
 def render(jobs):
     if not jobs:
         return "factory board — no jobs yet"
@@ -47,13 +71,24 @@ def render(jobs):
     for j in jobs:
         revs = j.get("reviews") or {}
         r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"
-        lines.append(f"{str(j['id'])[:32]:<32} {str(j.get('stage', '-')):<12} "
-                     f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
-                     f"{r:<21} {age(j['updated']) if j.get('updated') else '-'}")
+        lines.append(paint(f"{str(j['id'])[:32]:<32} {str(j.get('stage', '-')):<12} "
+                           f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
+                           f"{r:<21} {age(j['updated']) if j.get('updated') else '-'}",
+                           j.get("stage")))
     return "\n".join(lines)
 
 def main():
     jobs_dir = os.path.join(root(), "factory", "jobs")
+    if "--tmux" in sys.argv:
+        if not os.environ.get("TMUX"):
+            sys.exit("niet in tmux; draai gewoon factory-watch")
+        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", root(),
+                        os.path.abspath(__file__)])
+        return
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if args:
+        print(detail(jobs_dir, args[0]))
+        return
     if "--once" in sys.argv:
         print(render(load(jobs_dir)))
         return

@@ -2,7 +2,7 @@
 name: spec-writer
 description: Schrijft factory/jobs/<id>/spec.md uit een feature-omschrijving. Schrijft alleen die ene file.
 tools: Read, Grep, Glob, Bash, Write
-model: opus
+model: sonnet
 ---
 
 # Spec-writer

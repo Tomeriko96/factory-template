@@ -89,7 +89,10 @@ their call, it changes the forge).
 
 **Delivery** (ask the user once, recommend `pr`): `local` (merge into the base branch
 locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge `none`
-→ `local`. `draft: true` unless the user wants ready-for-review PRs. Check `push`/`pr`
+→ `local`. `draft: true` unless the user wants ready-for-review PRs. Ask at the same time
+whether the factory should switch on auto-merge on the PR/MR it opens (`auto_merge`,
+default `false`; it needs `draft: false` and then also decides on the merge, so only on
+the user's explicit yes). Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
 **Running the app in a worktree** (skip for archetypes without a server). Several
@@ -124,7 +127,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
-  "delivery": { "mode": "pr", "remote": "origin", "draft": true }
+  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false }
 }
 ```
 

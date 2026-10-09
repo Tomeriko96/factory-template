@@ -53,10 +53,13 @@ After the approver says MERGE, `config.delivery.mode` decides:
 |---|---|---|
 | `local` | `git merge --no-ff` into the base branch, in this clone | `merged` |
 | `push` | push `factory/<id>` to the remote | `pushed` |
-| `pr` (recommended) | push + open a (draft) PR/MR with the approver's body: summary, verified acceptance criteria, validation, leftovers, `Closes #<nr>` (or `Refs #<nr>` for mirrored repos, `issues.link`) | `pr-open` |
+| `pr` (recommended) | push + open a PR/MR (draft by default; `delivery.draft`) with the approver's body: summary, verified acceptance criteria, validation, leftovers, `Closes #<nr>` (or `Refs #<nr>` for mirrored repos, `issues.link`) | `pr-open` |
 
 The factory only ever pushes `factory/*` branches: never the base branch, never
-`--force`. It never merges, approves or closes a PR/MR. Review comments go back in with
+`--force`. It never merges, approves or closes a PR/MR. The one exception is opt-in:
+with `delivery.draft: false` and `delivery.auto_merge: true` it switches on the forge's
+auto-merge after opening the PR/MR (GitLab: merge when pipeline succeeds; GitHub: `gh pr
+merge --auto`), so the forge merges once its own checks pass. It never merges directly. Review comments go back in with
 `/factory rework <id> "<comments>"`; the next approved round pushes to the same branch,
 so the PR/MR updates.
 

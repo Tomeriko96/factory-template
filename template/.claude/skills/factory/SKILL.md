@@ -13,8 +13,9 @@ files.
 The factory's own files are **local-only**: everything it installs and produces is
 excluded via `.git/info/exclude` and never committed. Job branches contain only code;
 what happens to them after approval is set by `config.delivery` (see Delivery). The
-factory never pushes anything but `factory/<job-id>` branches, never merges a PR/MR and
-never edits tracked files outside a job branch.
+factory never pushes anything but `factory/<job-id>` branches, never merges a PR/MR itself
+(it may only switch on the forge's auto-merge, and only when `delivery.auto_merge` is set)
+and never edits tracked files outside a job branch.
 
 **Language:** factory artifacts, reports, commit messages and PR/MR text are always in
 English. Changes *inside* existing human-facing text (a Dutch README, UI copy, docs)
@@ -33,7 +34,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
-  "delivery": { "mode": "pr", "remote": "origin", "draft": true }
+  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false }
 }
 ```
 
@@ -44,6 +45,11 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   would close an unrelated issue with the same number). Missing → `Closes`.
 - `delivery.mode`: `local` (merge into `base` locally), `push` (push the job branch) or
   `pr` (push + open a PR/MR). Missing → `local`.
+- `delivery.draft`: open the PR/MR as a draft. Missing → `true`.
+- `delivery.auto_merge`: in `pr` mode, switch on the forge's auto-merge after opening the
+  PR/MR, so the forge merges it itself once the required checks pass. Missing → `false`.
+  Only meaningful with `draft: false` (a draft cannot merge); with both set, ignore the
+  auto-merge and say so.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 
@@ -285,11 +291,31 @@ with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 Save the URL as `pr_url`, stage `pr-open`, report the URL. Creating the PR/MR fails →
 stage `pushed` and report the error (the branch is already up).
 
+**Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false). This
+is the only merge-related action the factory takes, and it is a switch, not a merge: the
+forge merges when its own checks pass; the factory never merges directly, never skips or
+retries checks to get green, never touches approval rules. Auto-merge set right after
+creation often fails because the pipeline does not exist yet, and some CLIs fail silently:
+
+- `gitlab`: wait until `glab api "projects/:id/merge_requests/<iid>/pipelines"` lists at
+  least one pipeline, then
+  `glab api -X PUT "projects/:id/merge_requests/<iid>/merge" -f auto_merge=true
+  -f should_remove_source_branch=true`. Verify with
+  `glab api "projects/:id/merge_requests/<iid>"` → `merge_when_pipeline_succeeds` is true.
+- `github`: `gh pr merge <nr> --auto --delete-branch` (the merge method follows the repo's
+  setting; add `--squash`/`--merge`/`--rebase` only if the repo allows just one). Verify
+  with `gh pr view <nr> --json autoMergeRequest` → not null.
+
+Not set after a retry, or the MR sits on a conflict or a missing approval → report it and
+leave the MR open; never work around it. Report whether auto-merge is on in the same line
+as the URL.
+
 ### Always
 - Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
   remote, e.g. a public mirror). Never push `base` or any other branch, never
   force-push, never merge, approve or close a PR/MR, never delete remote branches.
-  Merging the PR/MR is always a human's job.
+  Merging the PR/MR is a human's job, unless `delivery.auto_merge` is set: then the factory
+  only switches on the forge's auto-merge (see above), and the forge merges.
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.
 
 ## Rules

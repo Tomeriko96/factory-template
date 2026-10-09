@@ -63,6 +63,15 @@ merge --auto`), so the forge merges once its own checks pass. It never merges di
 `/factory rework <id> "<comments>"`; the next approved round pushes to the same branch,
 so the PR/MR updates.
 
+`/factory sync [<id>]` keeps open PRs/MRs mergeable: it asks the forge whether each still
+merges into the base branch (also at the end of delivery and on `status`), and on a
+conflict has the builder merge the base into the job branch (a merge commit, never a
+rebase or force-push), runs the validation, lets the code reviewer check the merge and
+pushes. A conflict that needs a decision (the base already fixes the same thing, both
+sides change the same behaviour, validation fails) is never resolved by picking a side:
+the job goes to `needs-human` with the reason. At most `MAX_SYNCS` (3) times per job.
+`/loop 10m /factory sync` watches continuously.
+
 `install` refuses if one of those paths is tracked in the repo, and it verifies
 afterwards with `git check-ignore` that git really ignores them.
 

@@ -71,6 +71,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 - `MAX_ROUNDS = 3`, then `needs-human`.
 - `MAX_RESUMES = 2`: how often you respawn an agent that returned without writing its
   output file. Then `needs-human`.
+- `MAX_SYNCS = 3`: how often one job's PR/MR is brought up to date with `base` (see
+  `/factory sync`). Then `needs-human`.
 - Ports for job `NNN-…` (n = NNN as a number): builder `port_base + 10n`; reviewers
   ux `+1`, ui `+2`, audit `+3`. Other reviewers get the builder port but start no server.
 
@@ -86,6 +88,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
     decision.md                          (approver, final round)
+    sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
     rework.md                            (only after /factory rework)
 <repo>/../<repo>-worktrees/<job-id>/     (git worktree, branch factory/<job-id>)
 ```
@@ -111,7 +114,8 @@ feature, lowercase, max 40 characters.
   "started": "<ISO8601>",
   "updated": "<ISO8601>",
   "history": [{ "stage": "spec", "at": "<ISO8601>" }],
-  "pr_url": null
+  "pr_url": null,
+  "sync": { "count": 0, "last": null }
 }
 ```
 
@@ -209,8 +213,51 @@ one more round fits (`MAX_ROUNDS` counts afresh per rework), spawn the builder w
   `review` → only the reviewers whose `round-N/review-<name>.md` is missing, in one
   message, then the normal WAIT FOR ALL + decision · `approve` → approver.
 
+### `/factory sync [<id>]`
+Keeps open PRs/MRs mergeable. For `<id>`, or for every job at stage `pr-open`: ask the
+forge whether the PR/MR still merges into `base`.
+
+- `gitlab`: `glab api "projects/:id/merge_requests/<iid>"` → conflict when
+  `has_conflicts` is true or `detailed_merge_status` is `conflict` or `need_rebase`.
+  `checking` / `unchecked` is not an answer: look again after a short wait, at most
+  three times, then report "unknown".
+- `github`: `gh pr view <nr> --json mergeable,mergeStateStatus` → conflict when
+  `mergeable` is `CONFLICTING` (`mergeStateStatus` `DIRTY`); `BEHIND` counts only if the
+  repo requires up-to-date branches.
+
+PR/MR already merged or closed → set the stage to `merged` (merged) or `needs-human`
+(closed without merge), report it and skip it. No conflict → nothing to do. Conflict:
+
+1. `job.json.sync.count` is at `MAX_SYNCS` → stage `needs-human`, report. Otherwise
+   count + 1. The worktree gone? `git worktree add <worktree> factory/<id>`. Remote
+   ahead of your branch (someone pushed)? Fast-forward it first; diverged → `needs-human`.
+2. Spawn `factory-builder`: `<paths> Sync <n>. Port: <port>. Mode: <mode>.` It merges
+   `<remote>/<base>` into the job branch (a merge commit: never rebase, never
+   force-push), resolves the conflicts, runs the validation and writes
+   `<Job>/sync-<n>/build.md` whose first line is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`
+   (see the agent). Wait for the file.
+3. `SYNC: NEEDS-HUMAN` → stage `needs-human`; show its reason; the PR/MR stays open and
+   untouched. This is the right outcome when `base` already fixes the same thing in a
+   different way (the job is then probably superseded: say so and suggest closing the
+   PR/MR), when both sides change the same behaviour, or when validation fails after the
+   merge. Never resolve such a conflict by picking a side.
+4. `SYNC: RESOLVED` → spawn `factory-reviewer-code` on the merge (`<paths> Review sync
+   <n>. Port: <port>.`, it writes `<Job>/sync-<n>/review-code.md`; it checks that nothing
+   of either side was lost and that the tests cover the merge). `PASS` → push the
+   branch like Delivery's `push` step 2 (never `--force`), then check the PR/MR is
+   mergeable again and, with `delivery.auto_merge`, that auto-merge is still on (new
+   commits can clear it: set it again as in Delivery). `CHANGES` → stage
+   `needs-human`, show the findings.
+5. Stage stays `pr-open` after a successful sync; write `sync: {count, last}` and a
+   `history` entry to `job.json`. Report one line per job: id, MR, result.
+
+Runs automatically at the end of every delivery and whenever `status` is called. For
+continuous watching the user can run `/loop 10m /factory sync`.
+
 ### `/factory` (no argument) / `/factory status`
-Per job: id, mode, stage, round, reviews. Mention `.factory/watch` for a live board.
+Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run the conflict
+check of `/factory sync` (check only, tell the user when a fix is needed and offer it;
+`/factory sync` does the fix). Mention `.factory/watch` for a live board.
 
 ### `/factory setup`
 Follow `setup.md` in this skill's directory.
@@ -288,7 +335,9 @@ with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
   --title "<title>" --description "$(cat <Job>/pr-body.md)" --yes` (+ `--draft` if
   `delivery.draft`).
 
-Save the URL as `pr_url`, stage `pr-open`, report the URL. Creating the PR/MR fails →
+Save the URL as `pr_url`, stage `pr-open`, report the URL. Right after (and again when
+the pipeline starts) run the conflict check of `/factory sync` on it: `base` may have
+moved while the job ran. Creating the PR/MR fails →
 stage `pushed` and report the error (the branch is already up).
 
 **Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false). This
@@ -313,7 +362,8 @@ as the URL.
 ### Always
 - Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
   remote, e.g. a public mirror). Never push `base` or any other branch, never
-  force-push, never merge, approve or close a PR/MR, never delete remote branches.
+  force-push (a sync merges `base` into the branch, never rebases), never merge,
+  approve or close a PR/MR, never delete remote branches.
   Merging the PR/MR is a human's job, unless `delivery.auto_merge` is set: then the factory
   only switches on the forge's auto-merge (see above), and the forge merges.
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.

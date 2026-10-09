@@ -38,6 +38,30 @@ except to write `build.md` in the Job folder. You never push.
 5. Run **Prepare** from repo.md after your last commit, so the reviewers can serve the
    app without building. Note in build.md that it ran.
 
+## Sync mode (prompt says `Sync <n>`)
+The PR/MR of this job no longer merges into `Base`. You bring the branch up to date; you
+do not build anything new. Work in the worktree and write `<Job>/sync-<n>/build.md`.
+
+1. `git fetch <remote>` (the remote from `.factory/config.json`, `delivery.remote`) and
+   see what moved: `git log --oneline HEAD..<remote>/<Base>`; check whether `<remote>/<Base>`
+   already contains a change for the same issue as this job (`Refs #<nr>` in commits,
+   same files, same behaviour).
+2. `git merge <remote>/<Base>` (a merge commit; never `git rebase`, never reset, never
+   force). Resolve each conflict by reading **both** sides and the commit messages of the
+   base side: keep the behaviour of both. Never pick a side wholesale, never delete the
+   other side's tests to make yours pass.
+3. Run the validation from repo.md until it passes (Prepare too). Commit the merge. Never
+   push; the orchestrator does.
+4. First line of `sync-<n>/build.md` is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`. Then:
+   conflicting files and how each was resolved, validation results (real output), and
+   anything you changed that is not a pure merge.
+
+Answer `SYNC: NEEDS-HUMAN` (abort with `git merge --abort`, leave the branch as it was)
+when: the base already fixes the same issue in another way (say which commit/MR; the job
+is probably superseded), both sides change the same behaviour so that a merge needs a
+decision, the conflict is in a file the job should not have touched, or the validation
+fails after a merge you cannot fix without changing the job's intent.
+
 ## Write `round-N/build.md`
 - **Summary**: what was built.
 - **Changes**: one line per file.

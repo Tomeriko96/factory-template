@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Mechanical checks before the approver, so it only has to judge.
+
+  .factory/precheck <job-id> [<round>]
+
+Reads .factory/jobs/<job-id>/ (job.json, spec.md, round-N/*) and the job branch's diff
+against its base, writes <job>/precheck.md and prints it. First line is
+`PRECHECK: CLEAN` or `PRECHECK: ISSUES`; exit 0 either way (the orchestrator reads the line).
+For a `"mode": "docs"` job there are no reviews: instead build.md must contain a `## PR`
+section and every changed file must be a documentation path (`limits.docs_globs` in
+config.json, default below); if that is the only problem the first line is
+`PRECHECK: NOT-DOCS` so the orchestrator can fall back to the light review.
+
+Checks (each failing one is listed under Issues):
+  - spec.md and round-N/build.md exist
+  - every round-N/review-*.md starts with `VERDICT: PASS`
+  - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue)
+  - the diff touches nothing under .factory/ or .claude/
+  - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
+  - the diff is not huge (> 40 files or > 1500 changed lines) and has no binary or > 1 MB file
+Also reported: files, lines, commits, [blocking] mentions per review (information only).
+"""
+import fnmatch, json, os, re, subprocess, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
+SECRET = re.compile(r"(^|/)(\.env(\..*)?|id_(rsa|ed25519|ecdsa)|.*\.(pem|key|p12|pfx|jks|kdbx)|"
+                    r"credentials(\.json)?|.*secret.*\.(ya?ml|json)|\.netrc|\.pgpass)$", re.I)
+DOCS_GLOBS = ["*.md", "*.mdx", "*.rst", "*.adoc", "*.txt", "docs/**", "LICENSE*", "mkdocs.yml"]
+MAX_FILES, MAX_LINES, MAX_BYTES = 40, 1500, 1_000_000
+
+
+def git(*args, cwd):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return r.stdout if r.returncode == 0 else None
+
+
+def is_doc(name, globs):
+    for g in globs:
+        if g.endswith("/**"):
+            if name.startswith(g[:-2]):
+                return True
+        elif fnmatch.fnmatch(name, g) or fnmatch.fnmatch(os.path.basename(name), g):
+            return True
+    return False
+
+
+def first_line(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.readline().strip()
+    except OSError:
+        return None
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    job_id = sys.argv[1]
+    job_dir = os.path.join(HERE, "jobs", job_id)
+    with open(os.path.join(job_dir, "job.json")) as f:
+        job = json.load(f)
+    rnd = int(sys.argv[2]) if len(sys.argv) > 2 else int(job.get("round") or 1)
+    rdir = os.path.join(job_dir, f"round-{rnd}")
+    wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch")
+    issues, notes, not_docs = [], [], []
+    docs_mode = job.get("mode") == "docs"
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            globs = (json.load(f).get("limits") or {}).get("docs_globs") or DOCS_GLOBS
+    except (OSError, ValueError):
+        globs = DOCS_GLOBS
+
+    for p in (os.path.join(job_dir, "spec.md"), os.path.join(rdir, "build.md")):
+        if not os.path.exists(p):
+            issues.append(f"missing {os.path.relpath(p, job_dir)}")
+
+    reviews = sorted(f for f in os.listdir(rdir) if f.startswith("review-") and f.endswith(".md")) if os.path.isdir(rdir) else []
+    if docs_mode:
+        build = os.path.join(rdir, "build.md")
+        if os.path.exists(build) and not re.search(r"^## PR\b", open(build, errors="replace").read(), re.M):
+            issues.append("build.md has no '## PR' section")
+    elif not reviews:
+        issues.append(f"no reviews in round-{rnd}")
+    info = []
+    for f in reviews:
+        fl = first_line(os.path.join(rdir, f)) or ""
+        if fl != "VERDICT: PASS":
+            issues.append(f"{f}: first line is {fl!r}, not 'VERDICT: PASS'")
+        text = open(os.path.join(rdir, f), errors="replace").read()
+        info.append(f"{f[7:-3]} {text.count('[blocking]')}b/{text.count('[non-blocking]')}nb")
+
+    audit = os.path.join(rdir, "review-audit.md")
+    if os.path.exists(audit):
+        for line in open(audit, errors="replace"):
+            if line.lstrip().startswith("|") and "---" not in line:
+                if "❌" in line or "⏭" in line:
+                    issues.append("audit row not confirmed: " + re.sub(r"\s+", " ", line.strip())[:140])
+                elif "⚠" in line:
+                    notes.append("audit deviation: " + re.sub(r"\s+", " ", line.strip())[:140])
+
+    files = lines = 0
+    commits = "?"
+    if wt and base and branch and os.path.isdir(wt):
+        numstat = git("diff", "--numstat", f"{base}...{branch}", cwd=wt)
+        if numstat is None:
+            issues.append(f"cannot diff {base}...{branch} in {wt}")
+        else:
+            for row in numstat.splitlines():
+                a, d, name = row.split("\t", 2)
+                files += 1
+                if a == "-":
+                    issues.append(f"binary file in diff: {name}")
+                else:
+                    lines += int(a) + int(d)
+                if docs_mode and not is_doc(name, globs):
+                    not_docs.append(name)
+                if name.startswith((".factory/", ".claude/")):
+                    issues.append(f"factory/claude file in diff: {name}")
+                if SECRET.search(name):
+                    issues.append(f"secret-looking file in diff: {name}")
+                size = git("cat-file", "-s", f"{branch}:{name}", cwd=wt)
+                if size and size.strip().isdigit() and int(size) > MAX_BYTES:
+                    issues.append(f"file over 1 MB in diff: {name}")
+            if files > MAX_FILES or lines > MAX_LINES:
+                issues.append(f"large diff: {files} files, {lines} changed lines")
+        commits = (git("rev-list", "--count", f"{base}..{branch}", cwd=wt) or "?").strip()
+    else:
+        issues.append("worktree, base or branch missing in job.json / on disk")
+
+    if not_docs:
+        issues.append("not documentation: " + ", ".join(not_docs[:8]) + (" …" if len(not_docs) > 8 else ""))
+    verdict = "CLEAN" if not issues else "NOT-DOCS" if docs_mode and len(issues) == 1 and not_docs else "ISSUES"
+    out = [f"PRECHECK: {verdict}", "",
+           f"Job {job_id}, round {rnd}: {files} files, {lines} changed lines, {commits} commits.",
+           "Reviews: " + (", ".join(info) or "none"), "", "## Issues"]
+    out += [f"- {i}" for i in issues] or ["None."]
+    out += ["", "## Notes"] + ([f"- {n}" for n in notes] or ["None."])
+    text = "\n".join(out) + "\n"
+    with open(os.path.join(job_dir, "precheck.md"), "w") as f:
+        f.write(text)
+    print(text, end="")
+
+
+if __name__ == "__main__":
+    main()

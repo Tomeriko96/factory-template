@@ -81,8 +81,8 @@ rm -rf "$repo/.claude/skills/factory"
 cp -R "$SRC/.claude/skills/factory" "$repo/.claude/skills/factory"
 rm -f "$repo"/.claude/agents/factory-*.md
 cp "$SRC"/.claude/agents/factory-*.md "$repo/.claude/agents/"
-cp "$SRC/.factory/shoot" "$SRC/.factory/serve" "$SRC/.factory/watch" "$SRC/.factory/heavy" "$repo/.factory/"
-chmod +x "$repo/.factory/shoot" "$repo/.factory/serve" "$repo/.factory/watch" "$repo/.factory/heavy"
+cp "$SRC/.factory/shoot" "$SRC/.factory/serve" "$SRC/.factory/watch" "$SRC/.factory/heavy" "$SRC/.factory/guard" "$SRC/.factory/precheck" "$repo/.factory/"
+chmod +x "$repo/.factory/shoot" "$repo/.factory/serve" "$repo/.factory/watch" "$repo/.factory/heavy" "$repo/.factory/guard" "$repo/.factory/precheck"
 [ -f "$repo/.factory/backlog.md" ] || cp "$SRC/.factory/backlog.md" "$repo/.factory/"
 git -C "$TEMPLATE" describe --tags --always --dirty > "$repo/.factory/VERSION" 2>/dev/null \
   || echo unknown > "$repo/.factory/VERSION"

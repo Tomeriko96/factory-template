@@ -3,6 +3,12 @@ name: factory-reviewer-audit
 description: Independent audit. Re-measures every claim in build.md and every acceptance criterion, claim against measurement. Writes round-N/review-audit.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: audit
@@ -78,7 +84,8 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
   confirmed · ⏭️ = not measurable here (say why; does not count as confirmed).
 - **Findings**: numbered, each `[blocking]` or `[non-blocking]` + `path:line` +
   problem + impact + fix + the table row. `None.` if empty. A ❌ on an acceptance
-  criterion or on a claim in build.md is always blocking. A ⏭️ on an acceptance
+  criterion or on a claim in build.md is always blocking, except a size or shape limit
+  (diff lines, file count): report it, but as `[non-blocking]`. A ⏭️ on an acceptance
   criterion is blocking if there is no other way to verify it.
 - **Withdrawn**: earlier findings that turned out to be measurement artefacts, with
   evidence. `None.` if empty.

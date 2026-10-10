@@ -19,6 +19,7 @@ Then, in a Claude Code session in that repo (sonnet is enough for the orchestrat
 ```text
 /factory <feature>              full loop
 /factory --light <feature>      small change: code review (+ security/privacy if touched)
+/factory --docs <feature>       documentation only: one carry-out step, no reviewers
 /factory issue <nr> | next      from an issue (trusted authors only) or .factory/backlog.md
 /factory approve|rework|resume|deliver <id>
 /factory status                 or live: .factory/watch [--tmux]
@@ -39,7 +40,7 @@ and re-run `factory-init` in each repo.
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
-                             heavy, watch, VERSION, jobs/, run/, cache/
+                             heavy, guard, precheck, watch, VERSION, jobs/, run/, cache/
 ```
 
 Job worktrees go to `../<repo>-worktrees/<job-id>`, outside the repo. Excluded files
@@ -56,6 +57,8 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 | `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start when one leaves those stages. |
 | `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it: a machine-wide set of `flock` slots (default cores/4, shared by all repos), `nice`/`ionice`, and `FACTORY_CPUS` for worker counts. `heavy status` shows holders and load. |
 | `heavy --cache -- <cmd>` | Validation runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree) and the reviewers, audit and approver get an instant `CACHE HIT`. Failures, dirty trees and new commits run for real. |
+| `.factory/guard` | A `PreToolUse` hook in every factory agent: a test, build, install or type-check command that is not run through `heavy` is refused with the fix in the message, so the limits do not depend on the agent remembering. Needs a trusted workspace (Claude Code runs project-agent hooks only after the trust dialog, in bypass mode too); `limits.guard: false` turns it off. |
+| `limits.open_prs` (default 5) | Jobs at `pr-open` before new ones wait: every merge makes the other open PRs conflict, and CI is the slow part (median 3-14 h from PR to merge). `watch` and `status` show open PRs, the oldest and failing pipelines; the factory never retries a pipeline. |
 | `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the 1-minute load is above `load_max` (default 1.25 × cores) before it spawns a spec-writer, builder or review wave. |
 
 Defaults need no configuration; override with `limits` in `config.json`
@@ -63,6 +66,25 @@ Defaults need no configuration; override with `limits` in `config.json`
 `FACTORY_LOAD_MAX`, `FACTORY_LOCK_DIR`. `.factory/watch` shows the load and active jobs
 against the cap. The audit also has bounds: at most 3 mutation checks, a suspect file at
 most twice, base comparisons only for the claim concerned.
+
+## Less work per job
+
+- **Docs mode:** `/factory --docs` has no spec-writer, reviewers or approver. A sonnet builder
+  makes the change and writes the PR text; `.factory/precheck` checks mechanically that the
+  diff only touches documentation (`limits.docs_globs`), has no secrets and is small. If it
+  touches anything else the job continues as `--light`.
+- **ux/ui only for UI diffs:** they start a server and a browser per round, and gave
+  `CHANGES` in 0 of 65 reviews. They now run only when the diff matches the repo's "UI paths"
+  (and in round 2+ only if they objected or UI files changed).
+- **Cheaper approver:** it was MERGE 37 times out of 37. `precheck` does the mechanical part
+  (all PASS, audit table has no ❌/⏭️, no secrets or factory files, diff size); the approver
+  now runs on sonnet to judge and write the PR body, and gets opus only when the precheck
+  reports issues or it is round 2+.
+- **Already done?** Before a job from an issue starts, the factory looks for an open PR/MR,
+  a branch or a base commit for that issue (`--force` overrides), and the spec-writer
+  can answer `SPEC: ALREADY-DONE`. Two earlier jobs ran for hours before the base turned out
+  to contain the same fix.
+- **No size limits as acceptance criteria:** "diff under N lines" is guidance, never blocking.
 
 ## Delivery
 
@@ -126,7 +148,9 @@ about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings b
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
 
-`heavy` (slots, cache, gate, signals, exit codes) is tested on its own, including four
-parallel callers on two slots. The agent prompts that use it, the queue and the load gate
-have not run in a real `/factory` session yet: watch the first run with `.factory/heavy
+`heavy` (slots, cache, gate, signals, exit codes), `guard` (35 allow/deny cases, and a
+real subagent run in a trusted project: `pytest` refused, `echo` allowed, also in bypass
+mode), `precheck` and `watch` are tested on their own. The agent prompts that use them, the
+queue, `--docs`, the already-done check and the closing of issues have not run in a real
+`/factory` session yet: watch the first run with `.factory/heavy
 status` and `.factory/watch`, and feed findings back here.

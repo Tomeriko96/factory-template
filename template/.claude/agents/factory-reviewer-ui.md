@@ -3,6 +3,12 @@ name: factory-reviewer-ui
 description: Visual UI review in the running app, with headless screenshots. Writes round-N/review-ui.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: ui

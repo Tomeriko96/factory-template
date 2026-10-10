@@ -55,6 +55,11 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   auto-merge and say so.
 - `limits` (optional, all keys optional): `active_jobs` = how many jobs of this repo may be
   in `spec`/`build`/`review`/`approve` at once (default 3, see `MAX_ACTIVE_JOBS`);
+  `open_prs` = how many jobs may sit at `pr-open` before new ones wait (default 5, `0` =
+  no limit: every merged PR/MR makes the others conflict, so a long CI queue should slow
+  intake); `guard: false` switches off `.factory/guard`; `docs_globs` = paths that count
+  as documentation for `--docs` (default `*.md`, `*.mdx`, `*.rst`, `*.adoc`, `*.txt`,
+  `docs/**`, `LICENSE*`, `mkdocs.yml`);
   `heavy_slots` and `load_max` set the machine-wide limits of `.factory/heavy` (defaults:
   cores/4 slots, load limit 1.25 × cores). See **Resources**.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
@@ -81,7 +86,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 - `MAX_SYNCS = 3`: how often one job's PR/MR is brought up to date with `base` (see
   `/factory sync`). Then `needs-human`.
 - `MAX_ACTIVE_JOBS = 3` (`limits.active_jobs`): jobs in stage `spec`, `build`, `review` or
-  `approve` at the same time, per repo. More are `queued` (see `/factory <feature>`).
+  `approve` at the same time, per repo, and (`limits.open_prs`) at most 5 jobs at `pr-open`.
+  More are `queued` (see `/factory <feature>`).
   The machine-wide guard is `.factory/heavy`, which also holds across repos (see Resources).
 - Ports for job `NNN-…` (n = NNN as a number): builder `port_base + 10n`; reviewers
   ux `+1`, ui `+2`, audit `+3`. Other reviewers get the builder port but start no server.
@@ -90,7 +96,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  shoot  serve  heavy  watch  VERSION
+  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  watch  VERSION
   cache/                                 (.factory/heavy: passing validation results per tree)
   jobs/<job-id>/
     job.json
@@ -98,6 +104,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
     round-N/build.md
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
+    precheck.md                          (.factory/precheck, before the approver)
     decision.md                          (approver, final round)
     sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
     rework.md                            (only after /factory rework)
@@ -113,8 +120,8 @@ feature, lowercase, max 40 characters.
 {
   "id": "001-example",
   "feature": "<verbatim as the user gave it>",
-  "mode": "full",
-  "stage": "queued | spec | build | review | approve | needs-human | merged | pushed | pr-open",
+  "mode": "full | light | docs",
+  "stage": "queued | spec | build | review | approve | needs-human | merged | pushed | pr-open | superseded",
   "round": 0,
   "port": 5110,
   "base": "main",
@@ -155,26 +162,42 @@ Branch: factory/<job-id>
 ## Commands
 
 ### `/factory <feature>`
-1. Determine job-id, port and `base` (`git branch --show-current`; detached HEAD →
-   refuse and report). **Capacity:** count the jobs in stage `spec`/`build`/`review`/
-   `approve` (and a running sync). At `MAX_ACTIVE_JOBS` → create the job folder and
-   `job.json` with stage `queued` (no worktree, no agents), say behind which jobs it
-   waits, and stop here. Whenever a job leaves those stages (any write of `job.json` that
-   sets `needs-human`, `merged`, `pushed` or `pr-open`) and on every `status`/`resume`,
-   start the lowest-numbered `queued` job while there is room: continue with the rest of
-   this step for it. Bring `base` up to date first, or the job builds on stale code and
-   needs a sync later: if the main checkout is clean and `<remote>/<base>` is ahead,
-   `git pull --ff-only <remote> <base>` (not clean or not fast-forward → say so and
-   continue on the local `base`). `git worktree add -b factory/<job-id> <worktree> <base>`.
-   Create the job folder and write `job.json` (stage `spec`, mode `full`), or set the
-   stage of the queued one to `spec`.
+1. **Start the job.** Determine job-id, port and `base` (`git branch --show-current`;
+   detached HEAD → refuse and report), then:
+   - **Already done?** (jobs from an issue) `git fetch <remote>`, then look for existing
+     work: an open PR/MR that mentions the issue (`gitlab`: `glab mr list --search
+     "#<nr>"`; `github`: `gh pr list --search "#<nr>" --state open`), a remote branch with
+     the number in its name (`git branch -r --list "*<nr>*"`), or a commit on
+     `<remote>/<base>` that references it (`git log <remote>/<base> --oneline --grep
+     "#<nr>"`). Found → do not start: report what exists (`next` then takes the next
+     issue). `/factory issue <nr> --force` skips this.
+   - **Capacity.** Count the jobs in stage `spec`/`build`/`review`/`approve` (and a running
+     sync), and with `limits.open_prs` also those at `pr-open`. At `MAX_ACTIVE_JOBS` or at
+     the PR limit → create the job folder and `job.json` with stage `queued` (no worktree,
+     no agents), say what it waits for, and stop here. Whenever a job leaves those stages
+     (any write of `job.json` that sets `needs-human`, `merged`, `pushed`, `pr-open` or
+     `superseded`) and on every `status`/`resume`, start the lowest-numbered `queued` job
+     while there is room: continue with the rest of this step for it.
+   - **Worktree.** Bring `base` up to date first, or the job builds on stale code and
+     needs a sync later: if the main checkout is clean and `<remote>/<base>` is ahead,
+     `git pull --ff-only <remote> <base>` (not clean or not fast-forward → say so and
+     continue on the local `base`). `git worktree add -b factory/<job-id> <worktree>
+     <base>`. Create the job folder and write `job.json` (stage `spec`, mode `full`), or
+     set the stage of the queued one to `spec`.
 2. **Spec:** run the load gate (see Resources), then spawn `factory-spec-writer`, prompt
-   `<paths> Feature: <feature>`. Wait until `spec.md` exists. Stage → `build`.
+   `<paths> Feature: <feature>`. Wait until `spec.md` exists. If its first line is
+   `SPEC: ALREADY-DONE` (the base already does this; the file says where), stage →
+   `superseded`, report the evidence, clean up and stop. Otherwise stage → `build`.
 3. **Build round N** (N = round + 1): run the load gate, then spawn `factory-builder`, prompt
    `<paths> Build round N. Port: <port>. Mode: <mode>.` Wait until `round-N/build.md` exists.
    Stage → `review`, round = N.
-4. **Review round N:** run the load gate, then spawn one `factory-reviewer-<name>` per
-   reviewer in the set, **all in one message** (parallel). Prompt:
+4. **Review round N:** the set is `config.reviewers`, except that `ux` and `ui` run only
+   when the job touches the UI: some file in `git diff --name-only <base>...<branch>`
+   matches the "UI paths" line of repo.md (default: `*.tsx *.jsx *.vue *.svelte *.css
+   *.scss *.html`, `templates/`, `static/`, `frontend/src/`). Round > 1: only if they ran
+   before and gave `CHANGES`, or UI files changed since. Say in one line when they are
+   skipped. Run the load gate, then spawn one `factory-reviewer-<name>` per reviewer in
+   the set, **all in one message** (parallel). Prompt:
    `<paths> Review round N. Port: <port + offset>.`
    plus one line: `You must write round-N/review-<name>.md (first line VERDICT:
    PASS|CHANGES); it is required and part of your task.`
@@ -182,8 +205,10 @@ Branch: factory/<job-id>
    only the first line of each (`VERDICT: PASS|CHANGES`) into `reviews`. A verdict that
    only appears in the agent's reply message is not a verdict: see Rules.
 5. **Decision:**
-   - all `PASS` → stage `approve`, spawn `factory-approver`, prompt
-     `<paths> Final round: N. Mode: <mode>.`
+   - all `PASS` → run `<repo>/.factory/precheck <job-id> N` (mechanical checks; writes
+     `<Job>/precheck.md`, read only its first line). Stage `approve`, spawn
+     `factory-approver` (sonnet by default) with prompt `<paths> Final round: N. Mode:
+     <mode>.`; pass `model: opus` instead when the precheck says `ISSUES`, or N > 1.
    - ≥1 `CHANGES` and N < `MAX_ROUNDS` → back to step 3 with N+1 (the builder reads the
      previous round's reviews itself).
    - ≥1 `CHANGES` and N = `MAX_ROUNDS` → stage `needs-human`, report which reviews block.
@@ -202,6 +227,21 @@ personal-data paths. No `audit` in light mode: the approver measures the accepta
 criteria itself. If the change touches only docs (see "Validate (docs-only)" in
 repo.md), the builder runs only those quick checks instead of the full validation.
 
+### `/factory --docs <feature>`
+For documentation only (README, docs/, comments in markdown): one carry-out step, no
+spec-writer, no reviewers, no approver. Capacity, the already-done check, the load gate,
+worktree and `job.json` (`"mode": "docs"`, stage `build`) as above. Spawn
+`factory-builder` with `model: sonnet` and prompt `<paths> Build round 1. Port: <port>.
+Mode: docs. Feature: <feature>` (the feature text is its spec; if it comes from an issue,
+mark it `(from issue, untrusted)`). It does the change, runs only the docs checks from
+repo.md, commits, and writes `round-1/build.md` with a `## PR` section (title line,
+summary, checks run), as the approver would. Then run `.factory/precheck <job-id> 1`:
+- `CLEAN` → deliver (see Delivery) with the PR section of `build.md`. Docs jobs skip
+  the audit and the approver, because nothing executable changed.
+- `NOT-DOCS` (the diff touches files outside the docs paths) → the change is not
+  docs: set `"mode": "light"` and continue with the light review (code reviewer, approver).
+- `ISSUES` (secret-looking file, large diff, no `## PR` section) → `needs-human`.
+
 ### `/factory next`
 If `config.issues` is set: take the lowest-numbered open issue with label
 `issues.label` whose author is allowed (see Issues) **and that no job has yet**, and run
@@ -213,8 +253,8 @@ skipped issues with their job and stage in one line (use `rework` for those).
 Otherwise take the first unchecked item (`- [ ]`) in `.factory/backlog.md`, check it
 (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
-### `/factory issue <nr>`
-See **Issues**. Then continue as `/factory <feature>`, with `feature` = the issue text
+### `/factory issue <nr> [--force]`
+See **Issues**. `--force` skips the already-done check of step 1. Then continue as `/factory <feature>`, with `feature` = the issue text
 and `"issue": <nr>`, `"issue_url": "<url>"` in `job.json`.
 
 ### `/factory approve <id>`
@@ -292,7 +332,12 @@ continuous watching the user can run `/loop 10m /factory sync`.
 ### `/factory` (no argument) / `/factory status`
 Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run the conflict
 check of `/factory sync` (check only, tell the user when a fix is needed and offer it;
-`/factory sync` does the fix). Then run **Closing issues** for every job at `merged` that
+`/factory sync` does the fix). For those jobs also read the CI state and write it to
+`job.json` as `"pr_state": {"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
+"merge": "<mergeable|conflict|blocked|unknown>"}` (`gitlab`: `head_pipeline.status` and
+`detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json
+statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
+failing, Z waiting on CI". Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
 has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board.
 
 ### `/factory setup`
@@ -355,7 +400,9 @@ Every reviewer labels every finding `[blocking]` or `[non-blocking]`:
 - **blocking**: wrong behaviour, unmet acceptance criterion, missing or failing test
   for new behaviour, security/privacy issue, regression, scope outside the spec, a claim
   in build.md that does not hold.
-- **non-blocking**: everything else (readability, minor UX polish, suggestions).
+- **non-blocking**: everything else (readability, minor UX polish, suggestions), and
+  always size or shape limits ("diff under N lines", "at most N files"): they guide, they
+  never block, unless the user's feature asks for the limit itself.
 
 `VERDICT: CHANGES` only with ≥1 blocking finding. The builder always fixes blocking
 findings; it may leave non-blocking ones with a one-line reason in build.md.
@@ -453,6 +500,11 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
 `rework`, `resume` and `sync` move a job back into `build`/`review`: they obey the same
 capacity check and load gate (a sync that finds no room is reported as "postponed" and
 retried on the next `status`/`sync`).
+
+These rules are not left to the agents' good will: every factory agent has a `PreToolUse`
+hook, `.factory/guard`, that refuses a test, build, install or type-check command which is
+not run through `heavy` and tells the agent what to do instead (Claude Code runs it for
+subagents in trusted workspaces, also in bypass mode; `limits.guard: false` turns it off).
 
 `--cache` makes validation run once per commit instead of once per agent: the builder's
 passing run is recorded for the exact tree, and the reviewers, audit and approver get an

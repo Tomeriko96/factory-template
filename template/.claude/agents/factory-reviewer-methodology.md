@@ -3,6 +3,12 @@ name: factory-reviewer-methodology
 description: Methodology review for funding (bekostiging) and indicator definitions. Writes round-N/review-methodology.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: methodology

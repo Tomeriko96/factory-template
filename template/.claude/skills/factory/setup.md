@@ -70,8 +70,9 @@ Reviewer set (`config.reviewers`):
 onderwijsnummer, row-level uploads, pseudonymisation), add `privacy`, also for A, C, D
 and E. When in doubt: add it and tell the user.
 
-Models live in the agent frontmatter (builder, approver, security, privacy, llm-safety
-and audit on opus; the rest on sonnet). Do not change them. Advise the user to run the
+Models live in the agent frontmatter (builder, security, privacy, llm-safety and audit on
+opus; approver and the rest on sonnet; the orchestrator raises the approver to opus when
+the precheck finds issues). Do not change them. Advise the user to run the
 `/factory` sessions themselves on sonnet.
 
 **Ports:** `port_base` 5100 unless the scan found a conflict; then pick another base
@@ -97,10 +98,13 @@ default `false`; it needs `draft: false` and then also decides on the merge, so 
 the user's explicit yes). Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
-**Limits:** write `"limits": {"active_jobs": 3}`. On a machine with fewer than 8 cores use
+**Limits:** write `"limits": {"active_jobs": 3, "open_prs": 5}`. On a machine with fewer than 8 cores use
 2, with 16 or more use 4. Leave `heavy_slots` and `load_max` out (defaults: cores/4 slots, load
 limit 1.25 × cores); set them only if the user says the machine is shared with other
-heavy work. Run `.factory/heavy status` and tell the user the numbers it shows.
+heavy work. Run `.factory/heavy status` and tell the user the numbers it shows. `open_prs` is the number
+of PRs/MRs that may be open at once before new jobs wait (every merge makes the others
+conflict; `0` = no limit, use it when `delivery.mode` is not `pr`). Leave `guard` and
+`docs_globs` out unless the user wants the hook off or the repo keeps docs elsewhere.
 
 **Validation commands** run through `.factory/heavy --cache` by every agent, verbatim, so
 write them as the exact strings agents should paste, one per line, each a single
@@ -146,7 +150,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
-  "limits": { "active_jobs": 3 }
+  "limits": { "active_jobs": 3, "open_prs": 5 }
 }
 ```
 
@@ -169,6 +173,7 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Serve (reviewers, per port): <command with {port}> · ready path: <e.g. /health>
   (agents run it as `.factory/serve start <port> --cwd <worktree> --ready <path> -- <command>`)
 - Runtime files: <how the app gets .env/db/data from the main checkout, by path only>
+- UI paths (ux/ui reviewers run only when the diff touches one): <globs, e.g. `frontend/src/**`, `*.tsx`, `templates/`>
 - Pages to screenshot by default: <paths, e.g. / /upload>
 - Conventions: <commit style, code style, anything agents must respect>
 - Commits: in English, following the repo's commit convention; issues as `Refs #N`.

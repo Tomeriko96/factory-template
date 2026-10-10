@@ -3,6 +3,12 @@ name: factory-reviewer-security
 description: Security review of the job diff. Writes round-N/review-security.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: security

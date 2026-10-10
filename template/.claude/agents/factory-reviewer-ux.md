@@ -3,6 +3,12 @@ name: factory-reviewer-ux
 description: UX review in the running app: walks the spec's flows with headless Playwright. Writes round-N/review-ux.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: ux

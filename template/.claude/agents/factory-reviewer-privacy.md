@@ -3,6 +3,12 @@ name: factory-reviewer-privacy
 description: Privacy review for repos with personal data (BSN, PGN, onderwijsnummer). Writes round-N/review-privacy.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 ---
 
 # Reviewer: privacy

@@ -11,7 +11,7 @@ run:    waits for a free slot, then runs <command> at low priority (nice 10, idl
         (one lock directory for every repo and every factory session on this machine), so
         parallel jobs, parallel reviewers and two repos together never run more than N
         heavy commands at once. Before taking a slot it also waits while the 1-minute load
-        average is above the load limit. The command sees FACTORY_CPUS (its share of the
+        average is above the load limit. The command sees FACTORY_CPUS (its share of 75% of the
         cores): pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
         Exit 75: no slot within --wait-max (default 1800s). A tool call that times out
         before that kills this wrapper and the command with it; for long commands run
@@ -30,11 +30,12 @@ Limits, in order of precedence: flags, env (FACTORY_HEAVY_SLOTS, FACTORY_LOAD_MA
 FACTORY_LOCK_DIR), `limits` in .factory/config.json (heavy_slots, load_max), defaults
 (slots = cores/4, at least 1; load limit = 1.25 × cores).
 """
-import fcntl, hashlib, json, os, shutil, signal, subprocess, sys, time
+import ctypes, fcntl, hashlib, json, os, shutil, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 CPUS = os.cpu_count() or 1
 POLL = 0.5
+HEADROOM = 0.75  # heavy commands share at most this fraction of the cores
 
 
 def limits():
@@ -235,7 +236,7 @@ def cmd_run(argv):
         say(f"no free slot within {wait_max}s")
         return 75
 
-    env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(max(1, CPUS // slots)))
+    env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(max(1, int(CPUS * HEADROOM) // slots)))
     prefix = []
     if shutil.which("ionice"):
         prefix = ["ionice", "-c2", "-n7"]
@@ -247,9 +248,19 @@ def cmd_run(argv):
     if key:
         os.makedirs(cache, exist_ok=True)
         log = open(os.path.join(cache, key + ".log"), "w")
+    def child_setup():
+        os.nice(10)
+        # If this wrapper is killed (a tool timeout sends SIGKILL), take the command down too
+        try:
+            ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG
+        except (OSError, AttributeError):
+            pass
+
     try:
+        # The slot lock is inherited by the whole process tree: the slot stays taken as long
+        # as any descendant runs, even if the wrapper itself is gone.
         proc = subprocess.Popen(prefix + command, env=env, start_new_session=True,
-                                preexec_fn=lambda: os.nice(10),
+                                pass_fds=(lock.fileno(),), preexec_fn=child_setup,
                                 stdout=subprocess.PIPE if log else None,
                                 stderr=subprocess.STDOUT if log else None)
     except OSError as e:

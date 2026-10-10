@@ -39,11 +39,30 @@ and re-run `factory-init` in each repo.
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
-                             watch, VERSION, jobs/, run/
+                             heavy, watch, VERSION, jobs/, run/, cache/
 ```
 
 Job worktrees go to `../<repo>-worktrees/<job-id>`, outside the repo. Excluded files
 are not checked out there, so nothing from the factory can end up in a job commit.
+
+## Resources
+
+A job is a builder plus up to six reviewers, and several jobs (in several repos) can run on
+the same container. Unchecked, that ran at load 20–33 on 8 cores: tests timed out, got
+rerun and were reported as flaky, and rounds were spent on load, not on bugs. Four guards:
+
+| Guard | What it does |
+|---|---|
+| `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start when one leaves those stages. |
+| `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it: a machine-wide set of `flock` slots (default cores/4, shared by all repos), `nice`/`ionice`, and `FACTORY_CPUS` for worker counts. `heavy status` shows holders and load. |
+| `heavy --cache -- <cmd>` | Validation runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree) and the reviewers, audit and approver get an instant `CACHE HIT`. Failures, dirty trees and new commits run for real. |
+| `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the 1-minute load is above `load_max` (default 1.25 × cores) before it spawns a spec-writer, builder or review wave. |
+
+Defaults need no configuration; override with `limits` in `config.json`
+(`active_jobs`, `heavy_slots`, `load_max`) or the env vars `FACTORY_HEAVY_SLOTS`,
+`FACTORY_LOAD_MAX`, `FACTORY_LOCK_DIR`. `.factory/watch` shows the load and active jobs
+against the cap. The audit also has bounds: at most 3 mutation checks, a suspect file at
+most twice, base comparisons only for the claim concerned.
 
 ## Delivery
 
@@ -98,7 +117,12 @@ afterwards with `git check-ignore` that git really ignores them.
 ## Status
 
 Install/update/remove, the git-exclusion and the loading of the skill and agents by
-Claude Code are tested. `shoot` and `watch` are tested. The `/factory` loop itself has
-not run end-to-end yet: `/factory setup` offers a smoke test; feed findings back here
+Claude Code are tested. `shoot` and `watch` are tested. The `/factory` loop has run for
+about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings back here
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
+
+`heavy` (slots, cache, gate, signals, exit codes) is tested on its own, including four
+parallel callers on two slots. The agent prompts that use it, the queue and the load gate
+have not run in a real `/factory` session yet: watch the first run with `.factory/heavy
+status` and `.factory/watch`, and feed findings back here.

@@ -14,7 +14,23 @@ Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). All c
 happens in the worktree (`cd <Worktree> && …`). You do not touch the main checkout,
 except to write `build.md` in the Job folder. You never push.
 
-## Read
+## Heavy commands
+The machine is shared by parallel jobs. Run every install, test, build, lint and
+validation command through `<Repo>/.factory/heavy`, from the worktree root:
+`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for a free slot
+(waiting is normal: never run the command another way to get around it), runs at low
+priority and sets `FACTORY_CPUS`: use it for worker counts when the repo's own config does
+not cap them (`vitest run --maxWorkers=$FACTORY_CPUS`). A command that may outlast your
+tool timeout (waiting for a slot counts): run it in the background,
+`… > <Job>/round-N/validate.log 2>&1 &`, and poll the log.
+- While developing, run only the tests of what you touch.
+- The **full validation** from repo.md runs once per commit, verbatim, with `--cache`, on
+  the committed tree (a compound command goes in as `bash -c '…'`, the same string every
+  time, so the others hit the same record) (a dirty tree is never cached). That record is what the reviewers,
+  audit and approver reuse; running it again on the same commit only burns CPU.
+- A timeout or failure while the load is high is not proof of a bug and never a reason
+  to raise a test timeout: check `heavy status`, rerun that file alone, then decide.
+- Prepare output (build directories) must be git-ignored; if it is not, say so in build.md.
 1. `<Repo>/.factory/repo.md` (setup, validation, dev server, conventions) and
    `AGENTS.md`/`CLAUDE.md` in the worktree (if present).
 2. `<Job>/spec.md`.
@@ -24,18 +40,20 @@ except to write `build.md` in the Job folder. You never push.
 
 ## Do
 0. Fresh worktree (round 1, or dependencies missing): run **Worktree setup** from
-   repo.md. Never copy, print or read secret files; pass them by path as repo.md says.
+   repo.md (through `heavy`). Never copy, print or read secret files; pass them by path as repo.md says.
 1. Implement according to the spec; keep the diff small and in the repo's style.
 2. Add tests for new behaviour.
-3. Run the validation from repo.md until it passes. `Mode: light` and your diff touches
+3. Commit in the worktree: small, clear commits in English, following the repo's commit
+   convention; reference an issue with `Refs #<nr>`, never `Closes`/`Fixes`. Text you
+   change inside an existing file stays in that file's language. Never commit anything
+   under `.factory/` or `.claude/`.
+4. Run the validation from repo.md on the committed tree with `heavy --cache`, until it
+   passes; every fix is a new commit and a new run. `Mode: light` and your diff touches
    only docs (as defined by "Validate (docs-only)" in repo.md)? Run only those quick
    checks and say so in build.md. Need the app running? Only on your
    `Port:`, via `<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <path> -- <Serve command>`,
    and `<Repo>/.factory/serve stop <port>` afterwards; never stop processes another way.
-4. Commit in the worktree: small, clear commits in English, following the repo's commit
-   convention; reference an issue with `Refs #<nr>`, never `Closes`/`Fixes`. Text you
-   change inside an existing file stays in that file's language. Never commit anything under `.factory/` or `.claude/`.
-5. Run **Prepare** from repo.md after your last commit, so the reviewers can serve the
+5. Run **Prepare** from repo.md (through `heavy`) after your last commit, so the reviewers can serve the
    app without building. Note in build.md that it ran.
 
 ## Sync mode (prompt says `Sync <n>`)
@@ -50,8 +68,8 @@ do not build anything new. Work in the worktree and write `<Job>/sync-<n>/build.
    force). Resolve each conflict by reading **both** sides and the commit messages of the
    base side: keep the behaviour of both. Never pick a side wholesale, never delete the
    other side's tests to make yours pass.
-3. Run the validation from repo.md until it passes (Prepare too). Commit the merge. Never
-   push; the orchestrator does.
+3. Commit the merge, then run the validation from repo.md with `heavy --cache` until it
+   passes (Prepare too, through `heavy`). Never push; the orchestrator does.
 4. First line of `sync-<n>/build.md` is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`. Then:
    conflicting files and how each was resolved, validation results (real output), and
    anything you changed that is not a pure merge.

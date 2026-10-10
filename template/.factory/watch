@@ -35,7 +35,24 @@ def age(iso):
     except Exception:
         return "-"
 
-COL = {"needs-human": "\033[1;31m", "merged": "\033[32m", "pr-open": "\033[32m", "pushed": "\033[32m", "review": "\033[33m",
+ACTIVE = ("spec", "build", "review", "approve")
+
+def header(jobs):
+    """One line: machine load and active jobs against the cap (limits in config.json)."""
+    try:
+        load = float(open("/proc/loadavg").read().split()[0])
+    except (OSError, ValueError):
+        load = os.getloadavg()[0]
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            cap = (json.load(f).get("limits") or {}).get("active_jobs", 3)
+    except (OSError, ValueError):
+        cap = 3
+    act = sum(1 for j in jobs if j.get("stage") in ACTIVE)
+    queued = sum(1 for j in jobs if j.get("stage") == "queued")
+    return f"load {load:.1f} on {os.cpu_count()} cores · active jobs {act}/{cap}" + (f" · {queued} queued" if queued else "")
+
+COL = {"queued": "\033[2m", "needs-human": "\033[1;31m", "merged": "\033[32m", "pr-open": "\033[32m", "pushed": "\033[32m", "review": "\033[33m",
        "build": "\033[36m", "approve": "\033[35m", "spec": "\033[34m"}
 
 def paint(text, stage):
@@ -61,7 +78,7 @@ def render(jobs):
     if not jobs:
         return "factory board: no jobs yet"
     sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
-    lines = [f"{'JOB':<32} {'MODE':<5} {'STAGE':<12} {'RND':>3} {'PORT':>5}  {'REVIEWS':<38} UPDATED"]
+    lines = [header(jobs), f"{'JOB':<32} {'MODE':<5} {'STAGE':<12} {'RND':>3} {'PORT':>5}  {'REVIEWS':<38} UPDATED"]
     for j in jobs:
         revs = j.get("reviews") or {}
         r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"

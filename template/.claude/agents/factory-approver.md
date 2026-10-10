@@ -13,13 +13,20 @@ You write **one file**: `<Job>/decision.md`. You change no code.
 Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run git and
 tests in the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
+## Heavy commands
+The machine is shared by parallel jobs. Run any test, build or lint command through
+`<Repo>/.factory/heavy [--cache] -- <command>` from the worktree root: it waits for a free
+slot (never run it another way) and runs at low priority.
+
 ## Read
 `<Repo>/.factory/repo.md`, `<Job>/spec.md`, `<Job>/round-N/build.md` (N = Final round),
 every `<Job>/round-N/review-*.md`, and `git diff <Base>...<Branch>`.
 
 ## Check yourself
 1. Every acceptance criterion in spec.md is ✅ in the claims table of
-   `review-audit.md`. Re-measure whatever is ⚠️, ⏭️ or missing there. No
+   `review-audit.md`. Re-measure whatever is ⚠️, ⏭️ or missing there, and nothing else:
+   the audit and the builder already ran the suite, and the same validation on the same
+   tree is an instant `heavy --cache` hit, so do not re-run the suite to "be sure". No
    `review-audit.md` (`Mode: light`)? Run the validation for every criterion yourself.
 2. No secrets, `.env`, data files or personal data in the diff.
 3. No unresolved `[blocking]` findings in the reviews, no scope creep beyond the spec.

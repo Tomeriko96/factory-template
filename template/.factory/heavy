@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Run heavy commands (tests, builds, installs, lints) without flattening the machine.
+
+  .factory/heavy [--cache] [--label NAME] [--slots N] [--wait-max SECS] -- <command…>
+  .factory/heavy gate [--max LOAD] [--wait-max SECS]
+  .factory/heavy status
+  .factory/heavy clean [<worktree>…]
+
+run:    waits for a free slot, then runs <command> at low priority (nice 10, idle-ish I/O)
+        in the current directory and exits with its exit code. The slots are host-wide
+        (one lock directory for every repo and every factory session on this machine), so
+        parallel jobs, parallel reviewers and two repos together never run more than N
+        heavy commands at once. Before taking a slot it also waits while the 1-minute load
+        average is above the load limit. The command sees FACTORY_CPUS (its share of the
+        cores): pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
+        Exit 75: no slot within --wait-max (default 1800s). A tool call that times out
+        before that kills this wrapper and the command with it; for long commands run
+        `.factory/heavy … > log 2>&1 &` and poll the log.
+--cache only for a command that is a pure check (validation, tests): when the working tree
+        is clean and the same command already passed on the exact same tree, print that
+        result and exit 0 without running anything. Only passes are cached; a dirty tree,
+        a new commit or a different command runs for real. The record is written by this
+        script (tree hash, time, full log in .factory/cache/), not by an agent's own words.
+gate:   block until the load average is at or below the limit (or --wait-max, default
+        600s, then continue with a warning). For the orchestrator, before spawning work.
+clean:  delete cached results of the given worktrees (no argument: all). Run when a job ends.
+status: slots in use (who, where, since), load, limits, cached results.
+
+Limits, in order of precedence: flags, env (FACTORY_HEAVY_SLOTS, FACTORY_LOAD_MAX,
+FACTORY_LOCK_DIR), `limits` in .factory/config.json (heavy_slots, load_max), defaults
+(slots = cores/4, at least 1; load limit = 1.25 × cores).
+"""
+import fcntl, hashlib, json, os, shutil, signal, subprocess, sys, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
+CPUS = os.cpu_count() or 1
+POLL = 0.5
+
+
+def limits():
+    cfg = {}
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            cfg = (json.load(f).get("limits") or {})
+    except (OSError, ValueError):
+        pass
+    slots = int(os.environ.get("FACTORY_HEAVY_SLOTS") or cfg.get("heavy_slots") or max(1, CPUS // 4))
+    load = float(os.environ.get("FACTORY_LOAD_MAX") or cfg.get("load_max") or CPUS * 1.25)
+    return max(1, slots), load
+
+
+def lock_dir():
+    d = os.environ.get("FACTORY_LOCK_DIR") or f"/tmp/factory-heavy-{os.getuid()}"
+    os.makedirs(d, mode=0o777, exist_ok=True)
+    return d
+
+
+def load1():
+    try:
+        with open("/proc/loadavg") as f:
+            return float(f.read().split()[0])
+    except (OSError, ValueError):
+        return os.getloadavg()[0]
+
+
+def say(msg):
+    print(f"heavy: {msg}", file=sys.stderr, flush=True)
+
+
+def git(*args, cwd=None):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def wait_for_load(load_max, wait_max):
+    """Wait while the machine is overloaded. Gives up (returns False) after wait_max."""
+    end, last = time.time() + wait_max, 0
+    while load1() > load_max:
+        if time.time() > end:
+            return False
+        if time.time() - last > 30:
+            say(f"load {load1():.1f} > {load_max:.1f}, waiting")
+            last = time.time()
+        time.sleep(POLL)
+    return True
+
+
+def cmd_gate(argv):
+    _, load_max = limits()
+    wait_max = 600
+    while argv:
+        a = argv.pop(0)
+        if a == "--max":
+            load_max = float(argv.pop(0))
+        elif a == "--wait-max":
+            wait_max = int(argv.pop(0))
+        else:
+            sys.exit(f"gate: unknown option {a}")
+    ok = wait_for_load(load_max, wait_max)
+    print(f"load {load1():.1f} (limit {load_max:.1f}, {CPUS} cores)"
+          + ("" if ok else f" — still above the limit after {wait_max}s, continuing anyway"))
+
+
+def read_holder(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def cmd_status(argv):
+    slots, load_max = limits()
+    d = lock_dir()
+    print(f"load {load1():.1f} · limit {load_max:.1f} · {CPUS} cores · {slots} heavy slot(s) · locks in {d}")
+    for i in range(slots):
+        p = os.path.join(d, f"slot-{i}.lock")
+        free = True
+        if os.path.exists(p):
+            with open(p, "a+") as f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    free = False
+        if free:
+            print(f"  slot {i}: free")
+        else:
+            h = read_holder(p)
+            since = int(time.time() - h.get("since", time.time()))
+            print(f"  slot {i}: pid {h.get('pid', '?')} {since}s · {h.get('cwd', '?')} · {h.get('cmd', '?')[:90]}")
+    cache = os.path.join(HERE, "cache")
+    n = len([f for f in os.listdir(cache) if f.endswith(".json")]) if os.path.isdir(cache) else 0
+    print(f"  cached passing results in this repo: {n}")
+
+
+def cmd_clean(argv):
+    cache = os.path.join(HERE, "cache")
+    want = [os.path.abspath(a) for a in argv]
+    n = 0
+    for name in os.listdir(cache) if os.path.isdir(cache) else []:
+        if not name.endswith(".json"):
+            continue
+        p = os.path.join(cache, name)
+        rec = read_holder(p)
+        if want and rec.get("cwd") not in want:
+            continue
+        for q in (p, p[:-5] + ".log"):
+            try:
+                os.remove(q)
+            except OSError:
+                pass
+        n += 1
+    print(f"removed {n} cached result(s)")
+
+
+def take_slot(slots, wait_max, label):
+    """Block until a slot lock is free; returns the open, locked file. None after wait_max."""
+    d = lock_dir()
+    end, last = time.time() + wait_max, 0
+    while True:
+        for i in range(slots):
+            f = open(os.path.join(d, f"slot-{i}.lock"), "a+")
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                f.close()
+                continue
+            f.seek(0)
+            f.truncate()
+            json.dump({"pid": os.getpid(), "cwd": os.getcwd(), "cmd": label, "since": time.time()}, f)
+            f.flush()
+            return f
+        if time.time() > end:
+            return None
+        if time.time() - last > 30:
+            say(f"all {slots} heavy slots busy, waiting ({label[:60]})")
+            last = time.time()
+        time.sleep(POLL)
+
+
+def tree_key(command):
+    """Cache key for `command` on the current tree, or None when not cacheable."""
+    tree = git("rev-parse", "HEAD^{tree}")
+    if not tree or git("status", "--porcelain") != "":
+        return None, None
+    h = hashlib.sha256(json.dumps([tree, os.getcwd(), command]).encode()).hexdigest()[:24]
+    return h, tree
+
+
+def cmd_run(argv):
+    slots, load_max = limits()
+    use_cache, label, wait_max = False, None, 1800
+    while argv and argv[0] != "--":
+        a = argv.pop(0)
+        if a == "--cache":
+            use_cache = True
+        elif a == "--label":
+            label = argv.pop(0)
+        elif a == "--slots":
+            slots = max(1, int(argv.pop(0)))
+        elif a == "--wait-max":
+            wait_max = int(argv.pop(0))
+        else:
+            sys.exit(f"unknown option {a} (command goes after --)")
+    if argv and argv[0] == "--":
+        argv.pop(0)
+    if not argv:
+        sys.exit(__doc__.split("\n\n")[0])
+    command = argv
+    shown = label or " ".join(command)
+
+    key = tree = None
+    cache = os.path.join(HERE, "cache")
+    if use_cache:
+        key, tree = tree_key(command)
+        if key is None:
+            say("not cached: the working tree is dirty or this is not a git tree; running for real")
+        else:
+            rec_path = os.path.join(cache, key + ".json")
+            try:
+                with open(rec_path) as f:
+                    rec = json.load(f)
+                say(f"CACHE HIT: this command already passed on tree {tree[:12]} at {rec['finished']} "
+                    f"({rec['seconds']}s). Nothing was run. Full log: {rec['log']}. Last lines:")
+                with open(rec["log"], errors="replace") as f:
+                    sys.stdout.write("".join(f.readlines()[-15:]))
+                return 0
+            except (OSError, ValueError, KeyError):
+                pass
+
+    if not wait_for_load(load_max, wait_max):
+        say(f"load still above {load_max:.1f} after {wait_max}s; taking a slot anyway")
+    lock = take_slot(slots, wait_max, shown)
+    if lock is None:
+        say(f"no free slot within {wait_max}s")
+        return 75
+
+    env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(max(1, CPUS // slots)))
+    prefix = []
+    if shutil.which("ionice"):
+        prefix = ["ionice", "-c2", "-n7"]
+    if not shutil.which(command[0]):
+        say(f"cannot run {command[0]}: command not found")
+        return 127
+    started = time.time()
+    log = None
+    if key:
+        os.makedirs(cache, exist_ok=True)
+        log = open(os.path.join(cache, key + ".log"), "w")
+    try:
+        proc = subprocess.Popen(prefix + command, env=env, start_new_session=True,
+                                preexec_fn=lambda: os.nice(10),
+                                stdout=subprocess.PIPE if log else None,
+                                stderr=subprocess.STDOUT if log else None)
+    except OSError as e:
+        say(f"cannot run {command[0]}: {e}")
+        return 127
+
+    def forward(sig, _frame):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            pass
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, forward)
+
+    if log:
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            log.write(chunk.decode(errors="replace"))
+        log.close()
+    rc = proc.wait()
+    if rc < 0:
+        rc = 128 - rc
+    if key and rc == 0:
+        rec = {"cmd": command, "tree": tree, "cwd": os.getcwd(), "exit": 0,
+               "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "seconds": int(time.time() - started),
+               "log": os.path.join(cache, key + ".log")}
+        with open(os.path.join(cache, key + ".json"), "w") as f:
+            json.dump(rec, f)
+    elif key:
+        os.remove(os.path.join(cache, key + ".log"))
+    return rc
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    if argv[0] == "gate":
+        return cmd_gate(argv[1:]) or 0
+    if argv[0] == "clean":
+        return cmd_clean(argv[1:]) or 0
+    if argv[0] == "status":
+        return cmd_status(argv[1:]) or 0
+    return cmd_run(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

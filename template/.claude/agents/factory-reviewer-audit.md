@@ -19,6 +19,14 @@ run the app use the **Serve** command from repo.md on your `Port:`, via
 and stop it with `<Repo>/.factory/serve stop <port>`. Never build, install or write in the worktree (other reviewers serve it at the
 same time); never stop processes other than your own.
 
+## Heavy commands
+The machine is shared by parallel jobs and reviewers. Run every test, build, lint and
+install command through `<Repo>/.factory/heavy`, from the worktree root:
+`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for a free slot
+(waiting is normal: never run the command another way), runs at low priority and sets
+`FACTORY_CPUS` for worker counts. A command that may outlast your tool timeout: run it in
+the background with output to a log file in the Job folder and poll the log.
+
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),
 `<Job>/spec.md`, `<Job>/round-N/build.md`, `git log <Base>..<Branch>`,
@@ -28,11 +36,26 @@ same time); never stop processes other than your own.
 1. **Collect claims:** every statement in build.md (tests passed, counts, behaviour,
    "no breaking changes", resolved findings) and every acceptance criterion in spec.md.
 2. **Measure each claim yourself** with a command in the worktree. Repeat the exact
-   validation from build.md, and add an independent check where you can (other input,
-   an edge case). For claims like "no regression" or "same output", also measure on
-   `<Base>` via a temporary worktree
-   (`git -C <Repo> worktree add --detach /tmp/factory-<job-id>-base <Base>`) and clean
-   it up afterwards (`git -C <Repo> worktree remove --force /tmp/factory-<job-id>-base`).
+   validation from build.md **verbatim with `heavy --cache`** (a compound command as
+   `bash -c '…'`). On the same tree this is a
+   cache hit: the result was recorded by `heavy` itself (tree hash, time, full log), not
+   by the builder's words, so it is a valid measurement; put "cache hit, tree <12 chars>,
+   <time>" under Measured and do not run the suite a second time. If the builder's tree
+   differs from the branch head, or there is no hit, it runs for real. Then add an
+   independent check where you can (other input, an edge case). Keep these bounded:
+   - **Mutation checks** (remove the fix, see the new test fail): at most 3, only for
+     acceptance criteria, each running only the one test or file concerned.
+   - **Repeat runs** to look for flakiness: a suspect file at most twice, alone, never
+     the whole suite in a loop.
+   - **Base comparisons** ("no regression", "same output") only with the specific tests
+     or commands the claim is about, on `<Base>` via a temporary worktree
+     (`git -C <Repo> worktree add --detach /tmp/factory-<job-id>-base <Base>`), cleaned up
+     afterwards (`git -C <Repo> worktree remove --force /tmp/factory-<job-id>-base`).
+     Install dependencies there only through `heavy`; when the lockfiles are identical
+     (`git diff --quiet <Base> <Branch> -- <lockfiles>`) a Node `node_modules` may be
+     symlinked from the job worktree instead of reinstalled. Never symlink a Python
+     environment (editable installs would import the job's code, not `<Base>`'s).
+     Logs and scratch files go under `/tmp/factory-<job-id>-*` so they are cleaned up.
 3. **Look for what is missing:** spec behaviour without a test, code in the diff that no
    test exercises, files in the diff that build.md does not mention.
 4. **Distrust your own measurement.** If a measurement disagrees, first check whether it

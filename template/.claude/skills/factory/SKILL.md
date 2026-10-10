@@ -34,7 +34,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
-  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false }
+  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
+  "limits": { "active_jobs": 3 }
 }
 ```
 
@@ -50,6 +51,10 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   PR/MR, so the forge merges it itself once the required checks pass. Missing → `false`.
   Only meaningful with `draft: false` (a draft cannot merge); with both set, ignore the
   auto-merge and say so.
+- `limits` (optional, all keys optional): `active_jobs` = how many jobs of this repo may be
+  in `spec`/`build`/`review`/`approve` at once (default 3, see `MAX_ACTIVE_JOBS`);
+  `heavy_slots` and `load_max` set the machine-wide limits of `.factory/heavy` (defaults:
+  cores/4 slots, load limit 1.25 × cores). See **Resources**.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 
@@ -73,6 +78,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   output file. Then `needs-human`.
 - `MAX_SYNCS = 3`: how often one job's PR/MR is brought up to date with `base` (see
   `/factory sync`). Then `needs-human`.
+- `MAX_ACTIVE_JOBS = 3` (`limits.active_jobs`): jobs in stage `spec`, `build`, `review` or
+  `approve` at the same time, per repo. More are `queued` (see `/factory <feature>`).
+  The machine-wide guard is `.factory/heavy`, which also holds across repos (see Resources).
 - Ports for job `NNN-…` (n = NNN as a number): builder `port_base + 10n`; reviewers
   ux `+1`, ui `+2`, audit `+3`. Other reviewers get the builder port but start no server.
 
@@ -80,7 +88,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  shoot  watch  VERSION
+  config.json  repo.md  backlog.md  shoot  serve  heavy  watch  VERSION
+  cache/                                 (.factory/heavy: passing validation results per tree)
   jobs/<job-id>/
     job.json
     spec.md
@@ -103,7 +112,7 @@ feature, lowercase, max 40 characters.
   "id": "001-example",
   "feature": "<verbatim as the user gave it>",
   "mode": "full",
-  "stage": "spec | build | review | approve | needs-human | merged | pushed | pr-open",
+  "stage": "queued | spec | build | review | approve | needs-human | merged | pushed | pr-open",
   "round": 0,
   "port": 5110,
   "base": "main",
@@ -142,17 +151,31 @@ Branch: factory/<job-id>
 
 ### `/factory <feature>`
 1. Determine job-id, port and `base` (`git branch --show-current`; detached HEAD →
-   refuse and report). `git worktree add -b factory/<job-id> <worktree> <base>`.
-   Create the job folder, write `job.json` (stage `spec`, mode `full`).
-2. **Spec:** spawn `factory-spec-writer`, prompt `<paths> Feature: <feature>`. Wait
-   until `spec.md` exists. Stage → `build`.
-3. **Build round N** (N = round + 1): spawn `factory-builder`, prompt
+   refuse and report). **Capacity:** count the jobs in stage `spec`/`build`/`review`/
+   `approve` (and a running sync). At `MAX_ACTIVE_JOBS` → create the job folder and
+   `job.json` with stage `queued` (no worktree, no agents), say behind which jobs it
+   waits, and stop here. Whenever a job leaves those stages (any write of `job.json` that
+   sets `needs-human`, `merged`, `pushed` or `pr-open`) and on every `status`/`resume`,
+   start the lowest-numbered `queued` job while there is room: continue with the rest of
+   this step for it. Bring `base` up to date first, or the job builds on stale code and
+   needs a sync later: if the main checkout is clean and `<remote>/<base>` is ahead,
+   `git pull --ff-only <remote> <base>` (not clean or not fast-forward → say so and
+   continue on the local `base`). `git worktree add -b factory/<job-id> <worktree> <base>`.
+   Create the job folder and write `job.json` (stage `spec`, mode `full`), or set the
+   stage of the queued one to `spec`.
+2. **Spec:** run the load gate (see Resources), then spawn `factory-spec-writer`, prompt
+   `<paths> Feature: <feature>`. Wait until `spec.md` exists. Stage → `build`.
+3. **Build round N** (N = round + 1): run the load gate, then spawn `factory-builder`, prompt
    `<paths> Build round N. Port: <port>. Mode: <mode>.` Wait until `round-N/build.md` exists.
    Stage → `review`, round = N.
-4. **Review round N:** spawn one `factory-reviewer-<name>` per reviewer in the set, **all
-   in one message** (parallel). Prompt: `<paths> Review round N. Port: <port + offset>.`
+4. **Review round N:** run the load gate, then spawn one `factory-reviewer-<name>` per
+   reviewer in the set, **all in one message** (parallel). Prompt:
+   `<paths> Review round N. Port: <port + offset>.`
+   plus one line: `You must write round-N/review-<name>.md (first line VERDICT:
+   PASS|CHANGES); it is required and part of your task.`
    **WAIT FOR ALL:** continue only when every `round-N/review-<name>.md` exists. Read
-   only the first line of each (`VERDICT: PASS|CHANGES`) into `reviews`.
+   only the first line of each (`VERDICT: PASS|CHANGES`) into `reviews`. A verdict that
+   only appears in the agent's reply message is not a verdict: see Rules.
 5. **Decision:**
    - all `PASS` → stage `approve`, spawn `factory-approver`, prompt
      `<paths> Final round: N. Mode: <mode>.`
@@ -176,7 +199,11 @@ repo.md), the builder runs only those quick checks instead of the full validatio
 
 ### `/factory next`
 If `config.issues` is set: take the lowest-numbered open issue with label
-`issues.label` whose author is allowed (see Issues) and run `/factory issue <nr>`.
+`issues.label` whose author is allowed (see Issues) **and that no job has yet**, and run
+`/factory issue <nr>`. A job has the issue when its `job.json` has `"issue": <nr>` and
+its stage is not `superseded`. With `issues.link` = `Refs` an issue stays open after the
+PR/MR is merged (a human closes it), so "open" alone does not mean "not done"; report
+skipped issues with their job and stage in one line (use `rework` for those).
 Otherwise take the first unchecked item (`- [ ]`) in `.factory/backlog.md`, check it
 (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
@@ -209,6 +236,8 @@ one more round fits (`MAX_ROUNDS` counts afresh per rework), spawn the builder w
 - Stage `approve` with `decision.md` saying MERGE but no delivery done → deliver.
 - Worktree missing (`git worktree list`)? `git worktree add <worktree> factory/<id>`;
   if that fails, stop and report.
+- Stage `queued` → start it if there is room (see `/factory <feature>` step 1), else say
+  what it waits for.
 - Resume per stage: `spec` → spec-writer · `build` → builder for round `round + 1` ·
   `review` → only the reviewers whose `round-N/review-<name>.md` is missing, in one
   message, then the normal WAIT FOR ALL + decision · `approve` → approver.
@@ -359,6 +388,11 @@ Not set after a retry, or the MR sits on a conflict or a missing approval → re
 leave the MR open; never work around it. Report whether auto-merge is on in the same line
 as the URL.
 
+### After delivery, and when a job ends in `needs-human`/`superseded`
+Clean up what the agents left: `.factory/heavy clean <worktree>` (cached results), then
+`rm -rf /tmp/factory-<job-id>-*` and `git worktree prune` (temporary worktrees, logs and
+databases that agents made under that prefix). Never touch other prefixes.
+
 ### Always
 - Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
   remote, e.g. a public mirror). Never push `base` or any other branch, never
@@ -368,13 +402,50 @@ as the URL.
   only switches on the forge's auto-merge (see above), and the forge merges.
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.
 
+## Resources
+
+This container has a few cores, and a job fans out into a builder plus up to six
+reviewers. Unchecked, parallel jobs ran at load 20–33 on 8 cores: tests timed out,
+reruns and false "flaky" findings cost extra rounds. Three guards:
+
+1. **`MAX_ACTIVE_JOBS`** (above): the orchestrator never has more jobs in flight.
+2. **Load gate:** before every spawn of a spec-writer, builder or review wave run
+   `<repo>/.factory/heavy gate` (Bash timeout 600000). It returns when the 1-minute load
+   average is at or below the limit, or after 10 minutes with a warning; then continue and
+   mention the warning in your next report. Do not poll the load yourself.
+3. **`.factory/heavy`** for every test, build, lint, install and validation command the
+   agents run, in every repo on this machine: it holds a machine-wide set of slots (default
+   cores/4), runs the command at low priority and passes `FACTORY_CPUS` (its share of the
+   cores). `.factory/heavy status` shows who holds the slots and the load.
+
+`rework`, `resume` and `sync` move a job back into `build`/`review`: they obey the same
+capacity check and load gate (a sync that finds no room is reported as "postponed" and
+retried on the next `status`/`sync`).
+
+`--cache` makes validation run once per commit instead of once per agent: the builder's
+passing run is recorded for the exact tree, and the reviewers, audit and approver get an
+instant "CACHE HIT" for the same command on the same tree. A new commit, a dirty tree or a
+different command runs for real. The agents' prompts say how to use it; you only need to
+make sure each agent prompt keeps the paths block (the worktree path is part of the key).
+
 ## Rules
 
 - Do not read full diffs or code yourself; rely on the agents' files.
 - `.factory/repo.md` is yours to correct: when an agent's file shows it is wrong or
   incomplete (a missing setup flag, a check CI runs that repo.md lacks), fix that line
   and report the change in one line. Never edit `config.json` without the user.
-- An agent that returns without its file: respawn it (max `MAX_RESUMES`).
+- An agent that returns without its file: respawn it (max `MAX_RESUMES`). This also
+  holds when it returns a verdict only in its reply (seen with ux/ui reviewers): never
+  transcribe it into the file yourself. Respawn with the same prompt plus: `This is a
+  resume: your previous run ended without writing its output file. Writing it is part of
+  your task and required. Reuse your earlier screenshots in round-N/shots/<name>/ instead
+  of redoing the walk-through.` Count the resume in `job.json`.
+- Several jobs may run at the same time (each has its own worktree and ports). Start them
+  together only when their files are unlikely to overlap (backend vs frontend, different
+  modules); start overlapping ones after the earlier job is delivered, so `/factory sync`
+  has less to do.
+- Do not start a job past `MAX_ACTIVE_JOBS`, and do not work around a busy slot or a high
+  load by running tests yourself or in another way: waiting is the correct behaviour.
 - Never run two builders in the same worktree.
 - Never edit files in the worktree yourself.
 - Screenshots are made with `.factory/shoot` (headless Chromium in this container); no

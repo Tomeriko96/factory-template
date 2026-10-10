@@ -13,6 +13,11 @@ You write **one file**: `<Job>/spec.md`. You change no code.
 Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Read code in
 the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
+## Heavy commands
+You normally need no test run. If you must measure something, run it through
+`<Repo>/.factory/heavy -- <command>` (it waits for a free slot; never run it another way)
+and only the one test or command you need, never the full suite.
+
 ## Read
 1. `<Repo>/.factory/repo.md`, and `AGENTS.md`, `CLAUDE.md`, `README.md` in the worktree.
 2. Code the feature touches (Grep/Glob). Existing tests and conventions.

@@ -95,6 +95,22 @@ default `false`; it needs `draft: false` and then also decides on the merge, so 
 the user's explicit yes). Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
+**Limits:** write `"limits": {"active_jobs": 3}`. On a machine with fewer than 8 cores use
+2, with 16 or more use 4. Leave `heavy_slots` and `load_max` out (defaults: cores/4 slots, load
+limit 1.25 × cores); set them only if the user says the machine is shared with other
+heavy work. Run `.factory/heavy status` and tell the user the numbers it shows.
+
+**Validation commands** run through `.factory/heavy --cache` by every agent, verbatim, so
+write them as the exact strings agents should paste, one per line, each a single
+executable command (a compound one as `bash -c '…'`, with `cd` inside). The same string is
+the cache key, so keep one canonical form per check (prefer the repo's own all-in-one
+script if CI uses it, e.g. `./pre-push.sh` or `just check`). Cap the parallelism of the
+test runners so one run does not take the whole machine: use the repo's own config when
+it exists; otherwise bake `$FACTORY_CPUS` into the command (`--maxWorkers=${FACTORY_CPUS:-2}`
+for vitest/jest, `-n ${FACTORY_CPUS:-2}` for pytest-xdist, `-j` for make). Prepare output
+(build directories) must be git-ignored, or the tree is dirty and nothing is cached: check
+with `git check-ignore`.
+
 **Running the app in a worktree** (skip for archetypes without a server). Several
 reviewers serve the same worktree at the same time, each on its own port, so define:
 
@@ -127,7 +143,8 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
-  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false }
+  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
+  "limits": { "active_jobs": 3 }
 }
 ```
 
@@ -142,9 +159,10 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Reviewers: <list> — <one line why, incl. privacy rule>
 - Forge / CI: <GitHub Actions | GitLab CI | none> — <which checks>
 - Setup fresh checkout: <commands, run in the worktree>
-- Validate: <test> · <lint> · <build> (match what CI runs, incl. install extras)
+- Validate (one exact command per line, run as `heavy --cache -- <command>`; runner workers capped via `$FACTORY_CPUS`):
+  <test> · <lint> · <build> (match what CI runs, incl. install extras)
 - Validate (docs-only): <which paths count as docs, e.g. *.md, docs/> → <quick checks, e.g. mkdocs build --strict, or "none">
-- Worktree setup (builder, once): <commands>
+- Worktree setup (builder, once): <commands; prefer cache-friendly forms: `uv sync --frozen`, `npm ci --prefer-offline`>
 - Prepare (builder, end of every round): <commands, e.g. frontend build>
 - Serve (reviewers, per port): <command with {port}> · ready path: <e.g. /health>
   (agents run it as `.factory/serve start <port> --cwd <worktree> --ready <path> -- <command>`)
@@ -152,7 +170,9 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Pages to screenshot by default: <paths, e.g. / /upload>
 - Conventions: <commit style, code style, anything agents must respect>
 - Commits: in English, following the repo's commit convention; issues as `Refs #N`.
-  Edits inside existing text stay in that file's language.
+  Edits inside existing text stay in that file's language. Trailer, if the repo uses one:
+  `Co-Authored-By: <model>` with the model of `factory-builder` (the `model:` in its agent
+  file, e.g. opus), not the model you are running on now.
 - Delivery remote: <remote> · Never push to: <other remotes, or "none">
 - Notes: <port conflicts, slow tests, costs (e.g. real LLM calls), data that must never be touched>
 ```
@@ -160,6 +180,11 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 ## 4. Verify (run and report the output)
 
 - `.factory/watch --once` → "factory board: no jobs yet".
+- `.factory/heavy status` prints the load, the slots and the limits. Prove the limiter on
+  the repo's real check: run the cheapest Validate command twice with
+  `.factory/heavy --cache -- <command>` in a clean tree; the second run must say
+  `CACHE HIT`. If the tree is dirty (untracked build output), fix the ignore rule or note
+  it in repo.md. Then `.factory/heavy clean`.
 - `ls .claude/agents/factory-reviewer-*.md` covers `config.reviewers`.
 - `git status --porcelain` is identical to step 1: nothing tracked changed.
 - With ux/ui: run Worktree setup + Prepare + Serve in a throwaway worktree

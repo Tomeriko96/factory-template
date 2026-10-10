@@ -33,7 +33,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
+  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
   "limits": { "active_jobs": 3 }
 }
@@ -44,6 +44,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   references the issue in PR/MR bodies: `Closes` (closes it on merge) or `Refs` (link
   only; required when merge commits are mirrored to another forge, where `Closes #N`
   would close an unrelated issue with the same number). Missing → `Closes`.
+  `issues.close_on_merge`: close the job's issue once its PR/MR is confirmed merged (see
+  **Closing issues**). Missing → `true`; `false` leaves closing to a human.
 - `delivery.mode`: `local` (merge into `base` locally), `push` (push the job branch) or
   `pr` (push + open a PR/MR). Missing → `local`.
 - `delivery.draft`: open the PR/MR as a draft. Missing → `true`.
@@ -124,6 +126,7 @@ feature, lowercase, max 40 characters.
   "updated": "<ISO8601>",
   "history": [{ "stage": "spec", "at": "<ISO8601>" }],
   "pr_url": null,
+  "issue_closed": null,
   "sync": { "count": 0, "last": null }
 }
 ```
@@ -132,6 +135,8 @@ feature, lowercase, max 40 characters.
   reviews and the merge always target `base`, never whatever is checked out later.
 - `reviews` has one key per reviewer in the current round's set: `null` until its file
   exists, then `"PASS"` or `"CHANGES"`.
+- `issue_closed` is set by **Closing issues**: an ISO8601 time, or `"already closed"` /
+  `"skipped: <reason>"`. `null` means not handled yet.
 - Rewrite the whole file on every change: always `updated`, plus a `history` entry on
   every stage change. Report each transition in one line.
 
@@ -202,7 +207,8 @@ If `config.issues` is set: take the lowest-numbered open issue with label
 `issues.label` whose author is allowed (see Issues) **and that no job has yet**, and run
 `/factory issue <nr>`. A job has the issue when its `job.json` has `"issue": <nr>` and
 its stage is not `superseded`. With `issues.link` = `Refs` an issue stays open after the
-PR/MR is merged (a human closes it), so "open" alone does not mean "not done"; report
+PR/MR is merged (the factory closes it after the merge, see **Closing issues**, unless
+that is switched off), so "open" alone does not mean "not done"; report
 skipped issues with their job and stage in one line (use `rework` for those).
 Otherwise take the first unchecked item (`- [ ]`) in `.factory/backlog.md`, check it
 (`- [x] … (job <id>)`) and run `/factory <that item>`.
@@ -254,8 +260,8 @@ forge whether the PR/MR still merges into `base`.
   `mergeable` is `CONFLICTING` (`mergeStateStatus` `DIRTY`); `BEHIND` counts only if the
   repo requires up-to-date branches.
 
-PR/MR already merged or closed → set the stage to `merged` (merged) or `needs-human`
-(closed without merge), report it and skip it. No conflict → nothing to do. Conflict:
+PR/MR already merged or closed → set the stage to `merged` (merged; then **Closing
+issues**) or `needs-human` (closed without merge), report it and skip it. No conflict → nothing to do. Conflict:
 
 1. `job.json.sync.count` is at `MAX_SYNCS` → stage `needs-human`, report. Otherwise
    count + 1. The worktree gone? `git worktree add <worktree> factory/<id>`. Remote
@@ -286,7 +292,8 @@ continuous watching the user can run `/loop 10m /factory sync`.
 ### `/factory` (no argument) / `/factory status`
 Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run the conflict
 check of `/factory sync` (check only, tell the user when a fix is needed and offer it;
-`/factory sync` does the fix). Mention `.factory/watch` for a live board.
+`/factory sync` does the fix). Then run **Closing issues** for every job at `merged` that
+has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board.
 
 ### `/factory setup`
 Follow `setup.md` in this skill's directory.
@@ -313,9 +320,33 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
 **Reporting back** is off by default. Only with `"report": true` post a one-line comment
 at: start (job-id), `needs-human` (reason) and delivery (PR/MR url, or branch + commit
 sha), and swap the label to `factory:in-progress` at start. Never post code, diffs or
-review text. The factory never closes issues itself: in `pr` mode the PR/MR body gets
-`<issues.link> #<nr>` (so with `Closes`, the issue closes when a human merges it);
-otherwise give the user that line. Commits reference the issue with `Refs #<nr>` only.
+review text. In `pr` mode the PR/MR body gets `<issues.link> #<nr>`; otherwise give the
+user that line. Commits reference the issue with `Refs #<nr>` only.
+
+### Closing issues
+Unless `issues.close_on_merge` is `false`, the factory closes a job's issue once the forge
+confirms its PR/MR is merged. It runs when a merge is noticed (`/factory sync`, also
+`/loop 10m /factory sync`; the check at the end of delivery; `/factory status`) and for any
+job at `merged` with an `issue` and no `issue_closed`, so older merged jobs are caught up.
+All of these must hold, otherwise do nothing (and say why in one line):
+
+1. The job came from an issue (`"issue": <nr>`), has `pr_url` and `delivery.mode` was `pr`
+   (a local merge or a bare push has not reached the forge's base branch).
+2. The forge says the PR/MR is merged, into the job's `base`: `gitlab`:
+   `glab api "projects/:id/merge_requests/<iid>"` → `state` is `merged`; `github`:
+   `gh pr view <nr> --json state,baseRefName` → `MERGED`. Closed without merge never counts.
+3. The issue is still open (`glab issue view <nr> -F json` → `state` `opened`; `gh issue
+   view <nr> --json state` → `OPEN`). Already closed (e.g. by `Closes #<nr>`) → set
+   `issue_closed` to `"already closed"`.
+4. No other job with the same `issue` is unfinished (stage not `merged`, `superseded` or
+   `pushed`): then the issue is not done yet; set nothing and report it.
+
+Close: `gitlab`: `glab issue close <iid>`; `github`: `gh issue close <nr> --reason
+completed`. With `"report": true` add a one-line comment first: `Merged: <pr_url>`. Then
+verify the issue is closed, write `issue_closed` (time) to `job.json` and report `closed
+#<nr> (job <id>, <pr_url>)`. Fails → report the error, leave `issue_closed` null (it is
+tried again on the next run). Never reopen an issue, never close one that is not in a
+job's `issue` field, never close on a closed-without-merge PR/MR.
 
 ## Severity
 
@@ -397,7 +428,8 @@ databases that agents made under that prefix). Never touch other prefixes.
 - Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
   remote, e.g. a public mirror). Never push `base` or any other branch, never
   force-push (a sync merges `base` into the branch, never rebases), never merge,
-  approve or close a PR/MR, never delete remote branches.
+  approve or close a PR/MR, never delete remote branches. Issues are closed only as
+  described under **Closing issues**.
   Merging the PR/MR is a human's job, unless `delivery.auto_merge` is set: then the factory
   only switches on the forge's auto-merge (see above), and the forge merges.
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.

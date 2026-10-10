@@ -78,8 +78,12 @@ The factory only ever pushes `factory/*` branches: never the base branch, never
 `--force`. It never merges, approves or closes a PR/MR. The one exception is opt-in:
 with `delivery.draft: false` and `delivery.auto_merge: true` it switches on the forge's
 auto-merge after opening the PR/MR (GitLab: merge when pipeline succeeds; GitHub: `gh pr
-merge --auto`), so the forge merges once its own checks pass. It never merges directly. Review comments go back in with
-`/factory rework <id> "<comments>"`; the next approved round pushes to the same branch,
+merge --auto`), so the forge merges once its own checks pass. It never merges directly.
+
+Once the forge confirms a job's PR/MR is merged, the factory closes the issue the job came
+from (`issues.close_on_merge`, default `true`; `false` leaves that to you), and no other
+one. This also catches up older merged jobs on `status`/`sync`. Review comments go back in
+with `/factory rework <id> "<comments>"`; the next approved round pushes to the same branch,
 so the PR/MR updates.
 
 `/factory sync [<id>]` keeps open PRs/MRs mergeable: it asks the forge whether each still

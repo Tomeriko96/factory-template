@@ -78,7 +78,7 @@ and audit on opus; the rest on sonnet). Do not change them. Advise the user to r
 and say why in `repo.md`.
 
 **Issues:** forge `github`/`gitlab` → `issues` =
-`{"label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes"}`
+`{"label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true}`
 with the logged-in user only (`gh api user --jq .login` / `glab api user --jq .username`). Never
 add other authors unless the user asks. Forge `none`, or the user does not want issue
 mode → `"issues": null` (then `next` uses `backlog.md`). Set `"link": "Refs"` when the
@@ -86,6 +86,8 @@ repo is mirrored to another forge (a second remote on another host, or docs that
 commits are mirrored): `Closes #N` would close an unrelated issue there. Check the label
 exists (`gh label list` / `glab label list`); if not, tell the user (creating it is
 their call, it changes the forge).
+`close_on_merge` is `true` by default: the factory closes the issue after its PR/MR is merged
+(tell the user; `false` leaves that to a human).
 
 **Delivery** (ask the user once, recommend `pr`): `local` (merge into the base branch
 locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge `none`
@@ -142,7 +144,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes" },
+  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
   "limits": { "active_jobs": 3 }
 }

@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Which reviewers must run again in round N > 1?  (A second look by a reviewer who already
+passed the previous round, on a change that only fixes someone else's findings, is waste:
+67% of round 2+ reviews in the first 43 jobs were exactly that.)
+
+  .factory/rereview <job-id> <round> --set a,b,c
+
+--set is the round's candidate set (config.reviewers after the ux/ui gating). Prints
+
+  SET: <names, comma separated>
+  WHY: <one line>
+
+Rule: a reviewer runs again if it gave CHANGES in the previous round; `audit` and `code`
+always run again (cheap safety net and the claims check); everyone else only when the
+builder changed something besides fixing the findings, i.e. the files changed since the
+previous round (job.json round_heads) include a non-test, non-docs file that no finding
+pointed at (path:line), or the previous head is unknown.
+"""
+import json, os, re, subprocess, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SIDE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/|(\.|_)(test|spec)\.|\.md$|\.snap$", re.I)
+PATH = re.compile(r"([\w@./+-]+\.\w+):\d+")
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 4 or "--set" not in args:
+        sys.exit(__doc__)
+    job_id, rnd = args[0], int(args[1])
+    cand = [x for x in args[args.index("--set") + 1].split(",") if x]
+    job_dir = os.path.join(HERE, "jobs", job_id)
+    job = json.load(open(os.path.join(job_dir, "job.json")))
+    prev = os.path.join(job_dir, f"round-{rnd - 1}")
+    verdict, pointed = {}, set()
+    if os.path.isdir(prev):
+        for f in os.listdir(prev):
+            if f.startswith("review-") and f.endswith(".md"):
+                name = f[7:-3]
+                text = open(os.path.join(prev, f), errors="replace").read()
+                verdict[name] = "CHANGES" if text.split("\n", 1)[0].find("CHANGES") >= 0 else "PASS"
+                if verdict[name] == "CHANGES":
+                    pointed.update(PATH.findall(text))
+    always = {"audit", "code"}
+    must = {r for r in cand if verdict.get(r, "CHANGES") == "CHANGES" or r in always}
+
+    head = (job.get("round_heads") or {}).get(str(rnd - 1))
+    wt = job.get("worktree")
+    extra, why = [], None
+    if rnd <= 1 or not head or not wt or not os.path.isdir(wt):
+        why = "full set: no previous round head recorded" if rnd > 1 else "round 1: full set"
+        must = set(cand)
+    else:
+        r = subprocess.run(["git", "diff", "--name-only", head, "HEAD"], cwd=wt, capture_output=True, text=True)
+        if r.returncode != 0:
+            why, must = "full set: cannot diff since the previous round", set(cand)
+        else:
+            files = [x for x in r.stdout.split("\n") if x]
+            ptr = {os.path.normpath(p) for p in pointed}
+            extra = [x for x in files if not SIDE.search(x) and os.path.normpath(x) not in ptr
+                     and not any(os.path.normpath(x).endswith("/" + p) or os.path.normpath(p).endswith("/" + x) for p in ptr)]
+            if extra:
+                must = set(cand)
+                why = "full set: changed beyond the findings: " + ", ".join(extra[:5]) + (" …" if len(extra) > 5 else "")
+            else:
+                why = (f"only {', '.join(sorted(must))} again: {len(files)} file(s) changed since round {rnd - 1}, "
+                       f"all named by a finding or tests/docs")
+    order = [r for r in cand if r in must]
+    print("SET: " + ",".join(order))
+    print("WHY: " + (why or ""))
+
+
+if __name__ == "__main__":
+    main()

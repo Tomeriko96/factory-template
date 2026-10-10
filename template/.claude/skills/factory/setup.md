@@ -99,9 +99,10 @@ the user's explicit yes). Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
 **Limits:** write `"limits": {"active_jobs": 3, "open_prs": 5}`. On a machine with fewer than 8 cores use
-2, with 16 or more use 4. Leave `heavy_slots` and `load_max` out (defaults: cores/4 slots, load
-limit 1.25 × cores); set them only if the user says the machine is shared with other
-heavy work. Run `.factory/heavy status` and tell the user the numbers it shows. `open_prs` is the number
+2, with 16 or more use 4. Leave `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` out
+(defaults: commands share 75% of the cores by weight, CPU not above 90%); set them only if the
+user says the machine is shared with other heavy work. Run `.factory/heavy status` and tell the
+user the numbers it shows. `open_prs` is the number
 of PRs/MRs that may be open at once before new jobs wait (every merge makes the others
 conflict; `0` = no limit, use it when `delivery.mode` is not `pr`). Leave `guard` and
 `docs_globs` out unless the user wants the hook off or the repo keeps docs elsewhere.
@@ -214,7 +215,10 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 ## 5. Report to the user
 
 Archetype · forge · reviewers (+ why) · port base · issue mode · delivery ·
-smoke-test outcome · files written. Then the next steps: `/factory <feature>`, `/factory --light <feature>`,
+smoke-test outcome · files written. Tell them to run the `/factory` session itself on
+sonnet with `/effort medium` (the orchestrator only does bookkeeping), and to accept the
+workspace-trust dialog for this folder (the guard hooks of the agents only run in trusted
+workspaces). Then the next steps: `/factory <feature>`, `/factory --light <feature>`,
 fill `.factory/backlog.md` for `/factory next`, live board with `.factory/watch`
 (`--tmux` for a split pane). Remind them: the factory itself is local to this clone and
 invisible to git (`factory-init --remove` takes it out again); only job branches leave

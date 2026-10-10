@@ -15,6 +15,13 @@ type-check or screenshot run without `.factory/heavy` in front of it, exit 2 wit
 (Claude Code feeds stderr back to the agent). Everything else, and any parse problem, is
 allowed: this is a guard rail against forgetting, not a sandbox.
 
+  .factory/guard --subagents-only   (settings-level hook, see install)
+      only guards calls made by a subagent (the hook payload carries agent_id/agent_type),
+      so the user's own session in the same repo is never restricted. `install` adds this
+      variant to .claude/settings.local.json, which also covers general-purpose and other
+      ad-hoc subagents; the factory agents have the unconditional variant in their
+      frontmatter.
+
 Switch off with `"limits": {"guard": false}` in .factory/config.json.
 """
 import json, os, re, shlex, sys
@@ -135,6 +142,8 @@ def main():
         pass
     try:
         data = json.load(sys.stdin)
+        if "--subagents-only" in sys.argv and not (data.get("agent_id") or data.get("agent_type")):
+            return 0
         cmd = (data.get("tool_input") or {}).get("command") or ""
         what = heavy_reason(cmd)
     except Exception:
@@ -144,8 +153,9 @@ def main():
             f"factory guard: `{what}` is a heavy command and must go through the limiter, "
             f"or parallel jobs overload the machine. Run it from the worktree root as\n"
             f"  {HERE}/heavy [--cache] -- <command>\n"
-            f"(a compound command as `bash -c '…'`). For a long command start it in the "
-            f"background with output to a log file and poll the log. Do not work around this.\n")
+            f"(a compound command as `bash -c '…'`). For a command that may take long use "
+            f"`heavy --background -- <command>` and then `heavy wait <ticket>`. Do not work "
+            f"around this.\n")
         return 2
     return 0
 

@@ -21,7 +21,7 @@ the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
 ## Heavy commands
 You normally need no test run. If you must measure something, run it through
-`<Repo>/.factory/heavy -- <command>` (it waits for a free slot; never run it another way)
+`<Repo>/.factory/heavy -- <command>` (it waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`); never run it another way)
 and only the one test or command you need, never the full suite.
 
 ## Read

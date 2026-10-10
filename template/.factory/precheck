@@ -13,7 +13,7 @@ config.json, default below); if that is the only problem the first line is
 
 Checks (each failing one is listed under Issues):
   - spec.md and round-N/build.md exist
-  - every round-N/review-*.md starts with `VERDICT: PASS`
+  - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
   - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue)
   - the diff touches nothing under .factory/ or .claude/
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
@@ -74,7 +74,14 @@ def main():
         if not os.path.exists(p):
             issues.append(f"missing {os.path.relpath(p, job_dir)}")
 
-    reviews = sorted(f for f in os.listdir(rdir) if f.startswith("review-") and f.endswith(".md")) if os.path.isdir(rdir) else []
+    # Latest verdict per reviewer across rounds: from round 2 on only some reviewers re-run
+    latest = {}
+    for r in range(1, rnd + 1):
+        d = os.path.join(job_dir, f"round-{r}")
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+            if f.startswith("review-") and f.endswith(".md"):
+                latest[f] = (r, os.path.join(d, f))
+    reviews = sorted(latest)
     if docs_mode:
         build = os.path.join(rdir, "build.md")
         if os.path.exists(build) and not re.search(r"^## PR\b", open(build, errors="replace").read(), re.M):
@@ -83,14 +90,15 @@ def main():
         issues.append(f"no reviews in round-{rnd}")
     info = []
     for f in reviews:
-        fl = first_line(os.path.join(rdir, f)) or ""
+        r, path = latest[f]
+        fl = first_line(path) or ""
         if fl != "VERDICT: PASS":
-            issues.append(f"{f}: first line is {fl!r}, not 'VERDICT: PASS'")
-        text = open(os.path.join(rdir, f), errors="replace").read()
-        info.append(f"{f[7:-3]} {text.count('[blocking]')}b/{text.count('[non-blocking]')}nb")
+            issues.append(f"{f} (round {r}): first line is {fl!r}, not 'VERDICT: PASS'")
+        text = open(path, errors="replace").read()
+        info.append(f"{f[7:-3]} {text.count('[blocking]')}b/{text.count('[non-blocking]')}nb" + (f" (r{r})" if r != rnd else ""))
 
-    audit = os.path.join(rdir, "review-audit.md")
-    if os.path.exists(audit):
+    audit = latest.get("review-audit.md", (0, ""))[1]
+    if audit and os.path.exists(audit):
         for line in open(audit, errors="replace"):
             if line.lstrip().startswith("|") and "---" not in line:
                 if "❌" in line or "⏭" in line:

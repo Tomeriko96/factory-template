@@ -12,6 +12,7 @@ Per path × width (× colour scheme): <dir>/<slug>-<width>[-dark].png (full page
 <dir>/shoot.json holds per shot: status, title, console errors, page errors, failed
 requests, horizontal overflow and a11y counts (img without alt, form fields without a
 label, buttons/links without a name).
+Refuses more than --max-shots (default 12) shots per call.
 Exit code 1 if a page does not load (no response or status >= 400).
 No browser yet: `uv run --no-project --python 3 --with playwright==1.63.0 playwright install chromium`.
 `--python 3` keeps uv from following the repo's .python-version pin.
@@ -67,10 +68,15 @@ def main():
     ap.add_argument("--widths", default="375,1280")
     ap.add_argument("--scheme", choices=["light", "dark", "both"], default="light")
     ap.add_argument("--wait", type=int, default=1500, help="ms after networkidle (e.g. Streamlit)")
+    ap.add_argument("--max-shots", type=int, default=12, help="refuse more shots than this per call")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     widths = [int(w) for w in a.widths.split(",")]
     schemes = ["light", "dark"] if a.scheme == "both" else [a.scheme]
+    n = len(a.path or ["/"]) * len(widths) * len(schemes)
+    if n > a.max_shots:
+        sys.exit(f"shoot: {n} shots requested, limit is {a.max_shots} (--max-shots). Photograph only the "
+                 f"pages the diff changes: fewer paths, widths or colour schemes.")
     results = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)

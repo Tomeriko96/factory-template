@@ -1,41 +1,51 @@
 #!/usr/bin/env python3
 """Run heavy commands (tests, builds, installs, lints) without flattening the machine.
 
-  .factory/heavy [--cache] [--label NAME] [--slots N] [--wait-max SECS] -- <command…>
-  .factory/heavy gate [--max LOAD] [--wait-max SECS]
+  .factory/heavy [--cache] [--weight N] [--label NAME] [--wait-max SECS] -- <command…>
+  .factory/heavy --background [same options] -- <command…>     -> prints a ticket, returns
+  .factory/heavy wait <ticket> [--timeout SECS]                  -> waits, prints the result
+  .factory/heavy gate [--max PCT] [--wait-max SECS]
   .factory/heavy status
   .factory/heavy clean [<worktree>…]
 
-run:    waits for a free slot, then runs <command> at low priority (nice 10, idle-ish I/O)
-        in the current directory and exits with its exit code. The slots are host-wide
-        (one lock directory for every repo and every factory session on this machine), so
-        parallel jobs, parallel reviewers and two repos together never run more than N
-        heavy commands at once. Before taking a slot it also waits while the 1-minute load
-        average is above the load limit. The command sees FACTORY_CPUS (its share of 75% of the
-        cores): pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
-        Exit 75: no slot within --wait-max (default 1800s). A tool call that times out
-        before that kills this wrapper and the command with it; for long commands run
-        `.factory/heavy … > log 2>&1 &` and poll the log.
+run:    waits until the machine has room, then runs <command> at low priority in the current
+        directory and exits with its exit code. "Room" is measured, not guessed: every heavy
+        command declares a weight (cores it may use; default 3 for Node/browser/build tools
+        and pre-push scripts, 1 otherwise, or --weight N), and the weights running right now,
+        on this whole machine (all repos, all factory sessions), may not exceed 75% of the
+        cores; and the CPU must not be busier than the limit (default 90%, sampled over
+        one second, not the lagging load average). The command sees FACTORY_CPUS = its
+        weight: pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
+        Foreground waits at most --wait-max (default 540s, inside a tool call's timeout);
+        exit 75 = no room in time: use --background.
+--background  returns at once with a ticket; the command waits for room and runs detached
+        (up to 3600s of waiting). `heavy wait <ticket>` blocks up to --timeout (default 540s)
+        and prints the tail of the output and the command's exit code, or exits 124 saying it
+        is still queued/running: call it again.
 --cache only for a command that is a pure check (validation, tests): when the working tree
         is clean and the same command already passed on the exact same tree, print that
         result and exit 0 without running anything. Only passes are cached; a dirty tree,
         a new commit or a different command runs for real. The record is written by this
         script (tree hash, time, full log in .factory/cache/), not by an agent's own words.
-gate:   block until the load average is at or below the limit (or --wait-max, default
-        600s, then continue with a warning). For the orchestrator, before spawning work.
-clean:  delete cached results of the given worktrees (no argument: all). Run when a job ends.
-status: slots in use (who, where, since), load, limits, cached results.
+gate:   block until the CPU is at or below the limit (or --wait-max, default 600s, then
+        continue with a warning). For the orchestrator, before spawning work.
+status: running commands and their weights, CPU, limits, cached results.
+clean:  delete cached results of the given worktrees (no argument: all) and old tickets.
 
-Limits, in order of precedence: flags, env (FACTORY_HEAVY_SLOTS, FACTORY_LOAD_MAX,
-FACTORY_LOCK_DIR), `limits` in .factory/config.json (heavy_slots, load_max), defaults
-(slots = cores/4, at least 1; load limit = 1.25 × cores).
+Limits, in order of precedence: env (FACTORY_HEAVY_SLOTS, FACTORY_CPU_BUDGET, FACTORY_CPU_MAX,
+FACTORY_LOAD_MAX, FACTORY_LOCK_DIR), `limits` in .factory/config.json (heavy_slots, cpu_budget,
+cpu_max, load_max), defaults (slots = max(2, cores/2) commands at once, cpu_budget = 75% of
+the cores, cpu_max = 90, load_max = off).
 """
-import ctypes, fcntl, hashlib, json, os, shutil, signal, subprocess, sys, time
+import ctypes, fcntl, hashlib, json, os, re, secrets, shutil, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 CPUS = os.cpu_count() or 1
 POLL = 0.5
-HEADROOM = 0.75  # heavy commands share at most this fraction of the cores
+FOREGROUND_WAIT = 540
+BACKGROUND_WAIT = 3600
+MULTI = re.compile(r"vitest|jest|playwright|chromium|\bnpm\b|\bnpx\b|pnpm|yarn|\bnode\b|vite|webpack|\btsc\b|"
+                   r"shoot|pre-push|\bmake\b|\bjust\b|cargo|\bgo\b|gradle|mvn")
 
 
 def limits():
@@ -45,15 +55,26 @@ def limits():
             cfg = (json.load(f).get("limits") or {})
     except (OSError, ValueError):
         pass
-    slots = int(os.environ.get("FACTORY_HEAVY_SLOTS") or cfg.get("heavy_slots") or max(1, CPUS // 4))
-    load = float(os.environ.get("FACTORY_LOAD_MAX") or cfg.get("load_max") or CPUS * 1.25)
-    return max(1, slots), load
+
+    def pick(env, key, default, cast):
+        v = os.environ.get(env) or cfg.get(key)
+        return cast(v) if v not in (None, "") else default
+    return {
+        "slots": max(1, pick("FACTORY_HEAVY_SLOTS", "heavy_slots", max(2, CPUS // 2), int)),
+        "budget": max(1, pick("FACTORY_CPU_BUDGET", "cpu_budget", max(1, int(CPUS * 0.75)), int)),
+        "cpu_max": pick("FACTORY_CPU_MAX", "cpu_max", 90.0, float),
+        "load_max": pick("FACTORY_LOAD_MAX", "load_max", None, float),
+    }
 
 
 def lock_dir():
     d = os.environ.get("FACTORY_LOCK_DIR") or f"/tmp/factory-heavy-{os.getuid()}"
     os.makedirs(d, mode=0o777, exist_ok=True)
     return d
+
+
+def say(msg):
+    print(f"heavy: {msg}", file=sys.stderr, flush=True)
 
 
 def load1():
@@ -64,45 +85,51 @@ def load1():
         return os.getloadavg()[0]
 
 
-def say(msg):
-    print(f"heavy: {msg}", file=sys.stderr, flush=True)
+def _cpu_times():
+    with open("/proc/stat") as f:
+        v = [int(x) for x in f.readline().split()[1:]]
+    idle = v[3] + (v[4] if len(v) > 4 else 0)
+    return sum(v), idle
 
 
-def git(*args, cwd=None):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+def cpu_util(interval=1.0):
+    """Percent of CPU busy over `interval` seconds, from /proc/stat."""
+    try:
+        t0, i0 = _cpu_times()
+        time.sleep(interval)
+        t1, i1 = _cpu_times()
+        return 100.0 * (1 - (i1 - i0) / max(1, t1 - t0))
+    except (OSError, ValueError, IndexError):
+        return min(100.0, 100.0 * load1() / CPUS)
 
 
-def wait_for_load(load_max, wait_max):
-    """Wait while the machine is overloaded. Gives up (returns False) after wait_max."""
+def too_busy(lim):
+    if lim["load_max"] is not None and load1() > lim["load_max"]:
+        return f"load {load1():.1f} > {lim['load_max']:.1f}"
+    u = cpu_util()
+    return f"CPU {u:.0f}% > {lim['cpu_max']:.0f}%" if u > lim["cpu_max"] else None
+
+
+def wait_until_calm(lim, wait_max):
+    """Wait while the machine is saturated. False after wait_max (the caller goes on)."""
     end, last = time.time() + wait_max, 0
-    while load1() > load_max:
+    while True:
+        why = too_busy(lim)
+        if not why:
+            return True
         if time.time() > end:
             return False
         if time.time() - last > 30:
-            say(f"load {load1():.1f} > {load_max:.1f}, waiting")
+            say(f"{why}, waiting")
             last = time.time()
         time.sleep(POLL)
-    return True
 
 
-def cmd_gate(argv):
-    _, load_max = limits()
-    wait_max = 600
-    while argv:
-        a = argv.pop(0)
-        if a == "--max":
-            load_max = float(argv.pop(0))
-        elif a == "--wait-max":
-            wait_max = int(argv.pop(0))
-        else:
-            sys.exit(f"gate: unknown option {a}")
-    ok = wait_for_load(load_max, wait_max)
-    print(f"load {load1():.1f} (limit {load_max:.1f}, {CPUS} cores)"
-          + ("" if ok else f" — still above the limit after {wait_max}s, continuing anyway"))
+def auto_weight(command):
+    return 3 if MULTI.search(" ".join(command)) else 1
 
 
-def read_holder(path):
+def read_json(path):
     try:
         with open(path) as f:
             return json.load(f)
@@ -110,28 +137,193 @@ def read_holder(path):
         return {}
 
 
-def cmd_status(argv):
-    slots, load_max = limits()
-    d = lock_dir()
-    print(f"load {load1():.1f} · limit {load_max:.1f} · {CPUS} cores · {slots} heavy slot(s) · locks in {d}")
+# ---------------------------------------------------------------- admission
+
+def survey(d, slots):
+    """(used weight, [(index, file)]) for the slot files; the free ones come back locked by us."""
+    used, free = 0, []
     for i in range(slots):
         p = os.path.join(d, f"slot-{i}.lock")
-        free = True
-        if os.path.exists(p):
-            with open(p, "a+") as f:
-                try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    free = False
-        if free:
-            print(f"  slot {i}: free")
+        f = open(p, "a+")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            free.append((i, f))
+        except OSError:
+            used += int(read_json(p).get("weight", 1))
+            f.close()
+    return used, free
+
+
+def try_admit(lim, weight, label):
+    """Take a slot if the weights running host-wide leave room. Returns the locked file or None."""
+    d = lock_dir()
+    with open(os.path.join(d, "admit.lock"), "a+") as admit:
+        fcntl.flock(admit, fcntl.LOCK_EX)
+        used, free = survey(d, lim["slots"])
+        w = min(weight, lim["budget"])
+        if not free or (used > 0 and used + w > lim["budget"]):
+            for _, f in free:
+                f.close()
+            return None
+        _, f = free[0]
+        for _, other in free[1:]:
+            other.close()
+        f.seek(0)
+        f.truncate()
+        json.dump({"pid": os.getpid(), "cwd": os.getcwd(), "cmd": label, "weight": w,
+                   "since": time.time()}, f)
+        f.flush()
+        return f
+
+
+def take_slot(lim, weight, wait_max, label):
+    end, last = time.time() + wait_max, 0
+    while True:
+        f = try_admit(lim, weight, label)
+        if f:
+            return f
+        if time.time() > end:
+            return None
+        if time.time() - last > 30:
+            say(f"no room yet (needs weight {weight} of {lim['budget']} cores), waiting ({label[:60]})")
+            last = time.time()
+        time.sleep(POLL)
+
+
+# ---------------------------------------------------------------- tickets
+
+def run_dir():
+    d = os.path.join(HERE, "run")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def ticket_path(tid):
+    return os.path.join(run_dir(), f"heavy-{tid}.json")
+
+
+def update_ticket(tid, **kw):
+    p = ticket_path(tid)
+    rec = read_json(p)
+    rec.update(kw)
+    with open(p + ".tmp", "w") as f:
+        json.dump(rec, f)
+    os.replace(p + ".tmp", p)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def tail(path, n):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return ""
+
+
+def cmd_background(argv):
+    if "--" not in argv:
+        sys.exit("usage: heavy --background [options] -- <command…>")
+    i = argv.index("--")
+    opts, command = argv[:i], argv[i + 1:]
+    if not command:
+        sys.exit("usage: heavy --background [options] -- <command…>")
+    if "--wait-max" not in opts:
+        opts += ["--wait-max", str(BACKGROUND_WAIT)]
+    tid = "h" + secrets.token_hex(3)
+    log = os.path.join(run_dir(), f"heavy-{tid}.log")
+    update_ticket(tid, state="queued", cmd=command, cwd=os.getcwd(), log=log, created=time.time())
+    with open(log, "w") as out:
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), *opts, "--", *command],
+                             cwd=os.getcwd(), env=dict(os.environ, HEAVY_TICKET=tid),
+                             stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                             start_new_session=True)
+    update_ticket(tid, pid=p.pid)
+    print(f"ticket {tid} · output {log}\npoll with: {os.path.join(HERE, 'heavy')} wait {tid}")
+    return 0
+
+
+def cmd_wait(argv):
+    if not argv:
+        sys.exit("usage: heavy wait <ticket> [--timeout SECS]")
+    tid, timeout = argv[0], FOREGROUND_WAIT
+    if "--timeout" in argv:
+        timeout = int(argv[argv.index("--timeout") + 1])
+    end = time.time() + timeout
+    while True:
+        rec = read_json(ticket_path(tid))
+        if not rec:
+            say(f"unknown ticket {tid}")
+            return 2
+        if rec.get("state") == "done":
+            sys.stdout.write(tail(rec["log"], 40))
+            say(f"ticket {tid} finished, exit {rec.get('rc')}")
+            return int(rec.get("rc", 1))
+        if rec.get("pid") and not alive(rec["pid"]):
+            sys.stdout.write(tail(rec["log"], 40))
+            say(f"ticket {tid}: the process died without a result")
+            return 1
+        if time.time() > end:
+            age = int(time.time() - rec.get("created", time.time()))
+            sys.stdout.write(tail(rec["log"], 5))
+            say(f"ticket {tid} is still {rec.get('state')} after {age}s; call `heavy wait {tid}` again")
+            return 124
+        time.sleep(2)
+
+
+# ---------------------------------------------------------------- subcommands
+
+def cmd_gate(argv):
+    lim = limits()
+    wait_max = 600
+    while argv:
+        a = argv.pop(0)
+        if a == "--max":
+            lim["cpu_max"] = float(argv.pop(0))
+        elif a == "--wait-max":
+            wait_max = int(argv.pop(0))
         else:
-            h = read_holder(p)
-            since = int(time.time() - h.get("since", time.time()))
-            print(f"  slot {i}: pid {h.get('pid', '?')} {since}s · {h.get('cwd', '?')} · {h.get('cmd', '?')[:90]}")
+            sys.exit(f"gate: unknown option {a}")
+    ok = wait_until_calm(lim, wait_max)
+    print(f"CPU {cpu_util():.0f}% (limit {lim['cpu_max']:.0f}%), load {load1():.1f} on {CPUS} cores"
+          + ("" if ok else f" — still busy after {wait_max}s, continuing anyway"))
+    return 0
+
+
+def cmd_status(argv):
+    lim = limits()
+    d = lock_dir()
+    used, free = survey(d, lim["slots"])
+    for _, f in free:
+        f.close()
+    print(f"CPU {cpu_util(0.5):.0f}% (limit {lim['cpu_max']:.0f}%) · load {load1():.1f} · {CPUS} cores · "
+          f"heavy weight in use {used}/{lim['budget']} · up to {lim['slots']} commands · locks in {d}")
+    for i in range(lim["slots"]):
+        p = os.path.join(d, f"slot-{i}.lock")
+        if not os.path.exists(p):
+            continue
+        with open(p, "a+") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                continue
+            except OSError:
+                pass
+        h = read_json(p)
+        since = int(time.time() - h.get("since", time.time()))
+        print(f"  slot {i}: weight {h.get('weight', '?')} · pid {h.get('pid', '?')} · {since}s · "
+              f"{h.get('cwd', '?')} · {h.get('cmd', '?')[:80]}")
     cache = os.path.join(HERE, "cache")
     n = len([f for f in os.listdir(cache) if f.endswith(".json")]) if os.path.isdir(cache) else 0
     print(f"  cached passing results in this repo: {n}")
+    return 0
 
 
 def cmd_clean(argv):
@@ -142,8 +334,7 @@ def cmd_clean(argv):
         if not name.endswith(".json"):
             continue
         p = os.path.join(cache, name)
-        rec = read_holder(p)
-        if want and rec.get("cwd") not in want:
+        if want and read_json(p).get("cwd") not in want:
             continue
         for q in (p, p[:-5] + ".log"):
             try:
@@ -151,32 +342,22 @@ def cmd_clean(argv):
             except OSError:
                 pass
         n += 1
-    print(f"removed {n} cached result(s)")
-
-
-def take_slot(slots, wait_max, label):
-    """Block until a slot lock is free; returns the open, locked file. None after wait_max."""
-    d = lock_dir()
-    end, last = time.time() + wait_max, 0
-    while True:
-        for i in range(slots):
-            f = open(os.path.join(d, f"slot-{i}.lock"), "a+")
+    old = 0
+    rd = os.path.join(HERE, "run")
+    for name in os.listdir(rd) if os.path.isdir(rd) else []:
+        if name.startswith("heavy-") and time.time() - os.path.getmtime(os.path.join(rd, name)) > 86400:
             try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                os.remove(os.path.join(rd, name))
+                old += 1
             except OSError:
-                f.close()
-                continue
-            f.seek(0)
-            f.truncate()
-            json.dump({"pid": os.getpid(), "cwd": os.getcwd(), "cmd": label, "since": time.time()}, f)
-            f.flush()
-            return f
-        if time.time() > end:
-            return None
-        if time.time() - last > 30:
-            say(f"all {slots} heavy slots busy, waiting ({label[:60]})")
-            last = time.time()
-        time.sleep(POLL)
+                pass
+    print(f"removed {n} cached result(s), {old} old ticket file(s)")
+    return 0
+
+
+def git(*args):
+    r = subprocess.run(["git", *args], capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def tree_key(command):
@@ -189,18 +370,20 @@ def tree_key(command):
 
 
 def cmd_run(argv):
-    slots, load_max = limits()
-    use_cache, label, wait_max = False, None, 1800
+    lim = limits()
+    use_cache, label, wait_max, weight = False, None, None, None
     while argv and argv[0] != "--":
         a = argv.pop(0)
         if a == "--cache":
             use_cache = True
         elif a == "--label":
             label = argv.pop(0)
-        elif a == "--slots":
-            slots = max(1, int(argv.pop(0)))
+        elif a == "--weight":
+            weight = max(1, int(argv.pop(0)))
         elif a == "--wait-max":
             wait_max = int(argv.pop(0))
+        elif a == "--slots":
+            lim["slots"] = max(1, int(argv.pop(0)))
         else:
             sys.exit(f"unknown option {a} (command goes after --)")
     if argv and argv[0] == "--":
@@ -209,6 +392,9 @@ def cmd_run(argv):
         sys.exit(__doc__.split("\n\n")[0])
     command = argv
     shown = label or " ".join(command)
+    ticket = os.environ.get("HEAVY_TICKET")
+    wait_max = wait_max if wait_max is not None else (BACKGROUND_WAIT if ticket else FOREGROUND_WAIT)
+    weight = weight if weight is not None else auto_weight(command)
 
     key = tree = None
     cache = os.path.join(HERE, "cache")
@@ -217,37 +403,33 @@ def cmd_run(argv):
         if key is None:
             say("not cached: the working tree is dirty or this is not a git tree; running for real")
         else:
-            rec_path = os.path.join(cache, key + ".json")
-            try:
-                with open(rec_path) as f:
-                    rec = json.load(f)
+            rec = read_json(os.path.join(cache, key + ".json"))
+            if rec.get("log") and os.path.exists(rec["log"]):
                 say(f"CACHE HIT: this command already passed on tree {tree[:12]} at {rec['finished']} "
                     f"({rec['seconds']}s). Nothing was run. Full log: {rec['log']}. Last lines:")
-                with open(rec["log"], errors="replace") as f:
-                    sys.stdout.write("".join(f.readlines()[-15:]))
+                sys.stdout.write(tail(rec["log"], 15))
                 return 0
-            except (OSError, ValueError, KeyError):
-                pass
 
-    if not wait_for_load(load_max, wait_max):
-        say(f"load still above {load_max:.1f} after {wait_max}s; taking a slot anyway")
-    lock = take_slot(slots, wait_max, shown)
-    if lock is None:
-        say(f"no free slot within {wait_max}s")
-        return 75
-
-    env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(max(1, int(CPUS * HEADROOM) // slots)))
-    prefix = []
-    if shutil.which("ionice"):
-        prefix = ["ionice", "-c2", "-n7"]
     if not shutil.which(command[0]):
         say(f"cannot run {command[0]}: command not found")
         return 127
+    if not wait_until_calm(lim, wait_max):
+        say(f"CPU still above {lim['cpu_max']:.0f}% after {wait_max}s; asking for a slot anyway")
+    lock = take_slot(lim, weight, wait_max, shown)
+    if lock is None:
+        say(f"no room within {wait_max}s; run it with --background and `heavy wait <ticket>`")
+        return 75
+    if ticket:
+        update_ticket(ticket, state="running", started=time.time())
+
+    env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(min(weight, lim["budget"])))
+    prefix = ["ionice", "-c2", "-n7"] if shutil.which("ionice") else []
     started = time.time()
     log = None
     if key:
         os.makedirs(cache, exist_ok=True)
         log = open(os.path.join(cache, key + ".log"), "w")
+
     def child_setup():
         os.nice(10)
         # If this wrapper is killed (a tool timeout sends SIGKILL), take the command down too
@@ -300,13 +482,18 @@ def main():
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
         return 0
-    if argv[0] == "gate":
-        return cmd_gate(argv[1:]) or 0
-    if argv[0] == "clean":
-        return cmd_clean(argv[1:]) or 0
-    if argv[0] == "status":
-        return cmd_status(argv[1:]) or 0
-    return cmd_run(argv)
+    sub = {"gate": cmd_gate, "status": cmd_status, "clean": cmd_clean, "wait": cmd_wait}
+    if argv[0] in sub:
+        return sub[argv[0]](argv[1:]) or 0
+    head = argv[:argv.index("--")] if "--" in argv else argv
+    if "--background" in head:
+        argv.remove("--background")
+        return cmd_background(argv)
+    rc = cmd_run(argv)
+    tid = os.environ.get("HEAVY_TICKET")
+    if tid:
+        update_ticket(tid, state="done", rc=rc, finished=time.time())
+    return rc
 
 
 if __name__ == "__main__":

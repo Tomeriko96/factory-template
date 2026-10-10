@@ -40,7 +40,8 @@ and re-run `factory-init` in each repo.
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
-                             heavy, guard, precheck, watch, VERSION, jobs/, run/, cache/
+                             heavy, guard, precheck, rereview, watch, VERSION, jobs/, run/, cache/
+.claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
 
 Job worktrees go to `../<repo>-worktrees/<job-id>`, outside the repo. Excluded files
@@ -55,17 +56,19 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 | Guard | What it does |
 |---|---|
 | `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start when one leaves those stages. |
-| `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it: a machine-wide set of `flock` slots (default cores/4, shared by all repos), `nice`/`ionice`, and `FACTORY_CPUS` for worker counts. `heavy status` shows holders and load. |
+| `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it. Each command has a weight (the cores it may use: 3 for Node, browser and build tools, 1 for pytest and the like); the weights running at once on the whole machine (all repos, all sessions) stay within 75% of the cores, and the CPU must not be busier than 90%, measured over a second, not from the lagging load average. It runs at low priority and sets `FACTORY_CPUS` to the weight. `heavy status` shows who holds capacity. |
+| `heavy --background` / `heavy wait` | For commands that may outlast a tool call (a queue, a long suite): `--background` returns a ticket at once, `heavy wait <ticket>` blocks up to 9 minutes and prints the result and exit code (124 = call again). Foreground calls give up after 9 minutes with exit 75 and say so, so a queue can no longer eat an agent's tool call. |
 | `heavy --cache -- <cmd>` | Validation runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree) and the reviewers, audit and approver get an instant `CACHE HIT`. Failures, dirty trees and new commits run for real. |
-| `.factory/guard` | A `PreToolUse` hook in every factory agent: a test, build, install or type-check command that is not run through `heavy` is refused with the fix in the message, so the limits do not depend on the agent remembering. Needs a trusted workspace (Claude Code runs project-agent hooks only after the trust dialog, in bypass mode too); `limits.guard: false` turns it off. |
+| `.factory/guard` | A `PreToolUse` hook in every factory agent: a test, build, install or type-check command that is not run through `heavy` is refused with the fix in the message, so the limits do not depend on the agent remembering. Needs a trusted workspace (Claude Code runs project-agent hooks only after the trust dialog, in bypass mode too); `limits.guard: false` turns it off. `install` also adds a `--subagents-only` variant to `.claude/settings.local.json`, so ad-hoc `general-purpose` subagents are covered while your own session stays unrestricted. |
 | `limits.open_prs` (default 5) | Jobs at `pr-open` before new ones wait: every merge makes the other open PRs conflict, and CI is the slow part (median 3-14 h from PR to merge). `watch` and `status` show open PRs, the oldest and failing pipelines; the factory never retries a pipeline. |
-| `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the 1-minute load is above `load_max` (default 1.25 × cores) before it spawns a spec-writer, builder or review wave. |
+| `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the CPU is above 90% before it spawns a spec-writer, builder or review wave. |
 
 Defaults need no configuration; override with `limits` in `config.json`
-(`active_jobs`, `heavy_slots`, `load_max`) or the env vars `FACTORY_HEAVY_SLOTS`,
-`FACTORY_LOAD_MAX`, `FACTORY_LOCK_DIR`. `.factory/watch` shows the load and active jobs
-against the cap. The audit also has bounds: at most 3 mutation checks, a suspect file at
-most twice, base comparisons only for the claim concerned.
+(`active_jobs`, `open_prs`, `heavy_slots`, `cpu_budget`, `cpu_max`, `load_max`) or the env
+vars `FACTORY_HEAVY_SLOTS`, `FACTORY_CPU_BUDGET`, `FACTORY_CPU_MAX`, `FACTORY_LOAD_MAX`,
+`FACTORY_LOCK_DIR`. `.factory/watch` shows the load and active jobs
+against the cap. The audit also has bounds: at most 3 mutation checks (only for criteria that add
+behaviour), a suspect file at most twice, base comparisons only for the claim concerned, about 30 tool calls in total.
 
 ## Less work per job
 
@@ -84,6 +87,21 @@ most twice, base comparisons only for the claim concerned.
   a branch or a base commit for that issue (`--force` overrides), and the spec-writer
   can answer `SPEC: ALREADY-DONE`. Two earlier jobs ran for hours before the base turned out
   to contain the same fix.
+- **Round 2+ re-runs only what is needed:** two thirds of the later-round reviews came from
+  reviewers who had already passed. `.factory/rereview` picks the set: reviewers that gave
+  `CHANGES`, plus `audit` and `code`; everyone again only if the builder changed something
+  beyond what the findings pointed at. The others keep their earlier PASS (the precheck
+  reads each reviewer's latest verdict).
+- **The audit is the pace-setter** (median 11 min against 1-2 for the other reviewers), so it
+  has a call budget, starts from the cached validation, installs nothing in temporary
+  worktrees, and marks what it cannot measure in time as ⏭️ instead of digging on.
+- **Cheap orchestrator:** run the `/factory` session on sonnet with `/effort medium`: it was
+  producing 650-970 output tokens per turn, almost all reasoning, for a bookkeeping role. It
+  reports one line per event, and after about 10 delivered jobs it tells you to `/clear` and
+  continue with `/factory status` (state is on disk). It never spawns `general-purpose`
+  agents to run tests.
+- **Few screenshots:** ux/ui take at most 6 paths at 2 widths, light only unless colours
+  changed; `shoot` refuses more than 12 shots per call.
 - **No size limits as acceptance criteria:** "diff under N lines" is guidance, never blocking.
 
 ## Delivery

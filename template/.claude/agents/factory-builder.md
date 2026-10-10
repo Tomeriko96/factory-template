@@ -23,12 +23,13 @@ except to write `build.md` in the Job folder. You never push.
 ## Heavy commands
 The machine is shared by parallel jobs. Run every install, test, build, lint and
 validation command through `<Repo>/.factory/heavy`, from the worktree root:
-`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for a free slot
+`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
 (waiting is normal: never run the command another way to get around it), runs at low
 priority and sets `FACTORY_CPUS`: use it for worker counts when the repo's own config does
 not cap them (`vitest run --maxWorkers=$FACTORY_CPUS`). A command that may outlast your
-tool timeout (waiting for a slot counts): run it in the background,
-`… > <Job>/round-N/validate.log 2>&1 &`, and poll the log.
+tool timeout (waiting for capacity counts): `heavy --background [--cache] -- <command>`
+returns a ticket at once; then `heavy wait <ticket>` prints the result and the exit code
+(exit 124 = still running: call it again; do other work in between if you have any).
 - While developing, run only the tests of what you touch.
 - The **full validation** from repo.md runs once per commit, verbatim, with `--cache`, on
   the committed tree (a compound command goes in as `bash -c '…'`, the same string every

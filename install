@@ -15,7 +15,7 @@ set -euo pipefail
 
 TEMPLATE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SRC="$TEMPLATE/template"
-PATTERNS=("/.factory/" "/.claude/skills/factory/" "/.claude/agents/factory-*.md")
+PATTERNS=("/.factory/" "/.claude/skills/factory/" "/.claude/agents/factory-*.md" "/.claude/settings.local.json")
 
 die() { echo "factory: $*" >&2; exit 1; }
 
@@ -43,6 +43,39 @@ common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)"
 [ "$repo" != "$TEMPLATE" ] || die "refusing to install into the template repo itself"
 exclude="$common/info/exclude"
 
+# Add (hook=1) or remove (hook=0) the guard in <repo>/.claude/settings.local.json, keeping
+# everything else in that file. The entry is recognised by ".factory/guard" in its command.
+settings_hook() {
+  python3 - "$1" "$2" <<'PY'
+import json, os, sys
+repo, add = sys.argv[1], sys.argv[2] == "1"
+path = os.path.join(repo, ".claude", "settings.local.json")
+cmd = '"$CLAUDE_PROJECT_DIR"/.factory/guard --subagents-only'
+try:
+    cfg = json.load(open(path))
+except FileNotFoundError:
+    cfg = {}
+except ValueError:
+    sys.exit(f"factory: {path} is not valid JSON; not touching it (the guard hook is not set up)")
+pre = cfg.setdefault("hooks", {}).setdefault("PreToolUse", [])
+def ours(e):
+    return any(".factory/guard" in h.get("command", "") for h in e.get("hooks", []))
+pre[:] = [e for e in pre if not ours(e)]
+if add:
+    pre.append({"matcher": "Bash", "hooks": [{"type": "command", "command": cmd}]})
+if not pre:
+    del cfg["hooks"]["PreToolUse"]
+if not cfg.get("hooks"):
+    cfg.pop("hooks", None)
+if cfg:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    json.dump(cfg, open(path, "w"), indent=2)
+    open(path, "a").write("\n")
+elif os.path.exists(path):
+    os.remove(path)
+PY
+}
+
 strip_block() {
   [ -f "$exclude" ] && sed -i '/^# factory:begin/,/^# factory:end/d' "$exclude" || true
 }
@@ -54,6 +87,7 @@ if (( remove )); then
     grep -Eq '"stage"[[:space:]]*:[[:space:]]*"(merged|pushed|pr-open)"' "$j" || open_jobs+=" $(basename "$(dirname "$j")")"
   done
   [ -z "$open_jobs" ] || die "unfinished jobs:$open_jobs. Finish (/factory approve) or delete them first."
+  settings_hook "$repo" 0
   rm -rf "$repo/.factory" "$repo/.claude/skills/factory"
   rm -f "$repo"/.claude/agents/factory-*.md
   rmdir "$repo/.claude/skills" "$repo/.claude/agents" "$repo/.claude" 2>/dev/null || true
@@ -66,6 +100,10 @@ fi
 tracked="$(git -C "$repo" ls-files -- .factory .claude/skills/factory '.claude/agents/factory-*.md')"
 [ -z "$tracked" ] || die "these paths are tracked in git, so a local-only install is impossible:
 $tracked"
+# settings.local.json is optional: if the repo tracks it, leave it alone (agents still have the
+# guard in their frontmatter; only ad-hoc subagents are then not covered)
+settings_ok=1
+[ -z "$(git -C "$repo" ls-files -- .claude/settings.local.json)" ] || settings_ok=0
 
 # exclude first, so the files never show up as untracked
 mkdir -p "$(dirname "$exclude")"
@@ -81,8 +119,15 @@ rm -rf "$repo/.claude/skills/factory"
 cp -R "$SRC/.claude/skills/factory" "$repo/.claude/skills/factory"
 rm -f "$repo"/.claude/agents/factory-*.md
 cp "$SRC"/.claude/agents/factory-*.md "$repo/.claude/agents/"
-cp "$SRC/.factory/shoot" "$SRC/.factory/serve" "$SRC/.factory/watch" "$SRC/.factory/heavy" "$SRC/.factory/guard" "$SRC/.factory/precheck" "$repo/.factory/"
-chmod +x "$repo/.factory/shoot" "$repo/.factory/serve" "$repo/.factory/watch" "$repo/.factory/heavy" "$repo/.factory/guard" "$repo/.factory/precheck"
+for f in shoot serve watch heavy guard precheck rereview; do
+  cp "$SRC/.factory/$f" "$repo/.factory/$f"
+  chmod +x "$repo/.factory/$f"
+done
+if (( settings_ok )); then
+  settings_hook "$repo" 1
+else
+  echo "note: .claude/settings.local.json is tracked here; the guard hook for ad-hoc subagents was not added"
+fi
 [ -f "$repo/.factory/backlog.md" ] || cp "$SRC/.factory/backlog.md" "$repo/.factory/"
 git -C "$TEMPLATE" describe --tags --always --dirty > "$repo/.factory/VERSION" 2>/dev/null \
   || echo unknown > "$repo/.factory/VERSION"

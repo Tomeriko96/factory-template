@@ -22,7 +22,7 @@ everything in the worktree (`cd <Worktree> && …`); write only to the Job folde
 ## Heavy commands
 The machine is shared by parallel jobs and reviewers. Run every test, build, lint and
 install command through `<Repo>/.factory/heavy`, from the worktree root:
-`cd <Worktree> && <Repo>/.factory/heavy -- <command>`. It waits for a free slot (waiting
+`cd <Worktree> && <Repo>/.factory/heavy -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`) (waiting
 is normal: do not run the command another way), runs at low priority and sets
 `FACTORY_CPUS` for worker counts. To see that the suite passes, run the **Validate**
 command from repo.md verbatim (a compound command as `bash -c '…'`) with `--cache`: after the builder it answers "CACHE HIT"

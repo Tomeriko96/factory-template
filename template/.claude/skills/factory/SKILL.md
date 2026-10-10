@@ -60,8 +60,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   intake); `guard: false` switches off `.factory/guard`; `docs_globs` = paths that count
   as documentation for `--docs` (default `*.md`, `*.mdx`, `*.rst`, `*.adoc`, `*.txt`,
   `docs/**`, `LICENSE*`, `mkdocs.yml`);
-  `heavy_slots` and `load_max` set the machine-wide limits of `.factory/heavy` (defaults:
-  cores/4 slots, load limit 1.25 × cores). See **Resources**.
+  `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` set the machine-wide limits of
+  `.factory/heavy` (defaults: at most max(2, cores/2) commands at once, together at most
+  75% of the cores, CPU not above 90%, load average ignored). See **Resources**.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 
@@ -96,7 +97,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  watch  VERSION
+  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  rereview  watch  VERSION
   cache/                                 (.factory/heavy: passing validation results per tree)
   jobs/<job-id>/
     job.json
@@ -132,6 +133,7 @@ feature, lowercase, max 40 characters.
   "started": "<ISO8601>",
   "updated": "<ISO8601>",
   "history": [{ "stage": "spec", "at": "<ISO8601>" }],
+  "round_heads": {},
   "pr_url": null,
   "issue_closed": null,
   "sync": { "count": 0, "last": null }
@@ -190,22 +192,28 @@ Branch: factory/<job-id>
    `superseded`, report the evidence, clean up and stop. Otherwise stage → `build`.
 3. **Build round N** (N = round + 1): run the load gate, then spawn `factory-builder`, prompt
    `<paths> Build round N. Port: <port>. Mode: <mode>.` Wait until `round-N/build.md` exists.
-   Stage → `review`, round = N.
+   Stage → `review`, round = N; store `git -C <worktree> rev-parse HEAD` in `job.json`
+   as `round_heads.<N>`.
 4. **Review round N:** the set is `config.reviewers`, except that `ux` and `ui` run only
    when the job touches the UI: some file in `git diff --name-only <base>...<branch>`
    matches the "UI paths" line of repo.md (default: `*.tsx *.jsx *.vue *.svelte *.css
    *.scss *.html`, `templates/`, `static/`, `frontend/src/`). Round > 1: only if they ran
    before and gave `CHANGES`, or UI files changed since. Say in one line when they are
-   skipped. Run the load gate, then spawn one `factory-reviewer-<name>` per reviewer in
+   skipped. **Round > 1:** do not re-run everyone: run `<repo>/.factory/rereview <job-id>
+   N --set <the names above, comma separated>` and use the `SET:` line it prints (reviewers
+   that gave `CHANGES`, plus `audit` and `code`, plus everyone when the builder changed
+   more than the findings pointed at); say its `WHY:` in one line. A reviewer left out keeps
+   its earlier PASS. Run the load gate, then spawn one `factory-reviewer-<name>` per reviewer in
    the set, **all in one message** (parallel). Prompt:
    `<paths> Review round N. Port: <port + offset>.`
    plus one line: `You must write round-N/review-<name>.md (first line VERDICT:
    PASS|CHANGES); it is required and part of your task.`
-   **WAIT FOR ALL:** continue only when every `round-N/review-<name>.md` exists. Read
+   **WAIT FOR ALL:** continue only when every `round-N/review-<name>.md` of the set exists. Read
    only the first line of each (`VERDICT: PASS|CHANGES`) into `reviews`. A verdict that
    only appears in the agent's reply message is not a verdict: see Rules.
 5. **Decision:**
-   - all `PASS` → run `<repo>/.factory/precheck <job-id> N` (mechanical checks; writes
+   - every reviewer's latest verdict `PASS` (a reviewer left out of this round counts with
+     its earlier PASS) → run `<repo>/.factory/precheck <job-id> N` (mechanical checks; writes
      `<Job>/precheck.md`, read only its first line). Stage `approve`, spawn
      `factory-approver` (sonnet by default) with prompt `<paths> Final round: N. Mode:
      <mode>.`; pass `model: opus` instead when the precheck says `ISSUES`, or N > 1.
@@ -489,13 +497,17 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
 
 1. **`MAX_ACTIVE_JOBS`** (above): the orchestrator never has more jobs in flight.
 2. **Load gate:** before every spawn of a spec-writer, builder or review wave run
-   `<repo>/.factory/heavy gate` (Bash timeout 600000). It returns when the 1-minute load
-   average is at or below the limit, or after 10 minutes with a warning; then continue and
-   mention the warning in your next report. Do not poll the load yourself.
+   `<repo>/.factory/heavy gate` (Bash timeout 600000). It returns when the CPU is at or
+   below its limit (90%, sampled over a second), or after 10 minutes with a warning; then
+   continue and mention the warning in your next report. Do not poll the load yourself.
 3. **`.factory/heavy`** for every test, build, lint, install and validation command the
-   agents run, in every repo on this machine: it holds a machine-wide set of slots (default
-   cores/4), runs the command at low priority and passes `FACTORY_CPUS` (its share of the
-   cores). `.factory/heavy status` shows who holds the slots and the load.
+   agents run, in every repo on this machine. Each command has a weight (the cores it may
+   use: 3 for Node, browser and build tools, 1 for the rest); the weights running at the
+   same time, host-wide, stay within 75% of the cores. It runs at low priority and passes
+   `FACTORY_CPUS` (its weight) for worker counts. A command that may wait or run longer
+   than a tool call lives goes `heavy --background -- <cmd>` (returns a ticket) and
+   `heavy wait <ticket>` (repeat while it exits 124). `.factory/heavy status` shows who
+   holds capacity and the CPU.
 
 `rework`, `resume` and `sync` move a job back into `build`/`review`: they obey the same
 capacity check and load gate (a sync that finds no room is reported as "postponed" and
@@ -528,6 +540,17 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   together only when their files are unlikely to overlap (backend vs frontend, different
   modules); start overlapping ones after the earlier job is delivered, so `/factory sync`
   has less to do.
+- **Keep your own turns cheap.** Reasoning effort `medium` is enough for this role (tell
+  the user to run `/effort medium`; `xhigh` buys nothing here). Report one line per
+  transition or event ("013 built · reviews running"), never a recap of an agent's reply
+  and never a status table unless asked (`status`). Read agent files only as this skill says.
+- **Long sessions:** all state is on disk. After about 10 jobs have been delivered in one
+  session, or when the session feels slow, tell the user once: "state is on disk; `/clear`
+  and run `/factory status` to continue with a fresh context".
+- **Never spawn `general-purpose` or `Explore` agents to run tests, builds or validations,
+  and never run them yourself:** use the factory agents. (The guard hook covers the factory
+  agents, and subagents in general where `install` set up the settings hook; do not rely
+  on it.)
 - Do not start a job past `MAX_ACTIVE_JOBS`, and do not work around a busy slot or a high
   load by running tests yourself or in another way: waiting is the correct behaviour.
 - Never run two builders in the same worktree.

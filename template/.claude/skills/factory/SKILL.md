@@ -314,7 +314,9 @@ issues**) or `needs-human` (closed without merge), report it and skip it. No con
 1. `job.json.sync.count` is at `MAX_SYNCS` → stage `needs-human`, report. Otherwise
    count + 1. The worktree gone? `git worktree add <worktree> factory/<id>`. Remote
    ahead of your branch (someone pushed)? Fast-forward it first; diverged → `needs-human`.
-2. Spawn `factory-builder`: `<paths> Sync <n>. Port: <port>. Mode: <mode>.` It merges
+2. Spawn `factory-builder` with `model: sonnet` (a sync is a merge, not a build; opus is
+   not needed, and a conflict sonnet cannot settle ends as `NEEDS-HUMAN`, not as a guess):
+   `<paths> Sync <n>. Port: <port>. Mode: <mode>.` It merges
    `<remote>/<base>` into the job branch (a merge commit: never rebase, never
    force-push), resolves the conflicts, runs the validation and writes
    `<Job>/sync-<n>/build.md` whose first line is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`
@@ -334,13 +336,15 @@ issues**) or `needs-human` (closed without merge), report it and skip it. No con
 5. Stage stays `pr-open` after a successful sync; write `sync: {count, last}` and a
    `history` entry to `job.json`. Report one line per job: id, MR, result.
 
-Runs automatically at the end of every delivery and whenever `status` is called. For
-continuous watching the user can run `/loop 10m /factory sync`.
+Runs automatically, check **and** fix: at the end of every delivery, on every `status`,
+and whenever you notice that a PR/MR got merged (every merge can make the other open
+PRs/MRs conflict: then run it for all other jobs at `pr-open`). Jobs that are not
+checked for a while (nobody calls `status`) are caught by `/loop 10m /factory sync`.
 
 ### `/factory` (no argument) / `/factory status`
-Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run the conflict
-check of `/factory sync` (check only, tell the user when a fix is needed and offer it;
-`/factory sync` does the fix). For those jobs also read the CI state and write it to
+Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run
+`/factory sync` for them (check and, on a conflict, the fix: the sonnet builder merges
+`base`; a sync that finds no room is "postponed"). For those jobs also read the CI state and write it to
 `job.json` as `"pr_state": {"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
 "merge": "<mergeable|conflict|blocked|unknown>"}` (`gitlab`: `head_pipeline.status` and
 `detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json

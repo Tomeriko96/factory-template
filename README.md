@@ -127,8 +127,9 @@ with `/factory rework <id> "<comments>"`; the next approved round pushes to the 
 so the PR/MR updates.
 
 `/factory sync [<id>]` keeps open PRs/MRs mergeable: it asks the forge whether each still
-merges into the base branch (also at the end of delivery and on `status`), and on a
-conflict has the builder merge the base into the job branch (a merge commit, never a
+merges into the base branch (also at the end of delivery, on every `status` and whenever a
+merge is noticed, since each merge can make the other open PRs conflict), and on a
+conflict has a sonnet builder merge the base into the job branch (a merge commit, never a
 rebase or force-push), runs the validation, lets the code reviewer check the merge and
 pushes. A conflict that needs a decision (the base already fixes the same thing, both
 sides change the same behaviour, validation fails) is never resolved by picking a side:

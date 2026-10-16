@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Factory CI status: fetches GitHub Actions / GitLab CI state per factory job + repo-wide.
+
+  .factory/ci                  refresh stale jobs (TTL 30s) and print summary
+  .factory/ci --once --ttl 0   force refresh all pr-open jobs, print JSON lines
+  .factory/ci <job-id>         refresh + show that job's pipeline stages/jobs
+  .factory/ci --others         also list recent pipelines outside factory/* branches
+  .factory/ci --quiet          refresh, print nothing (for .factory/watch loop)
+
+Cache: .factory/cache/ci-<job-id>.json + ci-others.json, so `watch` never blocks on
+the API. Forge comes from .factory/config.json (`github` | `gitlab`).
+
+Requires: `gh` (github) or `glab` (gitlab) logged in. Missing CLI/auth -> cached
+state is kept and the error is reported once, never crashes watch.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.parse
+
+HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
+CACHE = os.path.join(HERE, "cache")
+TTL_DEFAULT = 30
+CLI_TIMEOUT = 15
+
+
+def load_config():
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def load_jobs():
+    jobs_dir = os.path.join(HERE, "jobs")
+    jobs = []
+    if not os.path.isdir(jobs_dir):
+        return jobs
+    for name in sorted(os.listdir(jobs_dir)):
+        p = os.path.join(jobs_dir, name, "job.json")
+        try:
+            with open(p) as f:
+                j = json.load(f)
+        except (OSError, ValueError):
+            continue
+        j.setdefault("id", name)
+        jobs.append(j)
+    return jobs
+
+
+def run(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=CLI_TIMEOUT)
+    except FileNotFoundError:
+        return None, "command not found: " + cmd[0]
+    except subprocess.TimeoutExpired:
+        return None, "timeout: " + " ".join(cmd[:4])
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        return None, "; ".join(err[-2:]) if err else f"exit {r.returncode}"
+    try:
+        return json.loads(r.stdout) if r.stdout.strip() else {}, None
+    except ValueError:
+        return r.stdout, None
+
+
+def cache_path(job_id):
+    os.makedirs(CACHE, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", job_id)
+    return os.path.join(CACHE, f"ci-{safe}.json")
+
+
+def cache_fresh(path, ttl):
+    try:
+        age = time.time() - os.path.getmtime(path)
+        return age < ttl
+    except OSError:
+        return False
+
+
+def read_cache(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def write_cache(path, data):
+    os.makedirs(CACHE, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+# ---------- GitHub ----------
+
+def gh_pr_number(pr_url):
+    m = re.search(r"/pull/(\d+)", pr_url or "")
+    return m.group(1) if m else None
+
+
+def fetch_github(job, deep=True):
+    """Returns dict {pipeline, merge, jobs:[{name,stage,status,url}], error}."""
+    pr_url = job.get("pr_url") or ""
+    num = gh_pr_number(pr_url)
+    branch = job.get("branch") or ""
+    if not num:
+        return {"error": "no pr_url with /pull/<n> in job.json"}
+    pr, err = run(["gh", "pr", "view", num, "--json",
+                   "number,state,mergeStateStatus,headRefName,statusCheckRollup"])
+    if err:
+        return {"error": err}
+    rollup = pr.get("statusCheckRollup") or []
+    jobs = []
+    for c in rollup:
+        # status: QUEUED/IN_PROGRESS/COMPLETED ; conclusion: SUCCESS/FAILURE/...
+        st = (c.get("status") or "").upper()
+        concl = (c.get("conclusion") or "").upper()
+        if st == "COMPLETED":
+            norm = {"SUCCESS": "success", "FAILURE": "failed",
+                    "CANCELLED": "canceled", "SKIPPED": "skipped"}.get(concl, "unknown")
+        elif st == "IN_PROGRESS":
+            norm = "running"
+        else:
+            norm = "pending"
+        jobs.append({"name": c.get("name", "?"), "stage": "",
+                     "status": norm, "url": c.get("detailsUrl") or ""})
+    pipeline = "none" if not rollup else (
+        "failed" if any(j["status"] == "failed" for j in jobs)
+        else "running" if any(j["status"] in ("running", "pending") for j in jobs)
+        else "success")
+    merge = str(pr.get("mergeStateStatus") or "UNKNOWN").lower()
+    out = {"forge": "github", "pipeline": pipeline, "merge": merge,
+           "pr_state": pr.get("state"), "jobs": jobs, "url": pr_url,
+           "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    # Deep: per-step jobs of the latest run on this branch (gh run view --json jobs)
+    if deep and branch:
+        runs, rerr = run(["gh", "run", "list", "--branch", branch, "--limit", "1",
+                          "--json", "databaseId,status,conclusion,url,createdAt"])
+        if not rerr and runs:
+            rid = str(runs[0].get("databaseId"))
+            det, derr = run(["gh", "run", "view", rid, "--json", "jobs"])
+            if not derr and isinstance(det, dict) and det.get("jobs"):
+                djobs = []
+                for jb in det["jobs"]:
+                    st = normalize_gh_run(jb.get("status"), jb.get("conclusion"))
+                    djobs.append({"name": jb.get("name", "?"), "stage": "",
+                                  "status": st, "url": runs[0].get("url", "")})
+                if djobs:
+                    out["jobs"] = djobs
+                    out["run_url"] = runs[0].get("url")
+                    if any(j["status"] == "failed" for j in djobs):
+                        out["pipeline"] = "failed"
+                    elif any(j["status"] == "running" for j in djobs):
+                        out["pipeline"] = "running"
+    return out
+
+
+def normalize_gh_run(status, conclusion):
+    s, c = (status or "").upper(), (conclusion or "").upper()
+    if s == "COMPLETED":
+        return {"SUCCESS": "success", "FAILURE": "failed",
+                "CANCELLED": "canceled", "SKIPPED": "skipped"}.get(c, "unknown")
+    if s == "IN_PROGRESS":
+        return "running"
+    return "pending"
+
+
+def fetch_github_others(limit=5):
+    runs, err = run(["gh", "run", "list", "--limit", str(limit),
+                     "--json", "name,headBranch,status,conclusion,url,createdAt"])
+    if err:
+        return {"error": err}
+    items = []
+    for r in runs or []:
+        if (r.get("headBranch") or "").startswith("factory/"):
+            continue
+        items.append({"branch": r.get("headBranch"), "name": r.get("name"),
+                      "status": normalize_gh_run(r.get("status"), r.get("conclusion")),
+                      "url": r.get("url"), "at": r.get("createdAt")})
+        if len(items) >= limit:
+            break
+    return {"pipelines": items, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+# ---------- GitLab ----------
+
+def gitlab_project_path():
+    r = subprocess.run(["git", "remote", "get-url", "origin"],
+                       capture_output=True, text=True, cwd=os.path.dirname(HERE))
+    url = (r.stdout or "").strip()
+    m = re.search(r"[:/]([^:/]+\/.+?)(\.git)?$", url)
+    if not m:
+        return None
+    return m.group(1)
+
+
+def gitlab_project_id():
+    path = gitlab_project_path()
+    if not path:
+        return None, "no origin remote to derive project path"
+    enc = urllib.parse.quote(path, safe="")
+    proj, err = run(["glab", "api", f"projects/{enc}"])
+    if err:
+        return None, err
+    pid = proj.get("id") if isinstance(proj, dict) else None
+    return pid, None if pid else "project not found"
+
+
+def glab_mr_iid(pr_url):
+    m = re.search(r"/merge_requests/(\d+)", pr_url or "")
+    return m.group(1) if m else None
+
+
+def normalize_gl(status):
+    return {"success": "success", "failed": "failed", "running": "running",
+            "pending": "pending", "canceled": "canceled", "skipped": "skipped",
+            "manual": "manual", "created": "pending"}.get((status or "").lower(), status or "unknown")
+
+
+def fetch_gitlab(job, pid=None):
+    pr_url = job.get("pr_url") or ""
+    iid = glab_mr_iid(pr_url)
+    if not iid:
+        return {"error": "no pr_url with /merge_requests/<iid> in job.json"}
+    pid = pid or gitlab_project_id()[0]
+    if not pid:
+        _, err = gitlab_project_id()
+        return {"error": err or "unknown project"}
+    mr, err = run(["glab", "api", f"projects/{pid}/merge_requests/{iid}"])
+    if err:
+        return {"error": err}
+    pipe = mr.get("head_pipeline") or {}
+    pid_pipe = pipe.get("id")
+    pipeline = normalize_gl(pipe.get("status")) if pipe else "none"
+    merge = mr.get("detailed_merge_status") or ("merged" if mr.get("state") == "merged" else "unknown")
+    jobs = []
+    if pid_pipe:
+        js, jerr = run(["glab", "api", f"projects/{pid}/pipelines/{pid_pipe}/jobs?per_page=100"])
+        if not jerr and isinstance(js, list):
+            for jb in js:
+                jobs.append({"name": jb.get("name", "?"), "stage": jb.get("stage", ""),
+                             "status": normalize_gl(jb.get("status")),
+                             "url": jb.get("web_url", "")})
+    return {"forge": "gitlab", "pipeline": pipeline, "merge": str(merge).lower(),
+            "mr_state": mr.get("state"), "jobs": jobs, "url": pr_url,
+            "pipeline_id": pid_pipe,
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+def fetch_gitlab_others(pid, limit=5):
+    pipes, err = run(["glab", "api", f"projects/{pid}/pipelines?per_page={limit}&order_by=updated_at"])
+    if err:
+        return {"error": err}
+    items = []
+    for p in pipes or []:
+        ref = p.get("ref", "")
+        if ref.startswith("factory/"):
+            continue
+        items.append({"branch": ref, "name": f"pipeline #{p.get('id')}",
+                      "status": normalize_gl(p.get("status")),
+                      "url": p.get("web_url"), "at": p.get("updated_at")})
+        if len(items) >= limit:
+            break
+    return {"pipelines": items, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+# ---------- main ----------
+
+def refresh_job(job, forge, ttl, force, quiet):
+    if job.get("stage") != "pr-open":
+        return None
+    path = cache_path(job["id"])
+    if not force and cache_fresh(path, ttl):
+        return read_cache(path)
+    if forge == "gitlab":
+        data = fetch_gitlab(job)
+    elif forge == "github":
+        data = fetch_github(job)
+    else:
+        data = {"error": f"unknown forge '{forge}' (config.json)"}
+    data["job"] = job["id"]
+    if data.get("error"):
+        if not quiet:
+            print(f"{job['id']}: CI error: {data['error']}", file=sys.stderr)
+        old = read_cache(path)
+        if old:
+            old["stale_error"] = data["error"]
+            old["stale_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            try:
+                write_cache(path, old)
+            except OSError:
+                pass
+            return old
+    else:
+        write_cache(path, data)
+    return data
+
+
+def main():
+    args = sys.argv[1:]
+    ttl = TTL_DEFAULT
+    quiet = "--quiet" in args
+    force = "--ttl" in args and "0" in args
+    if "--ttl" in args:
+        try:
+            ttl = int(args[args.index("--ttl") + 1])
+            force = ttl == 0
+        except (IndexError, ValueError):
+            pass
+    if "--once" in args:
+        force = True
+    cfg = load_config()
+    forge = (cfg.get("forge") or "github").lower()
+    jobs = load_jobs()
+    targets = [a for a in args if not a.startswith("-")]
+    if targets and targets[0] != "all":
+        jobs = [j for j in jobs if j["id"] in targets or j["id"].startswith(targets[0])]
+        if not jobs:
+            sys.exit(f"no job '{targets[0]}'")
+    pr_jobs = [j for j in jobs if j.get("stage") == "pr-open"]
+    pid = None
+    if forge == "gitlab" and pr_jobs:
+        pid, _ = gitlab_project_id()
+    results = [refresh_job(j, forge, ttl, force or "--once" in args, quiet) for j in pr_jobs]
+    results = [r for r in results if r]
+
+    if targets and not quiet:
+        for r in results:
+            print(f"== {r.get('job')}  pipeline={r.get('pipeline')} merge={r.get('merge')}")
+            if r.get("error"):
+                print(f"   error: {r['error']}")
+            for jb in r.get("jobs", []):
+                stage = f"[{jb['stage']}] " if jb.get("stage") else ""
+                print(f"   {jb['status']:<8} {stage}{jb['name']}")
+        return
+    if "--others" in args or quiet:
+        others_path = os.path.join(CACHE, "ci-others.json")
+        if not force and cache_fresh(others_path, max(ttl, 60)):
+            pass
+        else:
+            if forge == "github":
+                others = fetch_github_others()
+            elif forge == "gitlab":
+                pid = pid or gitlab_project_id()[0]
+                others = fetch_gitlab_others(pid) if pid else {"error": "unknown project"}
+            else:
+                others = {"error": f"unknown forge '{forge}'"}
+            if not others.get("error"):
+                write_cache(others_path, others)
+        if "--others" in args and not quiet:
+            print(json.dumps(read_cache(others_path) or {}, indent=2))
+            return
+    if "--others" in args and not quiet:
+        return
+    if not quiet:
+        ok = sum(1 for r in results if not r.get("error"))
+        fail = sum(1 for r in results if r.get("pipeline") == "failed")
+        print(f"ci: {len(results)} pr-open jobs, {ok} fetched"
+              + (f", {fail} failing" if fail else ""))
+        for r in results:
+            n = len(r.get("jobs", []))
+            print(f"  {r.get('job')}: {r.get('pipeline')} ({n} checks/jobs)")
+
+
+if __name__ == "__main__":
+    main()

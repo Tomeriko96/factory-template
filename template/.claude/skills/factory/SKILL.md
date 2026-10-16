@@ -97,8 +97,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  rereview  watch  VERSION
-  cache/                                 (.factory/heavy: passing validation results per tree)
+  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  rereview  watch  ci  VERSION
+  cache/                                 (.factory/heavy: passing validation results per tree;
+                                          .factory/ci: CI/CD state per job as ci-<job-id>.json)
   jobs/<job-id>/
     job.json
     spec.md
@@ -350,7 +351,11 @@ Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run
 `detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json
 statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
 failing, Z waiting on CI". Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
-has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board.
+has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board
+(it shows one CI/CD line per `pr-open` job with stages/jobs from `.factory/ci`,
+refreshed live; `.factory/watch <id>` shows the full stage/job table;
+`.factory/watch --no-ci` hides CI; `.factory/ci --others` lists recent pipelines
+outside `factory/*` branches).
 
 ### `/factory setup`
 Follow `setup.md` in this skill's directory.

@@ -5,7 +5,11 @@
   .factory/watch --once   print once and exit
   .factory/watch --tmux   open the board in a split pane at the bottom (inside tmux)
   .factory/watch <job-id> detail: files in the job folder + first lines of decision.md
+                          + CI/CD stages/jobs (via .factory/ci cache)
+  .factory/watch --no-ci  skip CI/CD lines (no `gh`/`glab` calls at all)
 Unknown keys in job.json are ignored; missing fields show '-'.
+CI state comes from .factory/cache/ci-<job-id>.json (written by .factory/ci);
+watch refreshes stale entries (TTL 30s) in the background of each loop.
 """
 import json, os, subprocess, sys, time
 from datetime import datetime, timezone
@@ -85,9 +89,90 @@ def detail(jobs_dir, job_id):
         p = os.path.join(d, f)
         if os.path.exists(p):
             out += ["", f"-- {f}"] + open(p).read().splitlines()[:12]
+    out += ["", "-- CI/CD"] + ci_detail_lines(job_id)
     return "\n".join(out)
 
-def render(jobs):
+CI_SYM = {"success": "✓", "failed": "✗", "running": "●", "pending": "○",
+          "canceled": "-", "skipped": "-", "manual": "○", "unknown": "?", "none": "-"}
+CI_COL = {"success": "\033[32m", "failed": "\033[1;31m", "running": "\033[33m",
+          "pending": "\033[2m"}
+
+
+def ci_cache(job_id):
+    p = os.path.join(HERE, "cache", f"ci-{job_id}.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def ci_paint(text, status):
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return text
+    return f"{CI_COL.get(status, '')}{text}\033[0m"
+
+
+def ci_one_line(job_id):
+    """Compact second line under a pr-open job: stages/jobs with status."""
+    ci = ci_cache(job_id)
+    if not ci:
+        return None
+    if ci.get("error") and not ci.get("jobs"):
+        return f"  └ CI: error ({ci['error'][:80]})"
+    jobs = ci.get("jobs") or []
+    if not jobs:
+        return f"  └ CI: pipeline={ci.get('pipeline', '-')}"
+    # Group GitLab jobs by stage, keep GitHub checks flat
+    stages = {}
+    for jb in jobs:
+        stages.setdefault(jb.get("stage") or "", []).append(jb)
+    parts = []
+    for stage, js in stages.items():
+        prefix = f"{stage}:" if stage else ""
+        cells = " ".join(ci_paint(f"{j['name']}{CI_SYM.get(j['status'], '?')}", j["status"])
+                          for j in js[:12])
+        parts.append(f"{prefix}{cells}" + ("…" if len(js) > 12 else ""))
+    pipe = ci.get("pipeline", "-")
+    line = f"  └ CI {pipe} │ " + " │ ".join(parts)
+    if ci.get("stale_error"):
+        line += " (stale)"
+    return line
+
+
+def ci_detail_lines(job_id):
+    ci = ci_cache(job_id)
+    if not ci:
+        return ["no CI cache yet (run .factory/ci <job-id>)"]
+    lines = [f"pipeline={ci.get('pipeline', '-')} merge={ci.get('merge', '-')}"
+             + (f" at={ci.get('at', '-')}" if ci.get("at") else "")]
+    if ci.get("url"):
+        lines.append(ci["url"])
+    if ci.get("error"):
+        lines.append(f"error: {ci['error']}")
+    for jb in ci.get("jobs", []):
+        stage = f"[{jb.get('stage')}] " if jb.get("stage") else ""
+        lines.append(f"  {CI_SYM.get(jb.get('status'), '?')} {jb.get('status', '-'):<8} "
+                     f"{stage}{jb.get('name')}")
+    if ci.get("stale_error"):
+        lines.append(f"(stale: {ci['stale_error']})")
+    return lines
+
+
+def maybe_refresh_ci(no_ci):
+    """Refresh stale CI caches; never blocks the board for long."""
+    if no_ci:
+        return
+    ci = os.path.join(HERE, "ci")
+    if not os.path.exists(ci):
+        return
+    try:
+        subprocess.run([ci, "--quiet"], timeout=60,
+                       capture_output=True, cwd=os.path.dirname(HERE))
+    except Exception:
+        pass
+
+def render(jobs, no_ci=False):
     if not jobs:
         return "factory board: no jobs yet"
     sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
@@ -100,10 +185,36 @@ def render(jobs):
                            f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
                            f"{r:<38} {age(j['updated']) if j.get('updated') else '-'}",
                            j.get("stage")))
+        if not no_ci and j.get("stage") == "pr-open":
+            sub = ci_one_line(j["id"])
+            if sub:
+                lines.append(sub)
+    others = others_line() if not no_ci else None
+    if others:
+        lines += ["", others]
     return "\n".join(lines)
+
+
+def others_line():
+    """One footer line with recent non-factory pipelines (repo-wide CI)."""
+    p = os.path.join(HERE, "cache", "ci-others.json")
+    try:
+        with open(p) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    pipes = data.get("pipelines") or []
+    if not pipes:
+        return None
+    cells = []
+    for pl in pipes[:5]:
+        sym = CI_SYM.get(pl.get("status"), "?")
+        cells.append(ci_paint(f"{pl.get('branch', '?')[:24]}{sym}", pl.get("status")))
+    return "other CI: " + "  ".join(cells)
 
 def main():
     jobs_dir = os.path.join(HERE, "jobs")
+    no_ci = "--no-ci" in sys.argv
     if "--tmux" in sys.argv:
         if not os.environ.get("TMUX"):
             sys.exit("not inside tmux; just run .factory/watch")
@@ -112,14 +223,17 @@ def main():
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if args:
+        maybe_refresh_ci(no_ci)
         print(detail(jobs_dir, args[0]))
         return
     if "--once" in sys.argv:
-        print(render(load(jobs_dir)))
+        maybe_refresh_ci(no_ci)
+        print(render(load(jobs_dir), no_ci))
         return
     try:
         while True:
-            print("\033[2J\033[H" + render(load(jobs_dir)) + "\n\n(ctrl-c to stop)")
+            maybe_refresh_ci(no_ci)
+            print("\033[2J\033[H" + render(load(jobs_dir), no_ci) + "\n\n(ctrl-c to stop)")
             time.sleep(2)
     except KeyboardInterrupt:
         pass

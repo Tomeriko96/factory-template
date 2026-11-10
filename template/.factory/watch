@@ -309,6 +309,8 @@ def merge_state(j, ci):
         return "conflict → sync", "red"
     if m == "behind":
         return "behind base", "yellow"
+    if m in ("not_open", "merged", "closed"):  # the forge says it is no longer open: the job's state is stale
+        return "no longer open → sync", "yellow"
     if "draft" in m:
         return "draft", "dim"
     if m in ("blocked", "not_approved", "discussions_not_resolved"):
@@ -428,7 +430,7 @@ def next_command(j):
         return f"/factory resume {jid}"
     if sec == "prs":
         m, _ = merge_state(j, j["_repo"].ci(jid))
-        return f"/factory sync {jid}" if m.startswith("conflict") else f'/factory rework {jid} "<review comments>"'
+        return f"/factory sync {jid}" if m.startswith(("conflict", "no longer open")) else f'/factory rework {jid} "<review comments>"'
     if j.get("stage") == "pushed":
         return f"/factory deliver {jid} pr"
     return None
@@ -551,6 +553,8 @@ def others_line(repos):
     for r in repos:
         for p in r.others():
             b = str(p.get("branch") or "?")
+            if b.startswith("refs/merge-requests/"):  # GitLab merge trains and MR pipelines: noise here
+                continue
             key = (r.name, b)
             if key in seen:
                 continue

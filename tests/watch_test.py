@@ -69,6 +69,7 @@ try:
         {"name": "unit", "status": "success"}, {"name": "unit", "status": "success"}]},
         open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
     json.dump({"pipelines": [{"branch": "main", "status": "success"}, {"branch": "main", "status": "failed"},
+                             {"branch": "refs/merge-requests/12/train", "status": "success"},
                              {"branch": "feat/x", "status": "running"}]},
               open(os.path.join(fd, "cache", "ci-others.json"), "w"))
 
@@ -110,6 +111,19 @@ try:
     check("006 merged" in out and "007 superseded" in out, "--all does not list finished jobs")
     out = watch("--once", "--no-ci")
     check("lint" not in out and "other CI" not in out, "--no-ci still shows CI")
+
+    # A GitLab MR that is no longer open (merged or closed) while the job still says pr-open
+    json.dump({"pipeline": "success", "merge": "not_open", "jobs": [{"name": "t", "status": "success"}]},
+              open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
+    out = watch("--once")
+    check("no longer open → sync" in out, "a merged/closed MR is not flagged as stale")
+    check("refs/merge-requests" not in out, "GitLab merge-request refs shown under other CI")
+    nxt = {d["id"]: d["next"] for d in json.loads(watch("--json"))}
+    check(nxt.get("005-open-pr") == "/factory sync 005-open-pr", f"next for a no-longer-open MR: {nxt.get('005-open-pr')}")
+    json.dump({"pipeline": "failed", "merge": "dirty", "jobs": [
+        {"name": "lint", "status": "success"}, {"name": "lint", "status": "failed"},
+        {"name": "unit", "status": "success"}, {"name": "unit", "status": "success"}]},
+        open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
 
     data = json.loads(watch("--json"))
     sec = {d["id"]: d["section"] for d in data}

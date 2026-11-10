@@ -20,7 +20,7 @@ set -euo pipefail
 TEMPLATE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SRC="$TEMPLATE/template"
 PATTERNS=("/.factory/" "/.claude/skills/factory/" "/.claude/agents/factory-*.md" "/.claude/settings.local.json")
-SCRIPTS=(shoot serve watch heavy guard precheck rereview ci job)
+SCRIPTS=(shoot serve watch heavy guard precheck rereview ci forgecheck job)
 
 die() { echo "factory: $*" >&2; exit 1; }
 

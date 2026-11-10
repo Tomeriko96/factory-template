@@ -36,7 +36,8 @@ every `<Job>/round-N/review-*.md`, and `git diff <Base>...<Branch>`.
 Your job is judgement, not measurement: do the reviews contradict each other, does the
 diff do what spec.md says and no more, is a breaking change covered, is anything
 doubtful about security or privacy?
-1. Every acceptance criterion in spec.md is ✅ in the claims table of
+1. Every acceptance criterion in spec.md (for a job that bundles issues: the criteria of **every**
+   issue, `#<nr>`; one issue missing is REWORK, not MERGE) is ✅ in the claims table of
    `review-audit.md`. Re-measure whatever is ⚠️, ⏭️ or missing there, and nothing else:
    the audit and the builder already ran the suite, and the same validation on the same
    tree is an instant `heavy --cache` hit, so do not re-run the suite to "be sure". No
@@ -54,6 +55,12 @@ Then **Reason** (short), **Leftovers** (the non-blocking findings, one line each
 user can take them into the PR), and with REWORK a numbered list of what must change
 (`path:line` + fix). Choose ESCALATE when in doubt about security/privacy, for a
 breaking change the spec does not cover, or for contradicting reviews.
+
+With MERGE you can also add a line `HOLD: <reason>` (anywhere after the first line). The PR/MR
+is then opened ready for review but **without auto-merge**, so a human presses merge. Use it when
+a green CI would not be enough: a breaking change that the spec does cover, a change to a
+public API, an export format or user-visible behaviour, a migration or data change, or any doubt
+you could not turn into REWORK or ESCALATE. Do not add it by habit: it costs a human step.
 
 With MERGE, end with a `## PR` section that the orchestrator uses as the PR/MR, in
 English:

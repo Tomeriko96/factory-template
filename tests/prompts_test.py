@@ -37,6 +37,10 @@ texts = {name(p): open(p).read() for p in AGENTS}
 check(len(texts) >= 12, f"expected at least 12 agents, found {len(texts)}")
 for n, t in texts.items():
     front = t.split("---", 2)[1] if t.startswith("---") else ""
+    if n == "triage":   # not a job agent: no worktree, and no Bash (it reads untrusted issue text)
+        check(re.search(r"^tools:.*\bBash\b", front, re.M) is None, "triage: must not have Bash")
+        check("model: sonnet" in front and re.search(r"^effort: \w+", front, re.M), "triage: model and effort not pinned")
+        continue
     check('.factory/guard' in front and "PreToolUse" in front, f"{n}: no guard hook in the frontmatter")
     check("paths block (Repo, Worktree, Job, Base, Branch, Tmp)" in t, f"{n}: paths block without Tmp")
     check("/tmp/factory-<job-id>" not in t, f"{n}: old /tmp/factory-<job-id> prefix (use <Tmp>)")
@@ -66,6 +70,36 @@ for st in sorted(stages | {"queued"}):
 # Every action kind the script prints is explained in SKILL.md
 for act in sorted(set(re.findall(r'"ACTION: ([a-z-]+)', JOB))):
     check(f"ACTION: {act}" in SKILL, f"SKILL.md does not explain ACTION: {act}")
+
+# Auto-merge gate: what the script prints and reads is what the prompts describe
+SETUP = open(os.path.join(T, ".claude", "skills", "factory", "setup.md")).read()
+INSTALL = open(os.path.join(ROOT, "install")).read()
+PRECHECK = open(os.path.join(T, ".factory", "precheck")).read()
+check('"AUTO-MERGE: yes"' in JOB and "AUTO-MERGE: no (" in JOB, "job: does not print the AUTO-MERGE line")
+check("AUTO-MERGE: yes" in SKILL and "AUTO-MERGE: no" in SKILL, "SKILL.md does not explain the AUTO-MERGE line")
+check('startswith("HOLD:")' in JOB and "`HOLD: <reason>`" in texts.get("approver", ""),
+      "approver HOLD line: not in both the approver prompt and the job script")
+check("AUTO-MERGE: " in PRECHECK and "auto_merge_never" in PRECHECK, "precheck: no AUTO-MERGE line / auto_merge_never")
+check("auto_merge_never" in SKILL and "auto_merge_never" in SETUP, "auto_merge_never not described in SKILL.md and setup.md")
+check("--disable-auto" in SKILL and "cancel_merge_when_pipeline_succeeds" in SKILL,
+      "SKILL.md: how to switch auto-merge off on GitHub and GitLab")
+check("forgecheck" in INSTALL and "forgecheck" in SETUP and "forgecheck" in SKILL, "forgecheck not in install, setup.md and SKILL.md")
+for word in ("CI-ON-DRAFT", "REQUIRED-CHECKS"):
+    check(word in SETUP and word in open(os.path.join(T, ".factory", "forgecheck")).read(), f"{word}: not in both forgecheck and setup.md")
+
+# Triage and bundles: what the script prints and reads is what SKILL.md and the agent describe
+SKILL_FRONT = SKILL.split("---", 2)[1]
+check(re.search(r"^effort: (low|medium|high)$", SKILL_FRONT, re.M), "SKILL.md: effort not pinned in the frontmatter")
+for sub in ("triage prepare", "triage plan", "triage start"):
+    check(f"job {sub}" in SKILL, f"SKILL.md does not explain `job {sub}`")
+    check(f"job {sub}" in JOB.split('"""', 2)[1], f"job: {sub} missing from the usage text")
+for lab in ("factory:docs|light|full", "factory:solo"):
+    check(lab in SKILL and lab in texts.get("triage", ""), f"{lab}: not in both SKILL.md and the triage agent")
+for word in ("GROUP", "SKIPPED:", "LEFT-OUT:"):
+    check(word in SKILL and word in JOB, f"{word}: not in both SKILL.md and job")
+check("factory:ready" not in SETUP.split("**Issues:**", 1)[1].split("**Delivery**", 1)[0], "setup.md: still creates a factory:ready label")
+check('"groups"' in texts.get("triage", "") and '"skipped"' in texts.get("triage", "")
+      and 'plan.get("groups")' in JOB and 'plan.get("skipped")' in JOB, "triage plan.json shape: agent and job disagree")
 
 for f in fails:
     print("FAIL", f)

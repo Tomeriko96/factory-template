@@ -53,7 +53,8 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 1. Implement according to the spec; keep the diff small and in the repo's style.
 2. Add tests for new behaviour.
 3. Commit in the worktree: small, clear commits in English, following the repo's commit
-   convention; reference an issue with `Refs #<nr>`, never `Closes`/`Fixes`. Text you
+   convention; reference an issue with `Refs #<nr>`, never `Closes`/`Fixes` (a job that bundles
+   several issues: one commit per issue where practical, each with its own `Refs #<nr>`). Text you
    change inside an existing file stays in that file's language. Never commit anything
    under `.factory/` or `.claude/`.
 4. Run the validation from repo.md on the committed tree with `heavy --cache`, until it

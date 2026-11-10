@@ -188,6 +188,30 @@ try:
               + (text[text.find('Traceback'):][:400] if "Traceback" in text else ""))
         check("NEEDS YOU" in text and "001" in text, f"TUI at {cols} columns shows no board")
         check("copied:" in text or "copy this:" in text or "nothing to copy" in text, f"TUI at {cols}: c gave no message")
+
+    # .factory/ci with a fake `gh`: a PR that merged on the forge reports merge=merged, not
+    # the UNKNOWN that mergeStateStatus is for a PR that is no longer open
+    cd = os.path.join(tmp, "ci-repo", ".factory")
+    os.makedirs(os.path.join(cd, "cache"))
+    os.makedirs(os.path.join(tmp, "bin"))
+    shutil.copy(os.path.join(SRC, "ci"), cd)
+    json.dump({"forge": "github"}, open(os.path.join(cd, "config.json"), "w"))
+    for jid in ("003-open",):
+        jdir = os.path.join(cd, "jobs", jid)
+        os.makedirs(jdir)
+        json.dump(job(jid, "pr-open", pr_url="https://github.com/o/r/pull/" + str(len(jid)), branch="factory/" + jid),
+                  open(os.path.join(jdir, "job.json"), "w"))
+    gh = os.path.join(tmp, "bin", "gh")
+    open(gh, "w").write("#!/bin/sh\n[ \"$1\" = run ] && { echo '[]'; exit 0; }\n"
+                        "echo '{\"number\":1,\"state\":\"'$GH_STATE'\",\"mergeStateStatus\":\"'$GH_MERGE'\",\"statusCheckRollup\":[]}'\n")
+    os.chmod(gh, 0o755)
+    for state, merge, want in (("MERGED", "UNKNOWN", "merged"), ("CLOSED", "UNKNOWN", "closed"), ("OPEN", "CLEAN", "clean")):
+        env = dict(os.environ, PATH=os.path.join(tmp, "bin") + os.pathsep + os.environ["PATH"],
+                   GH_STATE=state, GH_MERGE=merge)
+        subprocess.run([sys.executable, "-I", os.path.join(cd, "ci"), "--once", "--ttl", "0", "--quiet", "003-open"],
+                       env=env, capture_output=True, text=True, cwd=tmp)
+        c = json.load(open(os.path.join(cd, "cache", "ci-003-open.json")))
+        check(c.get("merge") == want, f"ci: PR {state} (mergeStateStatus {merge}) gives merge={c.get('merge')}, want {want}")
 finally:
     if os.environ.get("KEEP"):
         print("kept", tmp)

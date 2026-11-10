@@ -14,8 +14,12 @@ the output is always one of:
 Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STARTED: lines
 (a queued job that just got a slot: run `job next` for it too).
 
-  job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL] [--untrusted]
+  job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL]... [--untrusted]
           [--delivery local|push|pr]   (this job only; default config.delivery.mode)
+          (--issue may be repeated: one job for a bundle of small related issues)
+  job triage prepare <raw-issues.json>   filter the forge's open issues, then spawn factory-triage
+  job triage plan                     validate the triage plan, print the groups (jobs to start)
+  job triage start <k>                start group k of the plan as a job
   job next <id>                       apply what is due, print the next action
   job reviewers <id> <a,b,c>          record round N's reviewer candidates (round > 1:
                                       narrowed by .factory/rereview), then as `next`
@@ -35,6 +39,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 REPO = os.path.dirname(HERE)
 JOBS = os.path.join(HERE, "jobs")
 MAX_ROUNDS, MAX_RESUMES, MAX_SYNCS = 3, 2, 3
+TRIAGE = os.path.join(HERE, "run", "triage")
+MODE_RANK = {"docs": 0, "light": 1, "full": 2}
+MODE_LABELS = {"factory:docs": "docs", "factory:light": "light", "factory:full": "full"}
+SOLO_LABEL = "factory:solo"
+DEFAULT_SKIP_LABELS = ["blocked", "wontfix", "factory:in-progress"]
+BUNDLE_MAX, FULL_BUNDLE_MAX, MAX_CANDIDATES, BODY_MAX, COMMENT_MAX = 4, 2, 30, 4000, 1500
 ACTIVE = ("spec", "build", "review", "approve", "deliver")
 AT_REST = ("needs-human", "merged", "pushed", "pr-open", "superseded")
 NEEDS_WORKTREE = ("spec", "build", "review", "approve", "deliver")
@@ -379,6 +389,52 @@ def run_precheck(job, n):
     return verdict, issues
 
 
+def auto_merge_gate(job):
+    """None when auto-merge is not switched on in config; else (allowed, reasons).
+
+    delivery.auto_merge is the switch, this is the gate: it only lets a job through that
+    got there by an approver MERGE (or a CLEAN docs precheck), whose precheck is clean and
+    whose branch carries no agent-resolved conflict. Everything else is delivered as a ready
+    PR/MR without auto-merge, and a human merges it."""
+    d = (config().get("delivery") or {})
+    mode = job.get("delivery_mode") or d.get("mode") or "local"
+    if mode != "pr" or not d.get("auto_merge") or d.get("draft", True):
+        return None
+    jd, why = jdir(job["id"]), []
+    docs = job.get("mode") == "docs"
+    if job.get("approved_by"):
+        why.append("approved by hand (/factory approve), no approver pass")
+    elif not docs and job.get("pr_text") != "decision.md":
+        why.append("no approver MERGE decision")
+    if not docs and os.path.exists(os.path.join(jd, "decision.md")):
+        for line in open(os.path.join(jd, "decision.md"), errors="replace"):
+            if line.startswith("HOLD:"):
+                why.append("approver: " + (line[5:].strip() or "hold"))
+    pre = (first_lines(os.path.join(jd, "precheck.md"), 2) + ["", ""])[1]
+    if not pre.startswith("AUTO-MERGE:"):
+        why.append("no precheck result for this round")
+    elif not pre.startswith("AUTO-MERGE: yes"):
+        why.append(pre[len("AUTO-MERGE:"):].strip().removeprefix("no:").strip() or "precheck")
+    if int((job.get("sync") or {}).get("count") or 0) > 0:
+        why.append("base was merged into the branch by an agent (sync); a human merges")
+    return (not why), why
+
+
+def hold_files(job):
+    """`<class>: <file>` lines for the files in the job's diff that CI alone does not vouch for
+    (the auto-merge hold classes, delivery.auto_merge_never); [] when there are none."""
+    r = run([os.path.join(HERE, "precheck"), "--hold", job["id"]])
+    return [l for l in (r.stdout or "").splitlines() if ": " in l] if r.returncode == 0 else []
+
+
+def first_lines(path, n):
+    try:
+        with open(path, errors="replace") as f:
+            return [f.readline().strip() for _ in range(n)]
+    except OSError:
+        return []
+
+
 def step(job, out, start=None):
     start = start or job.get("stage")
     jd = jdir(job["id"])
@@ -444,6 +500,15 @@ def step(job, out, start=None):
                 set_stage(job, "needs-human", f"builder blocked in round {n}: {fl[14:].strip(' :-') or 'see build.md'}")
                 continue
             job["reviews"] = {}
+            if job.get("mode") == "light":
+                # A light change that reaches CI/pipeline config, dependencies, containers, schema or
+                # auth (or delivery.auto_merge_never) is not small: it gets the full review set and
+                # the audit. Mechanical, so it also holds for an issue that was triaged as light.
+                held = hold_files(job)
+                if held:
+                    job["mode"], job["mode_from"] = "full", "light"
+                    out.notes.append("NOTE: the change touches " + "; ".join(held[:3])
+                                     + (" …" if len(held) > 3 else "") + ": running the full review (was --light)")
             if job.get("mode") != "docs":
                 set_stage(job, "review")
                 continue
@@ -519,7 +584,14 @@ def step(job, out, start=None):
         if s == "deliver":
             mode = job.get("delivery_mode") or (config().get("delivery") or {}).get("mode") or "local"
             text = job.get("pr_text")
-            out.main += ["ACTION: deliver", f"MODE: {mode}",
+            gate = auto_merge_gate(job) if mode == "pr" else None
+            job["auto_merge"] = None if gate is None else {"allowed": gate[0], "reasons": gate[1]}
+            out.main += ["ACTION: deliver", f"MODE: {mode}"]
+            if gate is not None:
+                out.main.append("AUTO-MERGE: yes" if gate[0] else
+                                "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): open the PR/MR ready for review, "
+                                "leave auto-merge off, and switch it off if this PR/MR already has it")
+            out.main += [
                          "PR-TEXT: " + (os.path.join(jd, text) + " (its ## PR section)" if text else
                                         "none: write a minimal body (feature + \"approved by the user "
                                         "without a full review pass\" + the blocking reviews)"),
@@ -572,26 +644,16 @@ def slugify(text):
     return t or "job"
 
 
-def cmd_new(args):
-    mode, issue, issue_url, untrusted, delivery, feature = "full", None, None, False, None, []
-    while args:
-        a = args.pop(0)
-        if a == "--mode":
-            mode = args.pop(0)
-        elif a == "--issue":
-            issue = int(args.pop(0))
-        elif a == "--issue-url":
-            issue_url = args.pop(0)
-        elif a == "--untrusted":
-            untrusted = True
-        elif a == "--delivery":
-            delivery = args.pop(0) if args else ""
-        else:
-            feature.append(a)
-    feature = " ".join(feature).strip()
-    if mode not in ("full", "light", "docs") or not feature or delivery not in (None, "local", "push", "pr"):
-        raise Fail('usage: job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL] '
-                   '[--delivery local|push|pr]')
+def job_issues(job):
+    """The issue numbers a job was made from (a bundle has several)."""
+    nrs = job.get("issues")
+    if isinstance(nrs, list):
+        return [n for n in nrs if isinstance(n, int)]
+    return [job["issue"]] if isinstance(job.get("issue"), int) else []
+
+
+def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delivery=None):
+    """Create the job (queued or started) and print its first action. Takes the lock itself."""
     base = git("branch", "--show-current")
     if not base:
         raise Fail("the main checkout has a detached HEAD: check out the base branch first")
@@ -608,8 +670,10 @@ def cmd_new(args):
                "resumes": 0, "reviews": {}, "started": now(), "updated": now(),
                "history": [{"stage": "queued", "at": now()}], "round_heads": {}, "pr_url": None,
                "issue_closed": None, "sync": {"count": 0, "last": None}}
-        if issue is not None:
-            job.update(issue=issue, issue_url=issue_url, untrusted=True)
+        if issues:
+            job.update(issue=issues[0], issue_url=(urls[0] if urls else None), untrusted=True)
+            if len(issues) > 1:   # a bundle: .issue is the first, .issues all of them
+                job.update(issues=list(issues), issue_urls=list(urls))
         if untrusted:
             job["untrusted"] = True
         if delivery:
@@ -619,10 +683,34 @@ def cmd_new(args):
         promote(out)
         out.notes = [x for x in out.notes if not x.startswith(f"STARTED: {jid} ")]
         job = load(jid)
-        out.main.append(f"JOB: {jid}  port {port}  base {base}  mode {mode}")
+        out.main.append(f"JOB: {jid}  port {port}  base {base}  mode {mode}"
+                        + (f"  issues {', '.join('#' + str(i) for i in issues)}" if len(issues) > 1 else ""))
         step(job, out)
         save(job)
     return out
+
+
+def cmd_new(args):
+    mode, issues, urls, untrusted, delivery, feature = "full", [], [], False, None, []
+    while args:
+        a = args.pop(0)
+        if a == "--mode":
+            mode = args.pop(0)
+        elif a == "--issue":
+            issues.append(int(args.pop(0)))
+        elif a == "--issue-url":
+            urls.append(args.pop(0))
+        elif a == "--untrusted":
+            untrusted = True
+        elif a == "--delivery":
+            delivery = args.pop(0) if args else ""
+        else:
+            feature.append(a)
+    feature = " ".join(feature).strip()
+    if mode not in ("full", "light", "docs") or not feature or delivery not in (None, "local", "push", "pr"):
+        raise Fail('usage: job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL]... '
+                   '[--delivery local|push|pr]')
+    return create_job(feature, mode, issues, urls, untrusted, delivery)
 
 
 def with_job(jid, fn):
@@ -742,6 +830,7 @@ def cmd_rework(args):
                    reworks=int(job.get("reworks") or 0) + 1)
         if job.get("pr_url") or (job.get("delivery") or {}).get("mode") in ("push", "pr"):
             job["check_remote"] = True
+        job.pop("approved_by", None)  # the next round gets a fresh approver pass
         job.pop("pr_text", None)
         why = room(job, all_jobs(), prs_count=False)
         if why:
@@ -834,6 +923,301 @@ def cmd_list(args):
     return out
 
 
+# ---------- issue triage: which open issues become which jobs ----------
+# The orchestrator fetches the forge's open issues into a file; this script filters them
+# mechanically (author, labels, jobs, work that already exists), the factory-triage agent
+# judges which small related issues belong in one job and how much effort each needs, and
+# the script validates that plan (limits, label overrides) before any job is started.
+
+def norm_issue(raw):
+    """One issue as GitHub (`gh issue list --json`) or GitLab (`glab issue list -F json`) gives it."""
+    if not isinstance(raw, dict):
+        return None
+    nr = raw.get("number", raw.get("iid"))
+    if not isinstance(nr, int):
+        return None
+    who = lambda a: str((a.get("login") or a.get("username") or "") if isinstance(a, dict) else a or "")
+    labels = [str(l.get("name") if isinstance(l, dict) else l) for l in raw.get("labels") or []]
+    comments = []
+    for c in raw.get("comments") or []:
+        if isinstance(c, dict):
+            comments.append({"author": who(c.get("author")), "body": str(c.get("body") or "")})
+    return {"nr": nr, "title": str(raw.get("title") or ""),
+            "body": str(raw.get("body") if "body" in raw else raw.get("description") or ""),
+            "author": who(raw.get("author")), "labels": labels, "comments": comments,
+            "url": raw.get("url") or raw.get("web_url") or None,
+            "open": str(raw.get("state") or "open").lower() in ("open", "opened")}
+
+
+def open_pr_texts():
+    """Title, body and branch of every open PR/MR, to see whether an issue is being worked on.
+    Best effort: no forge CLI, not logged in or offline gives []."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        cmd = ["gh", "pr", "list", "--state", "open", "--limit", "200",
+               "--json", "number,title,body,headRefName,url"]
+    elif forge == "gitlab" and shutil.which("glab"):
+        cmd = ["glab", "mr", "list", "--per-page", "100", "-F", "json"]
+    else:
+        return []
+    r = run(cmd, timeout=60)
+    try:
+        rows = json.loads(r.stdout) if r.returncode == 0 else []
+    except ValueError:
+        return []
+    return [(str(x.get("url") or x.get("web_url") or x.get("number") or x.get("iid") or "?"),
+             " ".join(str(x.get(k) or "") for k in ("title", "body", "description", "headRefName", "source_branch")))
+            for x in rows if isinstance(x, dict)]
+
+
+def work_exists(nr, prs, branches, ref):
+    """Why issue nr looks done or taken already (open PR/MR, remote branch, commit), or None."""
+    for url, text in prs:
+        if re.search(rf"#{nr}(?![0-9])", text):
+            return f"an open PR/MR mentions it ({url})"
+    rem = remote()
+    for b in branches:  # job branches (factory/NNN-...) are found through the jobs, not here
+        if b.startswith(rem + "/") and not re.match(r"^[^/]+/factory/\d{3}-", b) \
+                and re.search(rf"(?<![0-9]){nr}(?![0-9])", b[len(rem) + 1:]):
+            return f"remote branch {b}"
+    c = git("log", ref, "--oneline", "-n", "1", "-E", "--grep", rf"#{nr}([^0-9]|$)")
+    return f"commit {c} references it" if c else None
+
+
+def tri_write(name, data):
+    os.makedirs(TRIAGE, exist_ok=True)
+    with open(os.path.join(TRIAGE, name), "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+
+
+def tri_read(name):
+    try:
+        with open(os.path.join(TRIAGE, name)) as f:
+            return json.load(f)
+    except OSError:
+        raise Fail(f"no {name} yet: run the previous triage step first")
+    except ValueError as e:
+        raise Fail(f"{name} is not valid JSON ({e})")
+
+
+def triage_prepare(args):
+    cfg = config().get("issues")
+    if not cfg:
+        raise Fail("issue mode is off (config.issues is null)")
+    try:
+        with open(args[0]) as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        raise Fail(f"cannot read {args[0]}: {e}")
+    if not isinstance(raw, list):
+        raise Fail(f"{args[0]} must hold the JSON list the forge CLI printed")
+    allowed = {str(a).lower() for a in cfg.get("allowed_authors") or []}
+    need = (cfg.get("label") or "").lower() or None
+    skip = {str(l).lower() for l in (cfg["skip_labels"] if "skip_labels" in cfg else DEFAULT_SKIP_LABELS)}
+    taken = {}
+    for j in all_jobs():
+        if j.get("stage") != "superseded":
+            for n in job_issues(j):
+                taken.setdefault(n, j)
+    rem = remote()
+    run(["git", "fetch", "-q", rem], timeout=60)
+    prs = open_pr_texts()
+    branches = (git("branch", "-r", "--format=%(refname:short)") or "").splitlines()
+    ref = f"{rem}/{git('branch', '--show-current') or 'main'}"
+    if git("rev-parse", "--verify", "-q", ref) is None:
+        ref = "HEAD"
+    cands, skipped, unlabelled = [], [], 0
+    for c in sorted(filter(None, map(norm_issue, raw)), key=lambda c: c["nr"]):
+        low = [l.lower() for l in c["labels"]]
+        why = None
+        if not c["open"]:
+            why = "not open"
+        elif c["author"].lower() not in allowed:
+            why = f"author {c['author'] or '?'} is not in allowed_authors"
+        elif need and need not in low:
+            unlabelled += 1
+            continue
+        elif skip & set(low):
+            why = "label " + sorted(skip & set(low))[0]
+        elif c["nr"] in taken:
+            j = taken[c["nr"]]
+            why = f"job {j['id']} has it ({j.get('stage')})"
+        else:
+            why = work_exists(c["nr"], prs, branches, ref)
+        if why:
+            skipped.append({"issue": c["nr"], "reason": why})
+            continue
+        c["body"] = c["body"][:BODY_MAX] + (" […]" if len(c["body"]) > BODY_MAX else "")
+        c["comments"] = [dict(x, body=x["body"][:COMMENT_MAX]) for x in c["comments"]
+                         if x["author"].lower() in allowed][:5]   # never other people's comments
+        cands.append(c)
+    more = max(0, len(cands) - MAX_CANDIDATES)
+    cands = cands[:MAX_CANDIDATES]
+    lim = config().get("limits") or {}
+    cap = max(1, int(lim.get("bundle_max") or BUNDLE_MAX))
+    for name in ("plan.json", "groups.json"):
+        try:
+            os.remove(os.path.join(TRIAGE, name))
+        except OSError:
+            pass
+    tri_write("issues.json", {"candidates": cands, "skipped": skipped, "bundle_max": cap,
+                              "full_bundle_max": min(cap, FULL_BUNDLE_MAX), "at": now()})
+    out = Out()
+    out.notes += [f"SKIPPED: #{s['issue']}: {s['reason']}" for s in skipped]
+    if unlabelled:
+        out.notes.append(f"NOTE: {unlabelled} open issue(s) without the label {cfg['label']!r} left out")
+    if more:
+        out.notes.append(f"NOTE: {more} more candidate(s) wait for the next run (at most {MAX_CANDIDATES} at once)")
+    if not cands:
+        out.main.append("DONE: no issues to start" + (" (see SKIPPED)" if skipped else ""))
+        return out
+    plan = os.path.join(TRIAGE, "plan.json")
+    out.main += [f"ACTION: spawn 1 agent  ({len(cands)} candidate issue{'s' if len(cands) != 1 else ''})",
+                 "---", "AGENT: factory-triage", "MODEL: default", f"WRITES: {plan}", "PROMPT:",
+                 f"Repo: {REPO}\nIssues: {os.path.join(TRIAGE, 'issues.json')}\nPlan: {plan}\n"
+                 f"Bundle max: {cap} issues (full: {min(cap, FULL_BUNDLE_MAX)}).",
+                 "---", "THEN: when the agent has returned: .factory/job triage plan"]
+    return out
+
+
+def issue_override(c):
+    """The effort a human asked for with a label (the highest if there are several), or None."""
+    modes = [MODE_LABELS[l.lower()] for l in c["labels"] if l.lower() in MODE_LABELS]
+    return max(modes, key=MODE_RANK.get) if modes else None
+
+
+def triage_plan(args):
+    data = tri_read("issues.json")
+    plan = tri_read("plan.json")
+    if not isinstance(plan, dict):
+        raise Fail("plan.json must be a JSON object with groups and skipped")
+    cands = {c["nr"]: c for c in data.get("candidates") or []}
+    cap, full_cap = int(data.get("bundle_max") or BUNDLE_MAX), int(data.get("full_bundle_max") or FULL_BUNDLE_MAX)
+    notes, groups, used = [], [], set()
+
+    def add(nrs, mode, reason):
+        """A group, with the mode and size limits the script (not the agent) decides."""
+        effective = [issue_override(cands[n]) or mode for n in nrs]
+        final = max(effective, key=MODE_RANK.get)
+        if final != mode and len(nrs) == 1:
+            notes.append(f"NOTE: #{nrs[0]}: label sets the effort to {final} (the plan said {mode})")
+        size = full_cap if final == "full" else cap
+        if len(nrs) > size:
+            notes.append(f"NOTE: {len(nrs)} issues is more than a {final} job takes ({size}): split")
+            for i in range(0, len(nrs), size):
+                add(nrs[i:i + size], mode, reason)
+            return
+        groups.append({"issues": nrs, "mode": final, "reason": reason, "started": None})
+
+    for g in plan.get("groups") or []:
+        if not isinstance(g, dict):
+            continue
+        nrs = []
+        for n in g.get("issues") or []:
+            if n not in cands:
+                notes.append(f"NOTE: plan names #{n}, which is not a candidate: ignored")
+            elif n in used or n in nrs:
+                notes.append(f"NOTE: #{n} is in the plan twice: kept once")
+            else:
+                nrs.append(n)
+        mode = g.get("mode") if g.get("mode") in MODE_RANK else "full"
+        if g.get("mode") not in MODE_RANK:
+            notes.append(f"NOTE: group {nrs}: mode {g.get('mode')!r} is not docs|light|full: using full")
+        reason = str(g.get("reason") or "")[:200]
+        used.update(nrs)
+        solo = [n for n in nrs if SOLO_LABEL in [l.lower() for l in cands[n]["labels"]]]
+        for n in solo:
+            add([n], mode, reason)
+        rest = [n for n in nrs if n not in solo]
+        if solo and rest:
+            notes.append(f"NOTE: {', '.join('#' + str(n) for n in solo)} has {SOLO_LABEL}: on its own")
+        if rest:
+            add(rest, mode, reason)
+    skipped = []
+    for sk in plan.get("skipped") or []:
+        n = sk.get("issue") if isinstance(sk, dict) else None
+        if n not in cands or n in used:
+            continue
+        used.add(n)
+        if issue_override(cands[n]):   # a person asked for it by label: that wins over the agent
+            add([n], issue_override(cands[n]), "label " + issue_override(cands[n]) + " overrides the triage skip")
+        else:
+            skipped.append({"issue": n, "reason": str(sk.get("reason") or "")[:200]})
+    for n in sorted(set(cands) - used):
+        notes.append(f"NOTE: #{n} is not in the plan: its own job")
+        add([n], issue_override(cands[n]) or "full", "not in the triage plan")
+    for i, g in enumerate(groups, 1):
+        g["k"] = i
+    tri_write("groups.json", {"groups": groups, "skipped": skipped})
+    out = Out()
+    total = sum(len(g["issues"]) for g in groups)
+    out.main.append(f"PLAN: {len(groups)} job{'s' if len(groups) != 1 else ''} from {total} issue{'s' if total != 1 else ''}"
+                    + (f", {len(skipped)} left out" if skipped else ""))
+    for g in groups:
+        tags = " ".join(f"#{n}" for n in g["issues"])
+        titles = "; ".join(cands[n]["title"][:50] for n in g["issues"])
+        out.main.append(f"GROUP {g['k']}: {g['mode']:<5} {tags}  {titles}" + (f"  [{g['reason']}]" if g["reason"] else ""))
+    out.main += [f"LEFT-OUT: #{x['issue']}: {x['reason'] or 'no reason given'}" for x in skipped]
+    out.notes += notes
+    if groups:
+        out.notes.append("THEN: show this plan to the user and start the groups only after they agree "
+                         "(or when the command had --yes): .factory/job triage start <k> for each group")
+    return out
+
+
+def group_feature(group, cands):
+    parts = []
+    for n in group["issues"]:
+        c = cands[n]
+        text = f"{c['title']}\n\n{c['body']}".strip()
+        for cm in c.get("comments") or []:
+            text += f"\n\nComment by {cm['author']}:\n{cm['body']}"
+        parts.append((n, c["title"], text))
+    if len(parts) == 1:
+        n, title, text = parts[0]
+        return f"#{n} {text}"
+    head = f"#{parts[0][0]} {parts[0][1]} (+ " + ", ".join(f"#{n}" for n, _, _ in parts[1:]) + ")"
+    body = [f"This job bundles {len(parts)} small related issues. Handle every one of them; the spec "
+            "needs acceptance criteria per issue, each headed with its `#<nr>`."]
+    body += [f"## Issue #{n}: {text}" for n, _, text in parts]
+    return head + "\n\n" + "\n\n".join(body)
+
+
+def triage_start(args):
+    try:
+        k = int(args[0])
+    except ValueError:
+        raise Fail("usage: job triage start <k>")
+    data, gdata = tri_read("issues.json"), tri_read("groups.json")
+    cands = {c["nr"]: c for c in data.get("candidates") or []}
+    group = next((g for g in gdata.get("groups") or [] if g.get("k") == k), None)
+    if not group:
+        raise Fail(f"no group {k} in the plan")
+    if group.get("started"):
+        raise Fail(f"group {k} was already started as {group['started']}")
+    taken = {n for j in all_jobs() if j.get("stage") != "superseded" for n in job_issues(j)}
+    if taken & set(group["issues"]):
+        raise Fail(f"an issue of group {k} has a job now: run `job triage prepare` again")
+    nrs = group["issues"]
+    out = create_job(group_feature(group, cands), group["mode"], nrs,
+                     [cands[n].get("url") for n in nrs], untrusted=True)
+    jid = next((l.split()[1] for l in out.main if l.startswith("JOB: ")), None)
+    group["started"] = jid
+    tri_write("groups.json", gdata)
+    return out
+
+
+def cmd_triage(args):
+    subs = {"prepare": (triage_prepare, 1), "plan": (triage_plan, 0), "start": (triage_start, 1)}
+    if not args or args[0] not in subs:
+        raise Fail("usage: job triage prepare <raw-issues.json> | plan | start <k>")
+    fn, need = subs[args[0]]
+    if len(args) - 1 < need:
+        raise Fail(f"triage {args[0]}: missing arguments")
+    return fn(args[1:])
+
+
 def main():
     argv = sys.argv[1:]
     if not argv or argv[0] in ("-h", "--help"):
@@ -842,7 +1226,8 @@ def main():
     cmds = {"new": (cmd_new, 1), "next": (cmd_next, 1), "reviewers": (cmd_reviewers, 2),
             "delivered": (cmd_delivered, 2), "pr-merged": (cmd_pr_merged, 1), "approve": (cmd_approve, 1),
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
-            "fail": (cmd_fail, 2), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0)}
+            "fail": (cmd_fail, 2), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
+            "triage": (cmd_triage, 1)}
     try:
         if argv[0] == "show":
             print(json.dumps(load(argv[1] if len(argv) > 1 else ""), indent=2))

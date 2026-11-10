@@ -139,6 +139,8 @@ def fetch_github(job, deep=True):
                      "status": gh_check(c), "url": c.get("detailsUrl") or c.get("targetUrl") or ""})
     pipeline = overall(jobs) if rollup else "none"
     merge = str(pr.get("mergeStateStatus") or "UNKNOWN").lower()
+    if str(pr.get("state") or "").upper() in ("MERGED", "CLOSED"):
+        merge = str(pr["state"]).lower()  # mergeStateStatus is UNKNOWN once the PR is no longer open
     out = {"forge": "github", "pipeline": pipeline, "merge": merge,
            "pr_state": pr.get("state"), "jobs": jobs, "url": pr_url,
            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
@@ -274,7 +276,9 @@ def fetch_gitlab(job, pid=None):
     pipe = mr.get("head_pipeline") or {}
     pid_pipe = pipe.get("id")
     pipeline = normalize_gl(pipe.get("status")) if pipe else "none"
-    merge = mr.get("detailed_merge_status") or ("merged" if mr.get("state") == "merged" else "unknown")
+    merge = mr.get("detailed_merge_status") or "unknown"
+    if mr.get("state") in ("merged", "closed"):
+        merge = mr["state"]
     jobs = []
     if pid_pipe:
         js, jerr = run(["glab", "api", f"projects/{pid}/pipelines/{pid_pipe}/jobs?per_page=100"])

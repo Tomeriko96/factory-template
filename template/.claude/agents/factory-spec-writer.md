@@ -43,6 +43,9 @@ the rest.
 - **Goal**: 2–3 sentences, what and why.
 - **Scope / out of scope**: explicit.
 - **Acceptance criteria**: numbered, each testable (a command or observable behaviour).
+  When the feature text bundles several issues (`## Issue #<nr>: …` sections), give every issue its
+  own numbered group of criteria headed `#<nr>`, so each can be measured separately; write
+  `SPEC: ALREADY-DONE` only when **all** of them are already done (otherwise: partly done, specify the rest).
   The audit reviewer re-measures every one, so make them measurable. Never write a size or
   shape limit as a criterion ("diff under 60 lines", "at most 3 files", "no new
   abstractions"): put such wishes under Approach as guidance. They are non-blocking, and

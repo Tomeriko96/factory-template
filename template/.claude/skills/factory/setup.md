@@ -79,24 +79,40 @@ the precheck finds issues). Do not change them. Advise the user to run the
 and say why in `repo.md`.
 
 **Issues:** forge `github`/`gitlab` → `issues` =
-`{"label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true}`
-with the logged-in user only (`gh api user --jq .login` / `glab api user --jq .username`). Never
+`{"allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true}`
+(no `label`: `/factory next` takes every open issue of the allowed authors that is not blocked, bundles small
+related ones and picks the effort per job) with the logged-in user only (`gh api user --jq .login` / `glab api user --jq .username`). Never
 add other authors unless the user asks. Forge `none`, or the user does not want issue
 mode → `"issues": null` (then `next` uses `backlog.md`). Set `"link": "Refs"` when the
 repo is mirrored to another forge (a second remote on another host, or docs that say
-commits are mirrored): `Closes #N` would close an unrelated issue there. Check the label
-exists (`gh label list` / `glab label list`); if not, tell the user (creating it is
-their call, it changes the forge).
+commits are mirrored): `Closes #N` would close an unrelated issue there. Tell the user which labels steer
+it: `blocked` (skipped), `factory:solo` (never bundled), `factory:docs|light|full` (effort); none of them
+has to exist on the forge (creating them is their call, it changes the forge).
 `close_on_merge` is `true` by default: the factory closes the issue after its PR/MR is merged
 (tell the user; `false` leaves that to a human).
 
 **Delivery** (ask the user once, recommend `pr`): `local` (merge into the base branch
 locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge `none`
-→ `local`. `draft: true` unless the user wants ready-for-review PRs. Ask at the same time
-whether the factory should switch on auto-merge on the PR/MR it opens (`auto_merge`,
-default `false`; it needs `draft: false` and then also decides on the merge, so only on
-the user's explicit yes). Check `push`/`pr`
+→ `local`. Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
+
+For `pr`, run `.factory/forgecheck --forge <forge>` (it reads the CI config and asks the forge;
+add `--offline` if `gh`/`glab` is not logged in) and show the user its three answers:
+- `CI-ON-DRAFT: no` (CI skips drafts) → `draft: false`: a draft would give no CI signal.
+  `yes` → `draft: true` is fine and still gets CI; `draft: false` only if the user wants
+  ready-for-review PRs or auto-merge. `unknown` → say so, and suggest opening one test draft.
+- Ask whether the factory should switch on auto-merge (`auto_merge`, default `false`; it needs
+  `draft: false`, and only on the user's explicit yes). Explain what it does: the forge merges
+  once its own checks pass, but `.factory/job` only lets a job through that was approved with
+  a clean precheck, touches no CI config, dependencies, containers, schema/migrations or auth,
+  and was not conflict-resolved; every other job opens as a ready PR/MR for a human to merge.
+- `REQUIRED-CHECKS: no` → do **not** set `auto_merge: true` (there is nothing for the forge to wait
+  for); tell the user which setting to change (GitHub: a ruleset or branch protection with required
+  status checks; GitLab: "Pipelines must succeed"). `unknown` → ask the user to confirm that in
+  the forge settings before you set it.
+- If `privacy` is in the reviewer set (the repo handles personal data) and `auto_merge` is on, ask
+  which paths hold personal-data handling and write them to `delivery.auto_merge_never` (globs,
+  e.g. `["src/identifiers/**"]`); those jobs then always wait for a human.
 
 **Limits:** write `"limits": {"active_jobs": 3, "open_prs": 5}`. On a machine with fewer than 8 cores use
 2, with 16 or more use 4. Leave `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` out
@@ -149,7 +165,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true },
+  "issues": { "allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
   "limits": { "active_jobs": 3, "open_prs": 5 }
 }
@@ -216,8 +232,7 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 ## 5. Report to the user
 
 Archetype · forge · reviewers (+ why) · port base · issue mode · delivery ·
-smoke-test outcome · files written. Tell them to run the `/factory` session itself on
-sonnet with `/effort medium` (the orchestrator only does bookkeeping), and to accept the
+smoke-test outcome · files written. Tell them to accept the
 workspace-trust dialog for this folder (the guard hooks of the agents only run in trusted
 workspaces). Then the next steps: `/factory <feature>`, `/factory --light <feature>`,
 fill `.factory/backlog.md` for `/factory next`, live board with `.factory/watch`

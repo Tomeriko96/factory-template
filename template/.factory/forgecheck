@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Setup check: does CI run on a draft PR/MR, and does the forge require checks before a merge?
+
+  .factory/forgecheck [--forge github|gitlab] [--offline] [--json]
+
+Reads the repo's CI config (.github/workflows/*, .gitlab-ci.yml) and, unless --offline, asks
+the forge (gh / glab) whether the base branch requires status checks. The forge comes from
+`--forge`, else from .factory/config.json (setup runs this before that file exists). Prints:
+
+  CI-ON-DRAFT: yes | no | unknown        a draft PR/MR gets CI (so a draft still gives a signal)
+  REQUIRED-CHECKS: yes | no | unknown    the forge refuses a merge until checks pass
+  RECOMMEND: <one line each>
+
+Only a heuristic on the config text: a workflow that lists `types:` without opened/synchronize,
+or tests `draft` in an `if:`, or a GitLab rule on a "Draft:" title counts as "skips drafts".
+`unknown` is an honest answer: ask the user. `setup.md` says what to do with each.
+"""
+import glob, json, os, re, subprocess, sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
+REPO = os.path.dirname(HERE)
+
+
+def read(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def config():
+    try:
+        return json.loads(read(os.path.join(HERE, "config.json")) or "{}")
+    except ValueError:
+        return {}
+
+
+def sh(*cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20, cwd=REPO)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout) if r.stdout.strip() else {}
+    except ValueError:
+        return None
+
+
+def github_drafts():
+    """(answer, reasons) from the workflows that run on pull_request."""
+    files = sorted(glob.glob(os.path.join(REPO, ".github", "workflows", "*.y*ml")))
+    if not files:
+        return "no", ["no GitHub workflows: nothing runs on a PR"]
+    running, skipping, reasons = 0, 0, []
+    for f in files:
+        text = read(f)
+        m = re.search(r"^(?:on|\"on\"|'on')\s*:(.*?)(?=^\S|\Z)", text, re.M | re.S)
+        block = m.group(1) if m else ""
+        if not re.search(r"\bpull_request(_target)?\b", block):
+            continue
+        # the indented lines under "pull_request:", where a "types:" list may sit
+        sub = re.search(r"^([ \t]*)pull_request(?:_target)?:[ \t]*\n((?:\1[ \t]+[^\n]*\n)*)", block, re.M)
+        t = re.search(r"types:\s*(\[[^\]]*\]|(?:\n[ \t]+-[^\n]*)+)", sub.group(2)) if sub else None
+        types = re.sub(r"\s+", " ", t.group(1)).strip() if t else ""
+        only_ready = bool(types) and not re.search(r"opened|synchronize|reopened", types)
+        draft_if = re.search(r"if:[^\n]*(draft\s*==\s*false|draft\s*!=\s*true|!\s*github\.event\.pull_request\.draft)", text)
+        name = os.path.basename(f)
+        if only_ready or draft_if:
+            skipping += 1
+            reasons.append(f"{name} skips drafts (" + (f"types: {types}" if only_ready else "an `if:` on the draft flag") + ")")
+        else:
+            running += 1
+    if not running and not skipping:
+        return "no", ["no workflow has a pull_request trigger"]
+    if skipping and not running:
+        return "no", reasons
+    if skipping:
+        return "unknown", reasons + [f"{running} other workflow(s) do run on drafts"]
+    return "yes", [f"{running} workflow(s) run on pull_request without a draft filter"]
+
+
+def gitlab_drafts():
+    text = read(os.path.join(REPO, ".gitlab-ci.yml"))
+    if not text:
+        return "unknown", ["no .gitlab-ci.yml (includes are not followed)"]
+    if re.search(r"CI_MERGE_REQUEST_TITLE[^\n]*(Draft|WIP)", text, re.I):
+        return "no", ["a rule tests the MR title for Draft/WIP"]
+    if re.search(r"CI_MERGE_REQUEST_IID|CI_PIPELINE_SOURCE\s*==\s*['\"]?merge_request_event", text) or \
+            not re.search(r"^workflow:", text, re.M):
+        return "yes", ["pipelines run for merge requests / branches, no draft rule"]
+    return "unknown", ["workflow:rules do not mention merge requests"]
+
+
+def required_checks(forge, base):
+    """('yes'|'no'|'unknown', why) from the forge's own settings."""
+    if forge == "github":
+        j = sh("gh", "api", f"repos/{{owner}}/{{repo}}/rules/branches/{base}")
+        if isinstance(j, list) and any(r.get("type") in ("required_status_checks", "pull_request") for r in j):
+            return "yes", "a ruleset on the base branch requires checks or a PR"
+        p = sh("gh", "api", f"repos/{{owner}}/{{repo}}/branches/{base}/protection/required_status_checks")
+        if isinstance(p, dict) and (p.get("contexts") or p.get("checks")):
+            return "yes", "branch protection requires status checks"
+        if j is None and p is None:
+            return "unknown", "gh could not read the rulesets or branch protection (no admin rights?)"
+        return "no", "no ruleset or branch protection with required checks on " + base
+    if forge == "gitlab":
+        j = sh("glab", "api", "projects/:id")
+        if not isinstance(j, dict) or "only_allow_merge_if_pipeline_succeeds" not in j:
+            return "unknown", "glab could not read the project settings"
+        return (("yes", "the project only allows a merge when the pipeline succeeds") if
+                j["only_allow_merge_if_pipeline_succeeds"] else
+                ("no", "the project allows a merge without a successful pipeline"))
+    return "unknown", "no GitHub/GitLab forge in config.json"
+
+
+def main():
+    args = sys.argv[1:]
+    cfg = config()
+    forge = (cfg.get("forge") or "").lower()
+    if "--forge" in args and args.index("--forge") + 1 < len(args):
+        forge = args[args.index("--forge") + 1].lower()
+    base = (subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], capture_output=True, text=True,
+                           cwd=REPO).stdout.strip() or "main")
+    if forge == "github":
+        draft, why = github_drafts()
+    elif forge == "gitlab":
+        draft, why = gitlab_drafts()
+    else:
+        draft, why = "unknown", ["forge is not github or gitlab"]
+    if "--offline" in args:
+        req, rwhy = "unknown", "--offline: the forge was not asked"
+    else:
+        req, rwhy = required_checks(forge, base)
+    rec = []
+    if draft == "no":
+        rec.append("CI skips drafts: use draft=false, a draft gives no CI signal")
+    elif draft == "yes":
+        rec.append("CI runs on drafts: draft=true still gives a CI signal; auto-merge needs draft=false")
+    else:
+        rec.append("cannot tell if CI runs on drafts: open one test draft PR/MR and look, or ask the user")
+    if req == "no":
+        rec.append("no required checks: do not switch on delivery.auto_merge (GitHub refuses it or merges at once)")
+    elif req == "unknown":
+        rec.append("cannot tell if checks are required: ask the user to confirm in the forge settings before auto_merge")
+    else:
+        rec.append("checks are required: auto_merge waits for them")
+    res = {"forge": forge or None, "base": base, "ci_on_draft": draft, "ci_on_draft_why": why,
+           "required_checks": req, "required_checks_why": rwhy, "recommend": rec}
+    if "--json" in args:
+        print(json.dumps(res, indent=2))
+        return
+    print(f"CI-ON-DRAFT: {draft}")
+    for w in why:
+        print(f"  - {w}")
+    print(f"REQUIRED-CHECKS: {req}")
+    print(f"  - {rwhy}")
+    print("RECOMMEND:")
+    for r in rec:
+        print(f"  - {r}")
+
+
+if __name__ == "__main__":
+    main()

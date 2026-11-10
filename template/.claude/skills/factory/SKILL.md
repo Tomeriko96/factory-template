@@ -1,6 +1,7 @@
 ---
 name: factory
 description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|deliver <id>", "/factory status" and "/factory setup".
+effort: medium
 ---
 
 # Factory
@@ -33,14 +34,21 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   "forge": "github",
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
-  "issues": { "label": "factory:ready", "allowed_authors": ["<login>"], "report": false, "link": "Closes", "close_on_merge": true },
+  "issues": { "allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
   "limits": { "active_jobs": 3 }
 }
 ```
 
 - `reviewers` is the full-review set. Name `x` is agent `factory-reviewer-x`.
-- `issues` is `null` when issue mode is off. `issues.link` is the keyword that
+- `issues` is `null` when issue mode is off. Which issues `/factory next` considers: every
+  open issue whose author is in `allowed_authors`, except those with a label in
+  `issues.skip_labels` (default `blocked`, `wontfix`, `factory:in-progress`). `issues.label`
+  is optional: when set, only issues with that label count (older configs have
+  `factory:ready`; leave it out to take all). Labels that steer a single issue:
+  `factory:docs|light|full` (the effort, wins over the triage), `factory:solo` (never
+  bundled). `limits.bundle_max` (default 4) is the most issues in one `docs`/`light` job
+  (a `full` job takes at most 2). `issues.link` is the keyword that
   references the issue in PR/MR bodies: `Closes` (closes it on merge) or `Refs` (link
   only; required when merge commits are mirrored to another forge, where `Closes #N`
   would close an unrelated issue with the same number). Missing → `Closes`.
@@ -52,7 +60,12 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 - `delivery.auto_merge`: in `pr` mode, switch on the forge's auto-merge after opening the
   PR/MR, so the forge merges it itself once the required checks pass. Missing → `false`.
   Only meaningful with `draft: false` (a draft cannot merge); with both set, ignore the
-  auto-merge and say so.
+  auto-merge and say so. It is the switch, not the decision: `.factory/job` gates every
+  delivery (`AUTO-MERGE: yes|no` in `ACTION: deliver`, see **Delivery**).
+- `delivery.auto_merge_never` (optional): extra globs that always keep a job off auto-merge,
+  for paths CI cannot vouch for: put the personal-data paths here. The defaults already
+  cover CI/pipeline config, dependencies and lockfiles, containers and deploy config,
+  schema and migrations, and auth.
 - `limits` (optional, all keys optional): `active_jobs` = how many jobs of this repo may be
   in `spec`/`build`/`review`/`approve`/`deliver` at once (default 3, see Constants);
   `open_prs` = how many jobs may sit at `pr-open` before new ones wait (default 5, `0` =
@@ -96,9 +109,10 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  job  shoot  serve  heavy  guard  precheck  rereview  watch  ci  VERSION
+  config.json  repo.md  backlog.md  job  shoot  serve  heavy  guard  precheck  rereview  watch  ci  forgecheck  VERSION
   cache/                                 (.factory/heavy: passing validation results per tree;
                                           .factory/ci: CI/CD state per job as ci-<job-id>.json)
+  run/triage/                            (`/factory next`: issues.json, plan.json, groups.json)
   jobs/<job-id>/
     job.json                             (written only by .factory/job)
     spec.md
@@ -197,21 +211,35 @@ deliver with that PR section; `NOT-DOCS` (files outside `limits.docs_globs`) →
 continues as `--light` (spec-writer first, then the light review of round 1); `ISSUES`
 (secret-looking file or content, large diff, no `## PR` section) → `needs-human`.
 
-### `/factory next`
-If `config.issues` is set: take the lowest-numbered open issue with label
-`issues.label` whose author is allowed (see Issues) **and that no job has yet**, and run
-`/factory issue <nr>`. A job has the issue when its `job.json` has `"issue": <nr>` and
-its stage is not `superseded`. With `issues.link` = `Refs` an issue stays open after the
-PR/MR is merged (the factory closes it after the merge, see **Closing issues**, unless
-that is switched off), so "open" alone does not mean "not done"; report
-skipped issues with their job and stage in one line (use `rework` for those).
-Otherwise take the first unchecked item (`- [ ]`) in `.factory/backlog.md`, check it
-(`- [x] … (job <id>)`) and run `/factory <that item>`.
+### `/factory next [--yes]`
+If `config.issues` is set: **triage the open issues, then start jobs** (see **Issues**, "Triage").
+It looks at all open issues of the allowed authors that are not `blocked`, so many small
+related issues become a few jobs instead of many, each with the effort it deserves
+(`docs`, `light` or `full`):
+
+1. `mkdir -p .factory/run/triage`, then fetch the open issues into `raw.json` there (commands under **Issues**).
+2. `.factory/job triage prepare .factory/run/triage/raw.json`. The script filters mechanically
+   (author, `skip_labels`, issues that already have a job, an open PR/MR, a branch or a commit) and
+   prints `SKIPPED:` lines. `DONE: no issues to start` → report the skips in one line and stop.
+   Otherwise spawn the `AGENT:` block (factory-triage) with its `PROMPT:` verbatim and wait.
+3. `.factory/job triage plan` validates the plan (bundle size, label overrides, solo) and prints the
+   `GROUP k:` lines (effort and issues per job) and the `LEFT-OUT:` issues. **Show them to the user
+   and wait for their go-ahead**; with `--yes` start at once. Never change a group yourself.
+4. For every group: `.factory/job triage start <k>` (creates the job like `job new`: it
+   starts, or `WAIT`s in the queue), then drive it (see **Job state**). Several groups together
+   only when their files are unlikely to overlap, as with any parallel jobs.
+
+A job from a bundle carries all its issue numbers (`"issues": [..]`, `"issue"` is the first).
+Without `config.issues`, take the first unchecked item (`- [ ]`) in `.factory/backlog.md`,
+check it (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
 ### `/factory issue <nr> [--force]`
 See **Issues**. `--force` skips the already-done check. Then `/factory <feature>` with
 `feature` = the issue text and `--issue <nr> --issue-url <url>` (the script marks the job
-untrusted, so every prompt carries the untrusted label).
+untrusted, so every prompt carries the untrusted label). The mode is the issue's label
+`factory:docs|light|full` if it has one, else full: an explicit `/factory issue` is not triaged.
+Bundle by hand: repeat `--issue <nr> --issue-url <url>` in `job new` (the feature text then
+lists every issue).
 
 ### `/factory approve <id>`
 Only at `needs-human` without an open PR/MR: `.factory/job approve <id>` →
@@ -267,10 +295,12 @@ it. No conflict → nothing to do. Conflict → `.factory/job sync <id>` and dri
    conflict by picking a side.
 4. `SYNC: RESOLVED` → it spawns `factory-reviewer-code` with `Review sync <n>` (checks that
    nothing of either side was lost). `CHANGES` → `needs-human`. `PASS` → `ACTION: push`:
-   run the printed push (never `--force`), check the PR/MR is mergeable again and, with
-   `delivery.auto_merge`, that auto-merge is still on (new commits can clear it: set it
-   again as in Delivery), then `.factory/job sync-done <id>` (push rejected →
-   `.factory/job fail <id> "<error>"`). Report one line per job: id, MR, result.
+   with `delivery.auto_merge`, first switch auto-merge **off** (see Delivery for the command:
+   a sync merge was resolved by an agent and checked by one reviewer, so a human merges it;
+   never set it again for this job, `.factory/job` now keeps it off at every delivery). Then
+   run the printed push (never `--force`), check the PR/MR is mergeable again, then
+   `.factory/job sync-done <id>` (push rejected → `.factory/job fail <id> "<error>"`). Report
+   one line per job: id, MR, result, and "auto-merge off, needs a human merge".
 
 Runs automatically, check **and** fix: at the end of every delivery, on every `status`,
 and whenever you notice that a PR/MR got merged (every merge can make the other open
@@ -307,27 +337,41 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
 **Fetching**, for `config.forge`:
 
 - `github`: `gh issue view <nr> --json number,title,body,author,labels,state,comments,url`
-  (author = `author.login`, also per comment). List for `next`:
-  `gh issue list --label <label> --state open --json number,title,author`.
+  (author = `author.login`, also per comment). List for `next` (all open issues; add
+  `--label <issues.label>` only when that is set): `gh issue list --state open --limit 200
+  --json number,title,body,author,labels,url,comments > .factory/run/triage/raw.json`.
 - `gitlab`: `glab issue view <nr> -F json` (author = `author.username`, also per note).
-  List for `next`: `glab issue list --label <label> -F json`. Use `iid`, not `id`.
+  List for `next`: `glab issue list --per-page 100 -F json > .factory/run/triage/raw.json`
+  (add `--label <issues.label>` only when that is set). Use `iid`, not `id`.
 
 `feature` = `#<nr> <title>` + blank line + body + allowed comments.
+
+### Triage
+`/factory next` does not take issues one by one. `.factory/job triage prepare` removes what must not
+start, the **factory-triage** agent (pinned on sonnet, no Bash, reads only the issue file and the repo)
+decides per issue its effort and which small related issues share one job, and `triage plan`
+checks that plan: at most `bundle_max` issues per `docs`/`light` job and 2 per `full` job, labels
+`factory:docs|light|full` over the agent, `factory:solo` alone, issues the agent forgot become their own
+`full` job. Judgement sits in the agent and the rules in the script, so the result does not depend on
+the model or effort of this session. A `light` job that turns out to touch CI, dependencies,
+containers, schema or auth (or `delivery.auto_merge_never`) is lifted to `full` by the script after the
+build (a NOTE tells you); a `docs` job that touches code continues as `light`.
 
 **Reporting back** is off by default. Only with `"report": true` post a one-line comment
 at: start (job-id), `needs-human` (reason) and delivery (PR/MR url, or branch + commit
 sha), and swap the label to `factory:in-progress` at start. Never post code, diffs or
-review text. In `pr` mode the PR/MR body gets `<issues.link> #<nr>`; otherwise give the
-user that line. Commits reference the issue with `Refs #<nr>` only.
+review text. In `pr` mode the PR/MR body gets `<issues.link> #<nr>` for **every** issue of the job
+(`"issues"`, else `"issue"`); otherwise give the user those lines. Commits reference the issue with `Refs #<nr>` only.
 
 ### Closing issues
 Unless `issues.close_on_merge` is `false`, the factory closes a job's issue once the forge
 confirms its PR/MR is merged. It runs when a merge is noticed (`/factory sync`, also
 `/loop 10m /factory sync`; the check at the end of delivery; `/factory status`) and for any
-job at `merged` with an `issue` and no `issue_closed`, so older merged jobs are caught up.
+job at `merged` with an issue (a bundle: with issues not yet in `issue_closed`) and no `issue_closed`, so older merged jobs are caught up.
 All of these must hold, otherwise do nothing (and say why in one line):
 
-1. The job came from an issue (`"issue": <nr>`), has `pr_url`, and its `job.json`
+Do this for **each** issue of the job (`"issues"` for a bundle, else `"issue"`); the checks below are per issue.
+1. The job came from the issue (`"issue": <nr>` or `<nr>` in `"issues"`), has `pr_url`, and its `job.json`
    `delivery.mode` is `pr` (how this job was delivered; a local merge or a bare push has
    not reached the forge's base branch). A job without a `delivery` field (made before
    `.factory/job`) counts when it has a `pr_url`.
@@ -336,17 +380,19 @@ All of these must hold, otherwise do nothing (and say why in one line):
    `gh pr view <nr> --json state,baseRefName` → `MERGED`. Closed without merge never counts.
 3. The issue is still open (`glab issue view <nr> -F json` → `state` `opened`; `gh issue
    view <nr> --json state` → `OPEN`). Already closed (e.g. by `Closes #<nr>`) →
-   `.factory/job set <id> issue_closed "already closed"`.
-4. No other job with the same `issue` is still in progress (stage `queued`, `spec`,
+   `.factory/job set <id> issue_closed "already closed"` (a bundle: see below).
+4. No other job with the same issue (in `issue` or `issues`) is still in progress (stage `queued`, `spec`,
    `build`, `review`, `approve`, `deliver` or `pr-open`): then the issue is not done yet;
    set nothing and report it. A sibling at `needs-human` does not block.
 
 Close: `gitlab`: `glab issue close <iid>`; `github`: `gh issue close <nr> --reason
 completed`. With `"report": true` add a one-line comment first: `Merged: <pr_url>`. Then
 verify the issue is closed, `.factory/job set <id> issue_closed "<ISO8601>"` and report `closed
-#<nr> (job <id>, <pr_url>)`. Fails → report the error, leave `issue_closed` null (it is
-tried again on the next run). Never reopen an issue, never close one that is not in a
-job's `issue` field, never close on a closed-without-merge PR/MR.
+#<nr> (job <id>, <pr_url>)`. For a bundle `issue_closed` is a JSON object `{"<nr>": "<ISO8601 or
+reason>"}` that you extend per issue (`job set <id> issue_closed '{"12": "…", "14": "…"}'`, all entries
+so far); the job counts as closed when every issue of it is in it. Fails → report the error, leave `issue_closed` null (it is
+tried again on the next run). Never reopen an issue, never close one that is not in the
+job's `issue`/`issues`, never close on a closed-without-merge PR/MR.
 
 ## Severity
 
@@ -405,8 +451,16 @@ the pipeline starts) run the conflict check of `/factory sync` on it: `base` may
 moved while the job ran. Creating the PR/MR fails → `job delivered <id> pushed` and
 report the error (the branch is already up).
 
-**Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false). This
-is the only merge-related action the factory takes, and it is a switch, not a merge: the
+**Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false, and the
+`ACTION: deliver` printed `AUTO-MERGE: yes`). `.factory/job` decides: `yes` only for a job that
+got here through an approver `MERGE` (or a clean `--docs` precheck), whose precheck says
+`AUTO-MERGE: yes` (no issues, no audit deviation, no file in CI/pipeline config, dependencies,
+containers, schema/migrations, auth or `auto_merge_never`), without an approver `HOLD:` line,
+and whose branch has no agent-resolved sync merge. On `AUTO-MERGE: no (<reasons>)` open the
+PR/MR ready for review **without** auto-merge, and if this PR/MR already has it on (after a
+rework) switch it off: `gh pr merge <nr> --disable-auto`, or
+`glab api -X POST "projects/:id/merge_requests/<iid>/cancel_merge_when_pipeline_succeeds"`.
+Say the reasons in the report line: that PR/MR waits for a human. This is the only merge-related action the factory takes, and it is a switch, not a merge: the
 forge merges when its own checks pass; the factory never merges directly, never skips or
 retries checks to get green, never touches approval rules. Auto-merge set right after
 creation often fails because the pipeline does not exist yet, and some CLIs fail silently:
@@ -493,8 +547,9 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   together only when their files are unlikely to overlap (backend vs frontend, different
   modules); start overlapping ones after the earlier job is delivered, so `/factory sync`
   has less to do.
-- **Keep your own turns cheap.** Reasoning effort `medium` is enough for this role (tell
-  the user to run `/effort medium`; `xhigh` buys nothing here). Report one line per
+- **Keep your own turns cheap.** This skill sets `effort: medium` for the turn, whatever the
+  session uses; the judgement is in the pinned agents and the rules in `.factory/job`, so this
+  role works on any model. Report one line per
   transition or event ("013 built · reviews running"), never a recap of an agent's reply
   and never a status table unless asked (`status`). Read agent files only as this skill says.
 - **Long sessions:** all state is on disk. After about 10 jobs have been delivered in one

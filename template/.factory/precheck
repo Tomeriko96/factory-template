@@ -2,6 +2,9 @@
 """Mechanical checks before the approver, so it only has to judge.
 
   .factory/precheck <job-id> [<round>]
+  .factory/precheck --hold <job-id>     only list the files of the job's diff that sit in a class
+                                        CI alone does not vouch for (`<class>: <file>` per line);
+                                        .factory/job uses it to lift a `light` job to `full`
 
 Reads .factory/jobs/<job-id>/ (job.json, spec.md, round-N/*) and the job branch's diff
 against its base, writes <job>/precheck.md and prints it. First line is
@@ -20,6 +23,12 @@ Checks (each failing one is listed under Issues):
   - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
   - the diff is not huge (> 40 files or > 1500 changed lines) and has no binary or > 1 MB file
 Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ is still seen.
+
+Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>`. The mechanical half
+of the auto-merge gate (.factory/job adds the rest): no issues, no audit deviation (⚠️), and no
+file in a class that CI alone does not vouch for (CI/pipeline config, dependencies and
+lockfiles, containers, schema and migrations, auth), plus whatever `delivery.auto_merge_never`
+in config.json lists (globs; put personal-data paths there).
 Also reported: files, lines, commits, [blocking] mentions per review (information only).
 """
 import fnmatch, json, os, re, subprocess, sys
@@ -40,6 +49,36 @@ SECRET_CONTENT = [
 # No "*.txt": requirements.txt and other config would pass as documentation
 DOCS_GLOBS = ["*.md", "*.mdx", "*.rst", "*.adoc", "docs/**", "LICENSE*", "mkdocs.yml"]
 MAX_FILES, MAX_LINES, MAX_BYTES = 40, 1500, 1_000_000
+# Files where a green CI is not enough to merge unseen. A glob with a "/" is matched against the
+# whole path (with a leading "/", so "*/auth/*" also matches a top-level auth/), one without
+# against the file name.
+HOLD_CLASSES = {
+    "CI/pipeline config": ["*/.github/*", "*/.gitlab-ci.yml", "*/.gitlab/*", "*/.circleci/*", "Jenkinsfile",
+                           "azure-pipelines.yml", ".pre-commit-config.yaml"],
+    "dependencies": ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "pyproject.toml",
+                     "uv.lock", "poetry.lock", "requirements*.txt", "Pipfile", "Pipfile.lock", "go.mod",
+                     "go.sum", "Cargo.toml", "Cargo.lock", "Gemfile", "Gemfile.lock", "composer.json",
+                     "composer.lock", "renv.lock", "DESCRIPTION"],
+    "container/deploy": ["Dockerfile*", "docker-compose*.y*ml", "compose*.y*ml", "*/helm/*", "*/charts/*",
+                         "*/k8s/*", "*/kubernetes/*", "*/terraform/*", "*.tf"],
+    "schema/migrations": ["*/migrations/*", "*/alembic/*", "*.sql", "*/schema/*", "schema.*"],
+    "auth": ["*/auth/*", "*/authn/*", "*/authz/*", "*/oauth*", "*/oidc*", "*/sso*", "*/saml*", "*/rbac*",
+             "*/permissions*", "*/login*", "*/secrets/*"],
+}
+
+
+def hold_class(name, extra):
+    path = "/" + name
+    for cls, globs in [*HOLD_CLASSES.items(), ("delivery.auto_merge_never", extra)]:
+        for g in globs:
+            if "/" in g:
+                hit = fnmatch.fnmatch(path, g) or fnmatch.fnmatch(name, g) or \
+                    (g.endswith("/**") and name.startswith(g[:-2].lstrip("*/")))
+            else:
+                hit = fnmatch.fnmatch(os.path.basename(name), g)
+            if hit:
+                return cls
+    return None
 
 
 def git(*args, cwd):
@@ -65,9 +104,37 @@ def first_line(path):
         return None
 
 
+def extra_hold_globs():
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            return [g for g in ((json.load(f).get("delivery") or {}).get("auto_merge_never") or [])
+                    if isinstance(g, str)]
+    except (OSError, ValueError):
+        return []
+
+
+def hold_main(job_id):
+    """`--hold <job-id>`: the hold-class files in the job's diff, one `<class>: <file>` per line."""
+    with open(os.path.join(HERE, "jobs", job_id, "job.json")) as f:
+        job = json.load(f)
+    wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch")
+    names = git("diff", "--name-only", "--no-renames", "-z", f"{base}...{branch}", cwd=wt) if wt and base and branch else None
+    if names is None:
+        sys.exit("cannot diff the job branch")
+    extra = extra_hold_globs()
+    for name in filter(None, names.split("\0")):
+        cls = hold_class(name, extra)
+        if cls:
+            print(f"{cls}: {name}")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "--hold":
+        if len(sys.argv) != 3:
+            sys.exit(__doc__)
+        return hold_main(sys.argv[2])
     job_id = sys.argv[1]
     job_dir = os.path.join(HERE, "jobs", job_id)
     with open(os.path.join(job_dir, "job.json")) as f:
@@ -82,6 +149,9 @@ def main():
             globs = (json.load(f).get("limits") or {}).get("docs_globs") or DOCS_GLOBS
     except (OSError, ValueError):
         globs = DOCS_GLOBS
+
+    extra_hold = extra_hold_globs()
+    hold = {}  # file -> class
 
     required = [os.path.join(rdir, "build.md")] + ([] if docs_mode else [os.path.join(job_dir, "spec.md")])
     for p in required:
@@ -140,6 +210,9 @@ def main():
                     issues.append(f"factory/claude file in diff: {name}")
                 if SECRET.search(name):
                     issues.append(f"secret-looking file in diff: {name}")
+                cls = hold_class(name, extra_hold)
+                if cls:
+                    hold[name] = cls
                 size = git("cat-file", "-s", f"{branch}:{name}", cwd=wt)
                 if size and size.strip().isdigit() and int(size) > MAX_BYTES:
                     issues.append(f"file over 1 MB in diff: {name}")
@@ -167,7 +240,15 @@ def main():
     if not_docs:
         issues.append("not documentation: " + ", ".join(not_docs[:8]) + (" …" if len(not_docs) > 8 else ""))
     verdict = "CLEAN" if not issues else "NOT-DOCS" if docs_mode and len(issues) == 1 and not_docs else "ISSUES"
-    out = [f"PRECHECK: {verdict}", "",
+    why = []
+    if verdict != "CLEAN":
+        why.append(f"precheck {verdict}")
+    if any(n.startswith("audit deviation") for n in notes):
+        why.append("audit has a deviation (⚠️)")
+    for cls in sorted(set(hold.values())):
+        names = sorted(n for n, c in hold.items() if c == cls)
+        why.append(f"touches {cls}: " + ", ".join(names[:3]) + (" …" if len(names) > 3 else ""))
+    out = [f"PRECHECK: {verdict}", "AUTO-MERGE: " + ("no: " + "; ".join(why) if why else "yes"), "",
            f"Job {job_id}, round {rnd}: {files} files, {lines} changed lines, {commits} commits.",
            "Reviews: " + (", ".join(info) or "none"), "", "## Issues"]
     out += [f"- {i}" for i in issues] or ["None."]

@@ -14,14 +14,18 @@ cd /path/to/repo
 factory-init            # install (or update) + start `claude --model opus "/factory setup"`
 ```
 
-Then, in a Claude Code session in that repo (sonnet is enough for the orchestrator):
+Then, in a Claude Code session in that repo (any model and effort: the skill sets its own effort,
+the judgement sits in pinned agents):
 
 ```text
 /factory <feature>              full loop
 /factory --light <feature>      small change: code review (+ security/privacy if touched)
 /factory --docs <feature>       documentation only: one carry-out step, no reviewers
 /factory … --local <feature>    this job merges locally whatever delivery.mode says
-/factory issue <nr> | next      from an issue (trusted authors only) or .factory/backlog.md
+/factory issue <nr>             from one issue (trusted authors only); label factory:docs|light|full sets the effort
+/factory next [--yes]           triage ALL open, non-blocked issues of trusted authors: bundles small related
+                                ones into one job, picks docs/light/full per job, shows the plan, then starts
+                                (without config.issues: the first item of .factory/backlog.md)
 /factory approve|rework|resume|deliver <id>
 /factory status                 or live: .factory/watch [--tmux]   (factory-watch: all repos)
 ```
@@ -62,10 +66,10 @@ and re-run `factory-init` in each repo.
 
 ```text
 .claude/skills/factory/      SKILL.md (orchestrator) + setup.md (/factory setup)
-.claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
+.claude/agents/factory-*.md  triage, spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, job, shoot, serve,
-                             heavy, guard, precheck, rereview, watch, ci, VERSION, jobs/, run/, cache/
+                             heavy, guard, precheck, rereview, watch, ci, forgecheck, VERSION, jobs/, run/, cache/
 .claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
 
@@ -120,9 +124,9 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
 - **The audit is the pace-setter** (median 11 min against 1-2 for the other reviewers), so it
   has a call budget, starts from the cached validation, installs nothing in temporary
   worktrees, and marks what it cannot measure in time as ⏭️ instead of digging on.
-- **Cheap orchestrator:** run the `/factory` session on sonnet with `/effort medium`: it was
-  producing 650-970 output tokens per turn, almost all reasoning, for a bookkeeping role. It
-  reports one line per event, and after about 10 delivered jobs it tells you to `/clear` and
+- **Cheap orchestrator:** the skill sets `effort: medium` for its own turns (it was producing
+  650-970 output tokens per turn, almost all reasoning, for a bookkeeping role), so your session may
+  stay on any model and effort. It reports one line per event, and after about 10 delivered jobs it tells you to `/clear` and
   continue with `/factory status` (state is on disk). It never spawns `general-purpose`
   agents to run tests.
 - **Few screenshots:** ux/ui take at most 6 paths at 2 widths, light only unless colours
@@ -144,6 +148,18 @@ The factory only ever pushes `factory/*` branches: never the base branch, never
 with `delivery.draft: false` and `delivery.auto_merge: true` it switches on the forge's
 auto-merge after opening the PR/MR (GitLab: merge when pipeline succeeds; GitHub: `gh pr
 merge --auto`), so the forge merges once its own checks pass. It never merges directly.
+
+`auto_merge` is the switch; `.factory/job` is the gate. Every delivery prints `AUTO-MERGE: yes`
+or `AUTO-MERGE: no (<reasons>)`, and `no` means a ready PR/MR that a human merges (and auto-merge
+switched off if a rework had left it on). `yes` needs all of: an approver `MERGE` (or a clean
+`--docs` precheck, never `/factory approve`); precheck without issues and without an audit
+deviation (⚠️); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
+schema/migrations or auth, nor in `delivery.auto_merge_never` (your globs, e.g. personal-data
+paths); no `HOLD: <reason>` line from the approver (breaking change, public API, user-visible
+behaviour); and no sync merge on the branch (an agent resolved a conflict, one reviewer checked
+it: a human merges that). `/factory setup` runs `.factory/forgecheck`: does CI run on a draft
+PR/MR (if not, use `draft: false`), and does the forge require checks before a merge (if not,
+auto-merge has nothing to wait for and is not switched on).
 
 Once the forge confirms a job's PR/MR is merged, the factory closes the issue the job came
 from (`issues.close_on_merge`, default `true`; `false` leaves that to you), and no other
@@ -192,6 +208,28 @@ afterwards with `git check-ignore` that git really ignores them.
   trigger another round. Non-blocking ones end up as Leftovers in `decision.md`.
 - **Everything in English.** Artifacts, reports and commit messages.
 
+## Issues: triage, bundles and effort
+
+With `config.issues` set, `/factory next` considers **every open issue** of `allowed_authors` unless it has a
+label in `issues.skip_labels` (default `blocked`, `wontfix`, `factory:in-progress`); no `factory:ready` label is
+needed (an old config that still has `issues.label` keeps requiring it; remove the key to take all). Steps:
+
+1. `.factory/job triage prepare` filters mechanically: author, skip labels, issues that already have a job,
+   an open PR/MR, a remote branch or a commit referencing them.
+2. The **factory-triage** agent (sonnet, medium, no Bash) is the *issue audit*: per issue the effort
+   (`docs`: documentation only, no spec/reviewers/approver; `light`: small and local, code review only; `full`:
+   everything else), issues it should skip (questions, epics, unclear), and which small related issues belong in
+   one job.
+3. `.factory/job triage plan` validates that plan: at most `limits.bundle_max` (default 4) issues in a
+   `docs`/`light` job, 2 in a `full` job, `factory:docs|light|full` labels beat the agent, `factory:solo` is never
+   bundled, issues the agent forgot become their own `full` job. You see the groups and agree (or `--yes`).
+4. `triage start <k>` starts each group. A bundle is one job with `"issues": [..]`: one spec with criteria
+   per issue, one PR with `Closes #a, Closes #b`, and all issues are closed after the merge.
+
+The effort has a **floor**: a `light` job whose diff touches CI/pipeline config, dependencies, containers,
+schema/migrations or auth (or `delivery.auto_merge_never`) becomes `full` automatically; a `docs` job that touches
+code continues as `light`.
+
 ## Status
 
 Install/update/remove, the git-exclusion and the loading of the skill and agents by
@@ -201,10 +239,12 @@ and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
 
 Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I tests/prompts_test.py`,
-`python3 -I tests/watch_test.py` (the board, two repos, and every key through a pseudo-terminal)
+`python3 -I tests/forgecheck_test.py` (CI on drafts, required checks, with a fake `gh`/`glab`),
+`python3 -I tests/watch_test.py` (the board, two repos, and every key through a pseudo-terminal;
+`.factory/ci` with a fake `gh`: a merged or closed PR is reported as such)
 (prompt copies and the contracts between prompts and scripts stay in step).
 
-`job` is tested by `bash tests/job_test.sh` (98 checks; a throwaway repo with a bare remote, the agents played by writing their files): the full
+`job` is tested by `bash tests/job_test.sh` (120 checks, among them the auto-merge gate; a throwaway repo with a bare remote, the agents played by writing their files): the full
 loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
 under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
 rework after someone pushed to the branch, sync (resolved and needs-human), job.json files from

@@ -54,11 +54,11 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   Only meaningful with `draft: false` (a draft cannot merge); with both set, ignore the
   auto-merge and say so.
 - `limits` (optional, all keys optional): `active_jobs` = how many jobs of this repo may be
-  in `spec`/`build`/`review`/`approve` at once (default 3, see `MAX_ACTIVE_JOBS`);
+  in `spec`/`build`/`review`/`approve`/`deliver` at once (default 3, see Constants);
   `open_prs` = how many jobs may sit at `pr-open` before new ones wait (default 5, `0` =
   no limit: every merged PR/MR makes the others conflict, so a long CI queue should slow
   intake); `guard: false` switches off `.factory/guard`; `docs_globs` = paths that count
-  as documentation for `--docs` (default `*.md`, `*.mdx`, `*.rst`, `*.adoc`, `*.txt`,
+  as documentation for `--docs` (default `*.md`, `*.mdx`, `*.rst`, `*.adoc`,
   `docs/**`, `LICENSE*`, `mkdocs.yml`);
   `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` set the machine-wide limits of
   `.factory/heavy` (defaults: at most max(2, cores/2) commands at once, together at most
@@ -81,179 +81,119 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 
 ## Constants
 
-- `MAX_ROUNDS = 3`, then `needs-human`.
-- `MAX_RESUMES = 2`: how often you respawn an agent that returned without writing its
-  output file. Then `needs-human`.
-- `MAX_SYNCS = 3`: how often one job's PR/MR is brought up to date with `base` (see
-  `/factory sync`). Then `needs-human`.
-- `MAX_ACTIVE_JOBS = 3` (`limits.active_jobs`): jobs in stage `spec`, `build`, `review` or
-  `approve` at the same time, per repo, and (`limits.open_prs`) at most 5 jobs at `pr-open`.
-  More are `queued` (see `/factory <feature>`).
-  The machine-wide guard is `.factory/heavy`, which also holds across repos (see Resources).
-- Ports for job `NNN-…` (n = NNN as a number): builder `port_base + 10n`; reviewers
-  ux `+1`, ui `+2`, audit `+3`. Other reviewers get the builder port but start no server.
+Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
+
+- `MAX_ROUNDS = 3` per run; a `rework` grants 3 more. Then `needs-human`.
+- `MAX_RESUMES = 2`: an agent that returns without its output file is respawned twice
+  (the script re-emits the spawn with a resume note), then `needs-human`.
+- `MAX_SYNCS = 3`: base merges per job (see `/factory sync`). Then `needs-human`.
+- `limits.active_jobs` (default 3): jobs in `spec`/`build`/`review`/`approve`/`deliver`
+  or syncing at once, per repo; `limits.open_prs` (default 5): jobs at `pr-open` before
+  new jobs wait. More are `queued`. The machine-wide guard is `.factory/heavy` (Resources).
+- Ports for job `NNN-…`: builder `port_base + 10·NNN`; ux `+1`, ui `+2`, audit `+3`.
 
 ## Layout
 
 ```text
 <repo>/.factory/                         (git-excluded)
-  config.json  repo.md  backlog.md  shoot  serve  heavy  guard  precheck  rereview  watch  ci  VERSION
+  config.json  repo.md  backlog.md  job  shoot  serve  heavy  guard  precheck  rereview  watch  ci  VERSION
   cache/                                 (.factory/heavy: passing validation results per tree;
                                           .factory/ci: CI/CD state per job as ci-<job-id>.json)
   jobs/<job-id>/
-    job.json
+    job.json                             (written only by .factory/job)
     spec.md
     round-N/build.md
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
+    round-N/decision.md                  (an approver's REWORK, moved here by the script)
     precheck.md                          (.factory/precheck, before the approver)
-    decision.md                          (approver, final round; moved to round-N/ on REWORK/rework)
+    decision.md                          (approver: the current decision)
     sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
     rework.md                            (only after /factory rework)
 <repo>/../<repo>-worktrees/<job-id>/     (git worktree, branch factory/<job-id>)
 ```
 
-`<job-id>` = `NNN-<slug>`: NNN = highest existing + 1, three digits; slug from the
-feature, lowercase, max 40 characters.
+## Job state
 
-`job.json`:
+`.factory/job` is the **only** writer of `job.json`: never edit or rewrite that file
+yourself. It applies the state machine under a lock, from the files the agents wrote:
+job ids and ports, worktrees, rounds and their budget, verdicts, precheck, REWORK, resumes,
+the queue and capacity, delivery bookkeeping and cleanup. Stages: `queued`, `spec`,
+`build`, `review`, `approve`, `deliver` (approved, delivery pending), and at rest
+`needs-human`, `merged`, `pushed`, `pr-open`, `superseded`.
 
-```json
-{
-  "id": "001-example",
-  "feature": "<verbatim as the user gave it>",
-  "mode": "full | light | docs",
-  "stage": "queued | spec | build | review | approve | needs-human | merged | pushed | pr-open | superseded",
-  "round": 0,
-  "port": 5110,
-  "base": "main",
-  "branch": "factory/001-example",
-  "worktree": "/abs/path/<repo>-worktrees/001-example",
-  "resumes": 0,
-  "reviews": { "security": null, "code": null, "ux": null, "ui": null, "audit": null },
-  "started": "<ISO8601>",
-  "updated": "<ISO8601>",
-  "history": [{ "stage": "spec", "at": "<ISO8601>" }],
-  "round_heads": {},
-  "pr_url": null,
-  "issue_closed": null,
-  "sync": { "count": 0, "last": null }
-}
-```
+The driving loop, for every command that moves a job: run the command, read the first
+line of its output, act, and call `.factory/job next <id>` again:
 
-- `base` = the branch checked out in the main checkout when the job starts. Diffs,
-  reviews and the merge always target `base`, never whatever is checked out later.
-- `reviews` has one key per reviewer in the current round's set: `null` until its file
-  exists, then `"PASS"` or `"CHANGES"`.
-- `issue_closed` is set by **Closing issues**: an ISO8601 time, or `"already closed"` /
-  `"skipped: <reason>"`. `null` means not handled yet.
-- Rewrite the whole file on every change: always `updated`, plus a `history` entry on
-  every stage change. Report each transition in one line.
+- `ACTION: spawn N agent(s)` → run `.factory/heavy gate` (Bash timeout 600000), then
+  spawn every `AGENT:` block **in one message** with its `MODEL:` (`default` = the
+  agent's own) and its `PROMPT:` **verbatim** (it holds the paths block, the port, the
+  untrusted marks and the resume note). Wait until all have returned, then `job next`.
+  Never write an agent's file yourself, also not when it gave its verdict only in its
+  reply: `job next` respawns it.
+- `ACTION: choose-reviewers` → pick the round's candidates (see **Reviewers**), then
+  `.factory/job reviewers <id> <a,b,c>`. From round 2 on it narrows them with
+  `.factory/rereview` and keeps in every reviewer whose latest verdict is not PASS.
+- `ACTION: deliver` → see **Delivery**, then `job delivered` (or `job fail`).
+- `ACTION: push` → only in a sync: see `/factory sync`.
+- `WAIT: …` / `DONE: …` → report it in one line (with `NEXT:` if given) and stop.
+- `STARTED: <id>` (a queued job got a slot) → drive that job with `job next <id>` too.
+- `ERROR: …` → nothing changed; report it, never work around it by editing job.json.
+
+`.factory/job list` shows all jobs and capacity; `.factory/job show <id>` the raw state.
+
+## Reviewers
+
+On `ACTION: choose-reviewers` (round N, mode as printed):
+
+- `full`: `config.reviewers`, except that `ux` and `ui` run only when the job touches
+  the UI: some file in `git diff --name-only <base>...<branch>` matches the "UI paths"
+  line of repo.md (default: `*.tsx *.jsx *.vue *.svelte *.css *.scss *.html`,
+  `templates/`, `static/`, `frontend/src/`). Round > 1: only if they ran before and gave
+  `CHANGES`, or UI files changed since. Say in one line when they are skipped.
+- `light`: `code`, plus `security` if the changed files touch auth, secrets, input
+  parsing or dependencies, plus `privacy` if it is in `config.reviewers` and the files
+  touch personal-data paths. No `audit`: the approver measures the acceptance criteria.
 
 ## Paths block
 
-Every subagent prompt starts with:
-
-```text
-Repo: <main checkout, absolute>
-Worktree: <worktree, absolute>
-Job: <repo>/.factory/jobs/<job-id>
-Base: <base from job.json>
-Branch: factory/<job-id>
-```
+Every subagent prompt starts with the paths block (Repo, Worktree, Job, Base, Branch);
+`.factory/job` writes it into the prompts it prints.
 
 ## Commands
 
 ### `/factory <feature>`
-1. **Start the job.** Determine job-id, port and `base` (`git branch --show-current`;
-   detached HEAD → refuse and report), then:
-   - **Already done?** (jobs from an issue) `git fetch <remote>`, then look for existing
-     work: an open PR/MR that mentions the issue (`gitlab`: `glab mr list --search
-     "#<nr>"`; `github`: `gh pr list --search "#<nr>" --state open`), a remote branch with
-     the number in its name (`git branch -r --list "*<nr>*"`), or a commit on
-     `<remote>/<base>` that references it (`git log <remote>/<base> --oneline --grep
-     "#<nr>"`). Found → do not start: report what exists (`next` then takes the next
-     issue). `/factory issue <nr> --force` skips this.
-   - **Capacity.** Count the jobs in stage `spec`/`build`/`review`/`approve` (and a running
-     sync), and with `limits.open_prs` also those at `pr-open`. At `MAX_ACTIVE_JOBS` or at
-     the PR limit → create the job folder and `job.json` with stage `queued` (no worktree,
-     no agents), say what it waits for, and stop here. Whenever a job leaves those stages
-     (any write of `job.json` that sets `needs-human`, `merged`, `pushed`, `pr-open` or
-     `superseded`) and on every `status`/`resume`, start the lowest-numbered `queued` job
-     while there is room: continue with the rest of this step for it.
-   - **Worktree.** Bring `base` up to date first, or the job builds on stale code and
-     needs a sync later: if the main checkout is clean and `<remote>/<base>` is ahead,
-     `git pull --ff-only <remote> <base>` (not clean or not fast-forward → say so and
-     continue on the local `base`). `git worktree add -b factory/<job-id> <worktree>
-     <base>`. Create the job folder and write `job.json` (stage `spec`, mode `full`), or
-     set the stage of the queued one to `spec`.
-2. **Spec:** run the load gate (see Resources), then spawn `factory-spec-writer`, prompt
-   `<paths> Feature: <feature>`. Wait until `spec.md` exists. If its first line is
-   `SPEC: ALREADY-DONE` (the base already does this; the file says where), stage →
-   `superseded`, report the evidence, clean up and stop. Otherwise stage → `build`.
-3. **Build round N** (N = round + 1): run the load gate, then spawn `factory-builder`, prompt
-   `<paths> Build round N. Port: <port>. Mode: <mode>.` Wait until `round-N/build.md` exists.
-   Stage → `review`, round = N; store `git -C <worktree> rev-parse HEAD` in `job.json`
-   as `round_heads.<N>`.
-4. **Review round N:** the set is `config.reviewers`, except that `ux` and `ui` run only
-   when the job touches the UI: some file in `git diff --name-only <base>...<branch>`
-   matches the "UI paths" line of repo.md (default: `*.tsx *.jsx *.vue *.svelte *.css
-   *.scss *.html`, `templates/`, `static/`, `frontend/src/`). Round > 1: only if they ran
-   before and gave `CHANGES`, or UI files changed since. Say in one line when they are
-   skipped. **Round > 1:** do not re-run everyone: run `<repo>/.factory/rereview <job-id>
-   N --set <the names above, comma separated>` and use the `SET:` line it prints (reviewers
-   that gave `CHANGES`, plus `audit` and `code`, plus everyone when the builder changed
-   more than the findings pointed at); say its `WHY:` in one line. A reviewer left out keeps
-   its earlier PASS. Run the load gate, then spawn one `factory-reviewer-<name>` per reviewer in
-   the set, **all in one message** (parallel). Prompt:
-   `<paths> Review round N. Port: <port + offset>.`
-   plus one line: `You must write round-N/review-<name>.md (first line VERDICT:
-   PASS|CHANGES); it is required and part of your task.`
-   **WAIT FOR ALL:** continue only when every `round-N/review-<name>.md` of the set exists. Read
-   only the first line of each (`VERDICT: PASS|CHANGES`) into `reviews`. A verdict that
-   only appears in the agent's reply message is not a verdict: see Rules.
-5. **Decision:**
-   - every reviewer's latest verdict `PASS` (a reviewer left out of this round counts with
-     its earlier PASS) → run `<repo>/.factory/precheck <job-id> N` (mechanical checks; writes
-     `<Job>/precheck.md`, read only its first line). Stage `approve`, spawn
-     `factory-approver` (sonnet by default) with prompt `<paths> Final round: N. Mode:
-     <mode>.`; pass `model: opus` instead when the precheck says `ISSUES`, or N > 1.
-   - ≥1 `CHANGES` and N < `MAX_ROUNDS` → back to step 3 with N+1 (the builder reads the
-     previous round's reviews itself).
-   - ≥1 `CHANGES` and N = `MAX_ROUNDS` → stage `needs-human`, report which reviews block.
-6. The **approver** writes `decision.md`, first line `DECISION: MERGE|REWORK|ESCALATE`:
-   - `MERGE` → deliver (see Delivery) → stage `merged`, `pushed` or `pr-open`.
-   - `REWORK` → move `decision.md` to `round-N/decision.md` (the builder reads its list
-     there, and no stale decision is left at the job root), then build round N+1 (counts
-     towards `MAX_ROUNDS`).
-   - `ESCALATE` → stage `needs-human`; show the reason from `decision.md`.
+1. **Already done?** (jobs from an issue, unless `--force`) `git fetch <remote>`, then
+   look for existing work: an open PR/MR that mentions the issue (`gitlab`: `glab mr list
+   --search "#<nr>"`; `github`: `gh pr list --search "#<nr>" --state open`), a remote
+   branch with the number in its name (`git branch -r --list "*<nr>*"`), or a commit on
+   `<remote>/<base>` that references it (`git log <remote>/<base> --oneline --grep
+   "#<nr>"`). Found → do not start: report what exists (`next` then takes the next issue).
+2. `.factory/job new "<feature>" [--mode light|docs] [--issue <nr> --issue-url <url>]`.
+   It takes the checked-out branch as `base` (detached HEAD → `ERROR`), creates the job,
+   and either queues it (`WAIT`) or creates the worktree (fast-forwarding `base` from the
+   remote when the checkout is clean) and prints the first action. Then drive it (see
+   **Job state**) until `WAIT` or `DONE`.
+
+What the script does along the way: spec-writer → `SPEC: ALREADY-DONE` ends as
+`superseded`; builder round N → reviewers → any blocking verdict builds N+1 while the
+budget lasts; all PASS → precheck → approver (opus when the precheck says `ISSUES` or
+N > 1) → `MERGE` delivers, `REWORK` builds N+1 with the approver's list, `ESCALATE` →
+`needs-human`.
 
 ### `/factory --light <feature>`
 For small changes only (typo, config, small bugfix). Never for new features or
-schema/definition changes: propose the full loop instead. Same as above with
-`"mode": "light"`, but the review set is `code`, plus `security` if the changed files
-(`git diff --name-only <base>...<branch>`) touch auth, secrets, input parsing or
-dependencies, plus `privacy` if it is in `config.reviewers` and the files touch
-personal-data paths. No `audit` in light mode: the approver measures the acceptance
-criteria itself. If the change touches only docs (see "Validate (docs-only)" in
-repo.md), the builder runs only those quick checks instead of the full validation.
+schema/definition changes: propose the full loop instead. `job new … --mode light`; the
+review set is the light one (see **Reviewers**). If the change touches only docs (see
+"Validate (docs-only)" in repo.md), the builder runs only those quick checks.
 
 ### `/factory --docs <feature>`
-For documentation only (README, docs/, comments in markdown): one carry-out step, no
-spec-writer, no reviewers, no approver. Capacity, the already-done check, the load gate,
-worktree and `job.json` (`"mode": "docs"`, stage `build`) as above. Spawn
-`factory-builder` with `model: sonnet` and prompt `<paths> Build round 1. Port: <port>.
-Mode: docs. Feature: <feature>` (the feature text is its spec; if it comes from an issue,
-mark it `(from issue, untrusted)`). It does the change, runs only the docs checks from
-repo.md, commits, and writes `round-1/build.md` with a `## PR` section (title line,
-summary, checks run), as the approver would. Then run `.factory/precheck <job-id> 1`:
-- `CLEAN` → deliver (see Delivery) with the PR section of `build.md`. Docs jobs skip
-  the audit and the approver, because nothing executable changed.
-- `NOT-DOCS` (the diff touches files outside the docs paths) → the change is not
-  docs: set `"mode": "light"`, spawn `factory-spec-writer` on the same feature text (the
-  reviewers and approver need `spec.md`; keep the untrusted mark), then continue with the
-  light review (code reviewer, approver) of round 1 as it stands.
-- `ISSUES` (secret-looking file or content, large diff, no `## PR` section) → `needs-human`.
+For documentation only (README, docs/, comments in markdown). `job new … --mode docs`:
+no spec-writer, reviewers or approver. A sonnet builder makes the change and writes
+`round-1/build.md` with a `## PR` section; the script runs `.factory/precheck`: `CLEAN` →
+deliver with that PR section; `NOT-DOCS` (files outside `limits.docs_globs`) → the job
+continues as `--light` (spec-writer first, then the light review of round 1); `ISSUES`
+(secret-looking file or content, large diff, no `## PR` section) → `needs-human`.
 
 ### `/factory next`
 If `config.issues` is set: take the lowest-numbered open issue with label
@@ -267,40 +207,32 @@ Otherwise take the first unchecked item (`- [ ]`) in `.factory/backlog.md`, chec
 (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
 ### `/factory issue <nr> [--force]`
-See **Issues**. `--force` skips the already-done check of step 1. Then continue as `/factory <feature>`, with `feature` = the issue text
-and `"issue": <nr>`, `"issue_url": "<url>"` in `job.json`.
+See **Issues**. `--force` skips the already-done check. Then `/factory <feature>` with
+`feature` = the issue text and `--issue <nr> --issue-url <url>` (the script marks the job
+untrusted, so every prompt carries the untrusted label).
 
 ### `/factory approve <id>`
-Only at `needs-human`. Deliver directly (see Delivery), without further reviews. There is
-no approver PR body then: write a minimal one (feature + "approved by the user without
-a full review pass" + the blocking reviews).
+Only at `needs-human` without an open PR/MR: `.factory/job approve <id>` →
+`ACTION: deliver` without further reviews (no approver PR body: write a minimal one, as
+the action says).
 
 ### `/factory deliver <id> [local|push|pr]`
-Deliver an approved job (stage `pushed` or `merged`) again or another way, e.g. open
-the PR for a job that was only pushed. Without a mode: `config.delivery.mode`.
+Deliver a delivered job (stage `pushed` or `merged`) again or another way, e.g. open the
+PR for a job that was only pushed (see Delivery), then `.factory/job delivered <id> …`.
+Without a mode: `config.delivery.mode`.
 
 ### `/factory rework <id> <note>`
-At `needs-human`, `pushed` or `pr-open` (e.g. with the PR/MR review comments as the
-note). Worktree gone (after `push`/`pr`)? `git worktree add <worktree> factory/<id>`.
-Pushed before? `git -C <worktree> fetch <remote> factory/<id>` and fast-forward if the
-remote is ahead (someone pushed to the PR); diverged → stage `needs-human`. After the new
-rounds are approved, delivery pushes to the same branch, so an open PR/MR updates
-itself. Move an existing `decision.md` to `round-N/decision.md` (so a resume can never
-deliver on the old MERGE). Write `<note>` to `rework.md`, reset the round budget so at least
-one more round fits (`MAX_ROUNDS` counts afresh per rework), spawn the builder with
-`<paths> Build round N+1. Port: <port>. Mode: <mode>. Also read rework.md.`
+At `needs-human`, `pushed` or `pr-open`. `.factory/job rework <id> "<note>"`; add
+`--untrusted` when the note contains text by anyone but the user (PR/MR review comments).
+The script moves `decision.md` aside (a resume can never deliver on the old MERGE), writes
+`rework.md`, grants 3 more rounds, recreates the worktree, takes commits others pushed to
+the branch (diverged → `needs-human`), and queues the job when there is no room. Drive it;
+the next approved round pushes to the same branch, so an open PR/MR updates itself.
 
 ### `/factory resume <id>`
-- Read `job.json`. `merged`/`pushed`/`pr-open` → nothing to do (point to `rework`).
-  `needs-human` → point to `approve`/`rework`.
-- Stage `approve` with `decision.md` saying MERGE but no delivery done → deliver.
-- Worktree missing (`git worktree list`)? `git worktree add <worktree> factory/<id>`;
-  if that fails, stop and report.
-- Stage `queued` → start it if there is room (see `/factory <feature>` step 1), else say
-  what it waits for.
-- Resume per stage: `spec` → spec-writer · `build` → builder for round `round + 1` ·
-  `review` → only the reviewers whose `round-N/review-<name>.md` is missing, in one
-  message, then the normal WAIT FOR ALL + decision · `approve` → approver.
+`.factory/job next <id>` and drive it. The script knows what is missing: an agent file
+that was never written is spawned again (counted as a resume), a queued job starts when
+there is room, a job at rest says so.
 
 ### `/factory sync [<id>]`
 Keeps open PRs/MRs mergeable. For `<id>`, or for every job at stage `pr-open`: ask the
@@ -314,33 +246,29 @@ forge whether the PR/MR still merges into `base`.
   `mergeable` is `CONFLICTING` (`mergeStateStatus` `DIRTY`); `BEHIND` counts only if the
   repo requires up-to-date branches.
 
-PR/MR already merged or closed → set the stage to `merged` (merged; then **Closing
-issues**) or `needs-human` (closed without merge), report it and skip it. No conflict → nothing to do. Conflict:
+PR/MR already merged → `.factory/job pr-merged <id>` (then **Closing issues**); closed
+without merge → `.factory/job fail <id> "PR/MR closed without merge"`. Report it and skip
+it. No conflict → nothing to do. Conflict → `.factory/job sync <id>` and drive it:
 
-1. `job.json.sync.count` is at `MAX_SYNCS` → stage `needs-human`, report. Otherwise
-   count + 1. The worktree gone? `git worktree add <worktree> factory/<id>`. Remote
-   ahead of your branch (someone pushed)? Fast-forward it first; diverged → `needs-human`.
-2. Spawn `factory-builder` with `model: sonnet` (a sync is a merge, not a build; opus is
-   not needed, and a conflict sonnet cannot settle ends as `NEEDS-HUMAN`, not as a guess):
-   `<paths> Sync <n>. Port: <port>. Mode: <mode>.` It merges
-   `<remote>/<base>` into the job branch (a merge commit: never rebase, never
-   force-push), resolves the conflicts, runs the validation and writes
-   `<Job>/sync-<n>/build.md` whose first line is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`
-   (see the agent). Wait for the file.
-3. `SYNC: NEEDS-HUMAN` → stage `needs-human`; show its reason; the PR/MR stays open and
-   untouched. This is the right outcome when `base` already fixes the same thing in a
-   different way (the job is then probably superseded: say so and suggest closing the
-   PR/MR), when both sides change the same behaviour, or when validation fails after the
-   merge. Never resolve such a conflict by picking a side.
-4. `SYNC: RESOLVED` → spawn `factory-reviewer-code` on the merge (`<paths> Review sync
-   <n>. Port: <port>.`, it writes `<Job>/sync-<n>/review-code.md`; it checks that nothing
-   of either side was lost and that the tests cover the merge). `PASS` → push the
-   branch like Delivery's `push` step 2 (never `--force`), then check the PR/MR is
-   mergeable again and, with `delivery.auto_merge`, that auto-merge is still on (new
-   commits can clear it: set it again as in Delivery). `CHANGES` → stage
-   `needs-human`, show the findings.
-5. Stage stays `pr-open` after a successful sync; write `sync: {count, last}` and a
-   `history` entry to `job.json`. Report one line per job: id, MR, result.
+1. The script checks the sync budget (`MAX_SYNCS`, then `needs-human`) and capacity (no
+   room → `WAIT: sync postponed`, retried on the next `status`/`sync`), recreates the
+   worktree and takes commits others pushed to the branch (diverged → `needs-human`).
+2. It spawns a sonnet `factory-builder` with `Sync <n>`: it merges `<remote>/<base>` into
+   the job branch (a merge commit: never rebase, never force-push), resolves the
+   conflicts, runs the validation and writes `sync-<n>/build.md` (`SYNC: RESOLVED` or
+   `SYNC: NEEDS-HUMAN`). A conflict sonnet cannot settle ends as `NEEDS-HUMAN`, not as a
+   guess.
+3. `SYNC: NEEDS-HUMAN` → `needs-human`; the PR/MR stays open and untouched. This is the
+   right outcome when `base` already fixes the same thing in a different way (the job is
+   then probably superseded: say so and suggest closing the PR/MR), when both sides change
+   the same behaviour, or when validation fails after the merge. Never resolve such a
+   conflict by picking a side.
+4. `SYNC: RESOLVED` → it spawns `factory-reviewer-code` with `Review sync <n>` (checks that
+   nothing of either side was lost). `CHANGES` → `needs-human`. `PASS` → `ACTION: push`:
+   run the printed push (never `--force`), check the PR/MR is mergeable again and, with
+   `delivery.auto_merge`, that auto-merge is still on (new commits can clear it: set it
+   again as in Delivery), then `.factory/job sync-done <id>` (push rejected →
+   `.factory/job fail <id> "<error>"`). Report one line per job: id, MR, result.
 
 Runs automatically, check **and** fix: at the end of every delivery, on every `status`,
 and whenever you notice that a PR/MR got merged (every merge can make the other open
@@ -348,14 +276,16 @@ PRs/MRs conflict: then run it for all other jobs at `pr-open`). Jobs that are no
 checked for a while (nobody calls `status`) are caught by `/loop 10m /factory sync`.
 
 ### `/factory` (no argument) / `/factory status`
-Per job: id, mode, stage, round, reviews. For jobs at `pr-open`, first run
+`.factory/job list` (per job: id, mode, stage, round/budget, reviews, reason or PR).
+For jobs at `pr-open`, first run
 `/factory sync` for them (check and, on a conflict, the fix: the sonnet builder merges
-`base`; a sync that finds no room is "postponed"). For those jobs also read the CI state and write it to
-`job.json` as `"pr_state": {"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
-"merge": "<mergeable|conflict|blocked|unknown>"}` (`gitlab`: `head_pipeline.status` and
+`base`; a sync that finds no room is "postponed"). For those jobs also read the CI state and record it with
+`.factory/job set <id> pr_state '{"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
+"merge": "<mergeable|conflict|blocked|unknown>"}'` (`gitlab`: `head_pipeline.status` and
 `detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json
 statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
-failing, Z waiting on CI". Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
+failing, Z waiting on CI". Run `job next` for every `queued` job (it starts when there is
+room). Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
 has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board
 (it shows one CI/CD line per `pr-open` job with stages/jobs from `.factory/ci`,
 refreshed live; `.factory/watch <id>` shows the full stage/job table;
@@ -397,20 +327,22 @@ confirms its PR/MR is merged. It runs when a merge is noticed (`/factory sync`, 
 job at `merged` with an `issue` and no `issue_closed`, so older merged jobs are caught up.
 All of these must hold, otherwise do nothing (and say why in one line):
 
-1. The job came from an issue (`"issue": <nr>`), has `pr_url` and `delivery.mode` was `pr`
-   (a local merge or a bare push has not reached the forge's base branch).
+1. The job came from an issue (`"issue": <nr>`), has `pr_url`, and its `job.json`
+   `delivery.mode` is `pr` (how this job was delivered; a local merge or a bare push has
+   not reached the forge's base branch).
 2. The forge says the PR/MR is merged, into the job's `base`: `gitlab`:
    `glab api "projects/:id/merge_requests/<iid>"` → `state` is `merged`; `github`:
    `gh pr view <nr> --json state,baseRefName` → `MERGED`. Closed without merge never counts.
 3. The issue is still open (`glab issue view <nr> -F json` → `state` `opened`; `gh issue
-   view <nr> --json state` → `OPEN`). Already closed (e.g. by `Closes #<nr>`) → set
-   `issue_closed` to `"already closed"`.
-4. No other job with the same `issue` is unfinished (stage not `merged`, `superseded` or
-   `pushed`): then the issue is not done yet; set nothing and report it.
+   view <nr> --json state` → `OPEN`). Already closed (e.g. by `Closes #<nr>`) →
+   `.factory/job set <id> issue_closed "already closed"`.
+4. No other job with the same `issue` is still in progress (stage `queued`, `spec`,
+   `build`, `review`, `approve`, `deliver` or `pr-open`): then the issue is not done yet;
+   set nothing and report it. A sibling at `needs-human` does not block.
 
 Close: `gitlab`: `glab issue close <iid>`; `github`: `gh issue close <nr> --reason
 completed`. With `"report": true` add a one-line comment first: `Merged: <pr_url>`. Then
-verify the issue is closed, write `issue_closed` (time) to `job.json` and report `closed
+verify the issue is closed, `.factory/job set <id> issue_closed "<ISO8601>"` and report `closed
 #<nr> (job <id>, <pr_url>)`. Fails → report the error, leave `issue_closed` null (it is
 tried again on the next run). Never reopen an issue, never close one that is not in a
 job's `issue` field, never close on a closed-without-merge PR/MR.
@@ -431,28 +363,31 @@ findings; it may leave non-blocking ones with a one-line reason in build.md.
 
 ## Delivery
 
-Only after `DECISION: MERGE` (or `/factory approve`). Per `config.delivery.mode`:
+On `ACTION: deliver` (after `DECISION: MERGE`, a clean docs job or `/factory approve`),
+per its `MODE:` (`config.delivery.mode`), with the PR text from its `PR-TEXT:` line. Report
+the outcome with `.factory/job delivered <id> merged|pushed|pr-open [--pr-url <url>]`: the
+script records how the job was delivered, removes the worktree (and, for `merged`, the
+local branch) and cleans up. Any failure below → `.factory/job fail <id> "<reason>"`.
 
 ### `local`
 In the main checkout, only if `git branch --show-current` equals `base` and
-`git status --porcelain` is empty; otherwise stage `needs-human` with that reason (never
+`git status --porcelain` is empty; otherwise `job fail` with that reason (never
 switch branches yourself). Then
 `git merge --no-ff factory/<job-id> -m "factory: <job-id> — <feature>"`. On conflict:
-`git merge --abort`, stage `needs-human`. On success: `git worktree remove <worktree>`,
-`git branch -d factory/<job-id>`, stage `merged`. Report the commit sha and that pushing
-is up to the user.
+`git merge --abort`, then `job fail`. On success: `job delivered <id> merged`. Report the
+commit sha and that pushing is up to the user.
 
 ### `push`
 1. Check the remote has `base`: `git ls-remote --exit-code --heads <remote> <base>`.
-   Missing → stage `needs-human` ("base not on remote").
+   Missing → `job fail` ("base not on remote").
 2. `git -C <worktree> push -u <remote> factory/<job-id>`. Never `--force`; rejected →
-   stage `needs-human` with the error.
-3. `git worktree remove <worktree>` (keep the local branch for rework). Stage `pushed`.
-   Report the branch and its sha.
+   `job fail` with the error.
+3. `job delivered <id> pushed` (the local branch is kept for rework). Report the branch
+   and its sha.
 
 ### `pr`
-Steps 1–3 of `push`, then open the PR/MR from the approver's `## PR` section of
-`decision.md` (title on its first line, body below). Write the body to
+Steps 1–2 of `push`, then open the PR/MR from the `## PR` section of the `PR-TEXT:` file
+(title on its first line, body below). Write the body to
 `<Job>/pr-body.md`, append `<issues.link> #<nr>` if the job came from an issue, and end it
 with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
@@ -464,10 +399,10 @@ with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
   --title "<title>" --description "$(cat <Job>/pr-body.md)" --yes` (+ `--draft` if
   `delivery.draft`).
 
-Save the URL as `pr_url`, stage `pr-open`, report the URL. Right after (and again when
+`job delivered <id> pr-open --pr-url <url>`, report the URL. Right after (and again when
 the pipeline starts) run the conflict check of `/factory sync` on it: `base` may have
-moved while the job ran. Creating the PR/MR fails →
-stage `pushed` and report the error (the branch is already up).
+moved while the job ran. Creating the PR/MR fails → `job delivered <id> pushed` and
+report the error (the branch is already up).
 
 **Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false). This
 is the only merge-related action the factory takes, and it is a switch, not a merge: the
@@ -494,9 +429,9 @@ leave the MR open; never work around it. Report whether auto-merge is on in the 
 as the URL.
 
 ### After delivery, and when a job ends in `needs-human`/`superseded`
-Clean up what the agents left: `.factory/heavy clean <worktree>` (cached results), then
-`rm -rf /tmp/factory-<job-id>-*` and `git worktree prune` (temporary worktrees, logs and
-databases that agents made under that prefix). Never touch other prefixes.
+`.factory/job` cleans up what the agents left: cached results (`heavy clean`),
+`/tmp/factory-<job-id>-*` (temporary worktrees, logs and databases) and stale worktree
+entries. Nothing else to do; never remove other `/tmp` prefixes.
 
 ### Always
 - Push only `factory/<job-id>` branches, only to `delivery.remote` (never to another
@@ -514,7 +449,7 @@ This container has a few cores, and a job fans out into a builder plus up to six
 reviewers. Unchecked, parallel jobs ran at load 20–33 on 8 cores: tests timed out,
 reruns and false "flaky" findings cost extra rounds. Three guards:
 
-1. **`MAX_ACTIVE_JOBS`** (above): the orchestrator never has more jobs in flight.
+1. **`limits.active_jobs`** (Constants): `.factory/job` never lets more jobs in flight.
 2. **Load gate:** before every spawn of a spec-writer, builder or review wave run
    `<repo>/.factory/heavy gate` (Bash timeout 600000). It returns when the CPU is at or
    below its limit (90%, sampled over a second), or after 10 minutes with a warning; then
@@ -528,9 +463,9 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
    `heavy wait <ticket>` (repeat while it exits 124). `.factory/heavy status` shows who
    holds capacity and the CPU.
 
-`rework`, `resume` and `sync` move a job back into `build`/`review`: they obey the same
-capacity check and load gate (a sync that finds no room is reported as "postponed" and
-retried on the next `status`/`sync`).
+`rework`, `resume` and `sync` move a job back into `build`/`review`: the script applies
+the same capacity check (a rework without room is queued; a sync without room is
+"postponed" and retried on the next `status`/`sync`), and every spawn has the load gate.
 
 These rules are not left to the agents' good will: every factory agent has a `PreToolUse`
 hook, `.factory/guard`, that refuses a test, build, install or type-check command which is
@@ -549,12 +484,10 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
 - `.factory/repo.md` is yours to correct: when an agent's file shows it is wrong or
   incomplete (a missing setup flag, a check CI runs that repo.md lacks), fix that line
   and report the change in one line. Never edit `config.json` without the user.
-- An agent that returns without its file: respawn it (max `MAX_RESUMES`). This also
-  holds when it returns a verdict only in its reply (seen with ux/ui reviewers): never
-  transcribe it into the file yourself. Respawn with the same prompt plus: `This is a
-  resume: your previous run ended without writing its output file. Writing it is part of
-  your task and required. Reuse your earlier screenshots in round-N/shots/<name>/ instead
-  of redoing the walk-through.` Count the resume in `job.json`.
+- Never edit `job.json` yourself; only `.factory/job` writes it.
+- An agent that returns without its file (also with a verdict only in its reply, seen
+  with ux/ui reviewers): never transcribe it into the file yourself; `job next` respawns
+  it with a resume note, at most `MAX_RESUMES` times.
 - Several jobs may run at the same time (each has its own worktree and ports). Start them
   together only when their files are unlikely to overlap (backend vs frontend, different
   modules); start overlapping ones after the earlier job is delivered, so `/factory sync`
@@ -570,7 +503,7 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   and never run them yourself:** use the factory agents. (The guard hook covers the factory
   agents, and subagents in general where `install` set up the settings hook; do not rely
   on it.)
-- Do not start a job past `MAX_ACTIVE_JOBS`, and do not work around a busy slot or a high
+- Do not start a job past the capacity `job` reports, and do not work around a busy slot or a high
   load by running tests yourself or in another way: waiting is the correct behaviour.
 - Never run two builders in the same worktree.
 - Never edit files in the worktree yourself.

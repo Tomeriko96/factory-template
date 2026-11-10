@@ -39,7 +39,7 @@ and re-run `factory-init` in each repo.
 .claude/skills/factory/      SKILL.md (orchestrator) + setup.md (/factory setup)
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
-.factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
+.factory/                    config.json + repo.md (written by setup), backlog.md, job, shoot, serve,
                              heavy, guard, precheck, rereview, watch, ci, VERSION, jobs/, run/, cache/
 .claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
@@ -148,6 +148,14 @@ afterwards with `git check-ignore` that git really ignores them.
 - **One file per agent.** Each agent writes one markdown file whose first line is the
   verdict. The orchestrator reads only that line, and all state is on disk, so
   `resume` works.
+- **State in code, not in the prompt.** `.factory/job` is the only writer of `job.json`:
+  a reconciler that reads the agents' files and applies the state machine under a lock
+  (job ids, worktrees, rounds and their budget, verdicts, precheck, REWORK, resumes,
+  queue and capacity, delivery bookkeeping, cleanup). `job next <id>` prints the next
+  action, including the exact agent prompts; the orchestrator spawns, chooses reviewers
+  and talks to the forge, and never edits `job.json`. Before this, the orchestrator
+  rewrote `job.json` by hand and kept round budgets and capacity in its head, which left
+  gaps (unbounded REWORK loops, a queued `--docs` job losing its mode, stale decisions).
 - **Reviews stay in the container.** `reviewer-audit` re-measures every claim and
   acceptance criterion (claim → command → measurement table, explicit withdrawals of
   measurement artefacts). ui/ux look at the running app via headless Chromium
@@ -166,6 +174,12 @@ Claude Code are tested. `shoot` and `watch` are tested. The `/factory` loop has 
 about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings back here
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
+
+`job` is tested in a simulated repo with a bare remote and fake agent files: the full
+loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
+under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
+rework after someone pushed to the branch, and sync (resolved and needs-human). The
+orchestrator driving it has not run in a real `/factory` session yet.
 
 `heavy` (slots, cache, gate, signals, exit codes), `guard` (35 allow/deny cases, and a
 real subagent run in a trusted project: `pytest` refused, `echo` allowed, also in bypass

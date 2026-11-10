@@ -39,7 +39,7 @@ def age(iso):
     except Exception:
         return "-"
 
-ACTIVE = ("spec", "build", "review", "approve")
+ACTIVE = ("spec", "build", "review", "approve", "deliver")
 
 def header(jobs):
     """One line: machine load and active jobs against the cap (limits in config.json)."""
@@ -70,7 +70,7 @@ def header(jobs):
     return line + (f" · {queued} queued" if queued else "")
 
 COL = {"queued": "\033[2m", "needs-human": "\033[1;31m", "merged": "\033[32m", "pr-open": "\033[32m", "pushed": "\033[32m", "review": "\033[33m",
-       "build": "\033[36m", "approve": "\033[35m", "spec": "\033[34m"}
+       "build": "\033[36m", "approve": "\033[35m", "deliver": "\033[35m", "spec": "\033[34m", "superseded": "\033[2m"}
 
 def paint(text, stage):
     if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):

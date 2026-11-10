@@ -363,7 +363,8 @@ def git(*args):
 def tree_key(command):
     """Cache key for `command` on the current tree, or None when not cacheable."""
     tree = git("rev-parse", "HEAD^{tree}")
-    if not tree or git("status", "--porcelain") != "":
+    # --untracked-files=all: a user setting status.showUntrackedFiles=no must not hide a new file
+    if not tree or git("status", "--porcelain", "--untracked-files=all") != "":
         return None, None
     h = hashlib.sha256(json.dumps([tree, os.getcwd(), command]).encode()).hexdigest()[:24]
     return h, tree
@@ -391,6 +392,14 @@ def cmd_run(argv):
     if not argv:
         sys.exit(__doc__.split("\n\n")[0])
     command = argv
+    if os.environ.get("FACTORY_HEAVY") == "1":
+        # Nested call (a validation script that itself uses heavy): the outer call already holds
+        # a slot for the whole process tree. Waiting for a second one could deadlock, so just run.
+        if not shutil.which(command[0]):
+            say(f"cannot run {command[0]}: command not found")
+            return 127
+        rc = subprocess.call(command)
+        return 128 - rc if rc < 0 else rc
     shown = label or " ".join(command)
     ticket = os.environ.get("HEAVY_TICKET")
     wait_max = wait_max if wait_max is not None else (BACKGROUND_WAIT if ticket else FOREGROUND_WAIT)
@@ -423,6 +432,8 @@ def cmd_run(argv):
         update_ticket(ticket, state="running", started=time.time())
 
     env = dict(os.environ, FACTORY_HEAVY="1", FACTORY_CPUS=str(min(weight, lim["budget"])))
+    # The ticket belongs to this wrapper only: a heavy call inside the command must not mark it done
+    env.pop("HEAVY_TICKET", None)
     prefix = ["ionice", "-c2", "-n7"] if shutil.which("ionice") else []
     started = time.time()
     log = None

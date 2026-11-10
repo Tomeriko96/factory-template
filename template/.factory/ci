@@ -191,14 +191,26 @@ def fetch_github_others(limit=5):
 
 # ---------- GitLab ----------
 
-def gitlab_project_path():
-    r = subprocess.run(["git", "remote", "get-url", "origin"],
-                       capture_output=True, text=True, cwd=os.path.dirname(HERE))
-    url = (r.stdout or "").strip()
-    m = re.search(r"[:/]([^:/]+\/.+?)(\.git)?$", url)
-    if not m:
+def remote_project_path(url):
+    """group/sub/project from a remote URL: https://host/g/p.git, ssh://git@host:2222/g/p.git,
+    git@host:g/p.git. None if it does not look like one."""
+    url = (url or "").strip()
+    if "://" in url:
+        path = urllib.parse.urlparse(url).path
+    elif re.match(r"^[^/]+@[^/:]+:", url) or re.match(r"^[^/:]+:[^/]", url):
+        path = url.split(":", 1)[1]  # scp-like syntax
+    else:
         return None
-    return m.group(1)
+    path = path.strip("/")
+    path = path[:-4] if path.endswith(".git") else path
+    return path if "/" in path else None
+
+
+def gitlab_project_path():
+    remote = (load_config().get("delivery") or {}).get("remote") or "origin"
+    r = subprocess.run(["git", "remote", "get-url", remote],
+                       capture_output=True, text=True, cwd=os.path.dirname(HERE))
+    return remote_project_path(r.stdout)
 
 
 def gitlab_project_id():

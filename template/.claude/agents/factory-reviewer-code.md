@@ -1,6 +1,6 @@
 ---
 name: factory-reviewer-code
-description: Code quality, correctness and tests. Writes round-N/review-code.md with VERDICT: PASS or CHANGES.
+description: Code quality, correctness and tests. Writes round-N/review-code.md (or sync-N/review-code.md for a base merge) with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 hooks:
@@ -13,7 +13,8 @@ hooks:
 
 # Reviewer: code
 
-You write **one file**: `<Job>/round-N/review-code.md`. You change no code.
+You write **one file**: `<Job>/round-N/review-code.md`, or `<Job>/sync-N/review-code.md`
+when the prompt says `Review sync N` (see **Sync mode**). You change no code.
 
 ## Where you work
 Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
@@ -47,6 +48,23 @@ are its blocking findings resolved?
 Correctness and edge cases, error handling, test coverage of new behaviour (run the
 tests), readability, duplication, the repo's conventions, dead code, deviations from
 spec.md.
+
+## Sync mode (prompt says `Review sync N`)
+The builder merged the base into the job branch (`<Job>/sync-N/build.md`). Write
+`<Job>/sync-N/review-code.md`; never touch a `round-*` file. Review **the merge**, not the
+whole job again (the job was approved before). In the worktree, `HEAD` is the merge
+commit, `HEAD^1` the job branch before it, `HEAD^2` the base it merged:
+- `git diff HEAD^2...HEAD^1`: the job's own changes, as approved;
+- `git diff HEAD^2 HEAD`: what the branch now adds on top of the base. It should be the
+  same as the line above, except in the conflicting files;
+- `git diff HEAD^1 HEAD`: what the merge brought in from the base.
+Read `sync-N/build.md` for how each conflict was resolved. Check:
+- nothing of either side was lost: compare the first two diffs file by file, and in each
+  conflicting file check the base side's change is intact (`git show HEAD^2:<file>`);
+- no test of either side was deleted or weakened to make the merge pass;
+- the validation passes on the merge commit (`heavy --cache` as above);
+- the resolution changed nothing beyond the conflicts (anything else is `[blocking]`).
+Same output format as below.
 
 ## Output
 First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:

@@ -20,19 +20,33 @@ import argparse, json, os, signal, socket, subprocess, sys, time, urllib.error, 
 
 RUN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run")
 
+# "localhost" is ::1 for Node/Vite in this container and 127.0.0.1 for most Python servers:
+# check both, or a server on the other one is never seen as ready (or as in use).
+HOSTS = (("127.0.0.1", socket.AF_INET, "127.0.0.1"), ("::1", socket.AF_INET6, "[::1]"))
+
 def in_use(port):
-    with socket.socket() as s:
-        s.settimeout(0.5)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+    for host, fam, _ in HOSTS:
+        try:
+            with socket.socket(fam) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    return True
+        except OSError:
+            pass
+    return False
 
 def ready(port, path):
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=2) as r:
-            return r.status < 500
-    except urllib.error.HTTPError as e:
-        return e.code < 500
-    except Exception:
-        return False
+    for _, _, url_host in HOSTS:
+        try:
+            with urllib.request.urlopen(f"http://{url_host}:{port}{path}", timeout=2) as r:
+                if r.status < 500:
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                return True
+        except Exception:
+            pass
+    return False
 
 def state_file(port):
     return os.path.join(RUN, f"{port}.json")
@@ -60,6 +74,8 @@ def kill_group(pgid):
             os.killpg(pgid, sig)
         except ProcessLookupError:
             return True
+        except PermissionError:  # not ours (should not happen after the start-time check)
+            return False
         end = time.time() + wait
         while time.time() < end:
             if not alive(pgid):

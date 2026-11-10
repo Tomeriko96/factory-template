@@ -12,7 +12,9 @@ Per path × width (× colour scheme): <dir>/<slug>-<width>[-dark].png (full page
 <dir>/shoot.json holds per shot: status, title, console errors, page errors, failed
 requests, horizontal overflow and a11y counts (img without alt, form fields without a
 label, buttons/links without a name).
-Refuses more than --max-shots (default 12) shots per call.
+Refuses more than --max-shots (default 12, never more than 24) shots per call. A page that
+never goes network-idle (long polling, websockets) is shot after "load" instead of failing;
+full-page shots stop at 8000 px height (shoot.json says when a page was cut).
 Exit code 1 if a page does not load (no response or status >= 400).
 No browser yet: `uv run --no-project --python 3 --with playwright==1.63.0 playwright install chromium`.
 `--python 3` keeps uv from following the repo's .python-version pin.
@@ -37,6 +39,9 @@ CHECKS = """() => {
   };
 }"""
 
+MAX_HEIGHT = 8000
+HARD_MAX_SHOTS = 24
+
 def slug(path):
     return re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-") or "root"
 
@@ -48,16 +53,26 @@ def shoot(page, url, out, name, wait):
     page.on("requestfailed", lambda r: rec["failed_requests"].append(f"{r.method} {r.url} {r.failure}"))
     page.on("response", lambda r: r.status >= 400 and rec["failed_requests"].append(f"{r.status} {r.url}"))
     try:
-        resp = page.goto(url, wait_until="networkidle", timeout=30000)
+        resp = page.goto(url, wait_until="load", timeout=30000)
     except Exception as e:  # timeout or no connection
         rec["error"] = str(e).splitlines()[0]
         return rec
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:  # long polling / websockets never go idle: shoot what loaded
+        rec["not_network_idle"] = True
     page.wait_for_timeout(wait)
     rec["status"] = resp.status if resp else None
     rec["title"] = page.title()
     rec.update(page.evaluate(CHECKS))
     rec["shot"] = os.path.join(out, name + ".png")
-    page.screenshot(path=rec["shot"], full_page=True)
+    height = page.evaluate("() => document.documentElement.scrollHeight")
+    if height > MAX_HEIGHT:
+        rec["cut_at_px"] = MAX_HEIGHT
+        page.screenshot(path=rec["shot"], full_page=True,
+                        clip={"x": 0, "y": 0, "width": page.viewport_size["width"], "height": MAX_HEIGHT})
+    else:
+        page.screenshot(path=rec["shot"], full_page=True)
     return rec
 
 def main():
@@ -74,8 +89,8 @@ def main():
     widths = [int(w) for w in a.widths.split(",")]
     schemes = ["light", "dark"] if a.scheme == "both" else [a.scheme]
     n = len(a.path or ["/"]) * len(widths) * len(schemes)
-    if n > a.max_shots:
-        sys.exit(f"shoot: {n} shots requested, limit is {a.max_shots} (--max-shots). Photograph only the "
+    if n > min(a.max_shots, HARD_MAX_SHOTS):
+        sys.exit(f"shoot: {n} shots requested, limit is {min(a.max_shots, HARD_MAX_SHOTS)} (--max-shots, at most {HARD_MAX_SHOTS}). Photograph only the "
                  f"pages the diff changes: fewer paths, widths or colour schemes.")
     results = []
     with sync_playwright() as p:

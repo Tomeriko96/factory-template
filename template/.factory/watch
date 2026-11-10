@@ -11,7 +11,7 @@ Unknown keys in job.json are ignored; missing fields show '-'.
 CI state comes from .factory/cache/ci-<job-id>.json (written by .factory/ci);
 watch refreshes stale entries (TTL 30s) in the background of each loop.
 """
-import json, os, subprocess, sys, time
+import json, os, shlex, subprocess, sys, time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
@@ -27,9 +27,23 @@ def load(jobs_dir):
                 j = json.load(f)
         except (OSError, ValueError):
             continue
-        j.setdefault("id", name)
-        jobs.append(j)
+        if isinstance(j, dict):
+            j.setdefault("id", name)
+            jobs.append(tidy(j))
     return jobs
+
+def tidy(j):
+    """Coerce the fields the board reads, so an odd job.json cannot crash it."""
+    if not isinstance(j.get("reviews"), dict):
+        j["reviews"] = {}
+    j["reviews"] = {str(k): (v if isinstance(v, str) or v is None else "?") for k, v in j["reviews"].items()}
+    j["history"] = [h for h in j.get("history") or [] if isinstance(h, dict)] if isinstance(j.get("history"), list) else []
+    if not isinstance(j.get("pr_state"), dict):
+        j["pr_state"] = {}
+    for k in ("stage", "mode", "updated"):
+        if j.get(k) is not None and not isinstance(j[k], str):
+            j[k] = str(j[k])
+    return j
 
 def age(iso):
     try:
@@ -62,7 +76,7 @@ def header(jobs):
     prs = [j for j in jobs if j.get("stage") == "pr-open"]
     line = f"load {load:.1f} on {os.cpu_count()} cores · active jobs {act}/{cap}"
     if prs:
-        since = [h["at"] for j in prs for h in (j.get("history") or []) if h.get("stage") == "pr-open"][-len(prs):]
+        since = [h["at"] for j in prs for h in j["history"] if h.get("stage") == "pr-open" and isinstance(h.get("at"), str)][-len(prs):]
         failing = sum(1 for j in prs if (j.get("pr_state") or {}).get("pipeline") == "failed")
         line += (f" · PRs open {len(prs)}" + (f"/{pr_cap}" if pr_cap else "") +
                  (f", oldest {age(min(since))}" if since else "") +
@@ -159,16 +173,24 @@ def ci_detail_lines(job_id):
     return lines
 
 
-def maybe_refresh_ci(no_ci):
-    """Refresh stale CI caches; never blocks the board for long."""
+_refresh = None
+
+def maybe_refresh_ci(no_ci, wait=False):
+    """Refresh stale CI caches. In the live loop it runs in the background (one at a time), so
+    a slow forge never stalls the board; --once and the detail view wait for it."""
+    global _refresh
     if no_ci:
         return
     ci = os.path.join(HERE, "ci")
     if not os.path.exists(ci):
         return
+    if _refresh is not None and _refresh.poll() is None:
+        return
     try:
-        subprocess.run([ci, "--quiet"], timeout=60,
-                       capture_output=True, cwd=os.path.dirname(HERE))
+        _refresh = subprocess.Popen([ci, "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    cwd=os.path.dirname(HERE))
+        if wait:
+            _refresh.wait(timeout=60)
     except Exception:
         pass
 
@@ -178,6 +200,7 @@ def render(jobs, no_ci=False):
     sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
     lines = [header(jobs), f"{'JOB':<32} {'MODE':<5} {'STAGE':<12} {'RND':>3} {'PORT':>5}  {'REVIEWS':<38} UPDATED"]
     for j in jobs:
+      try:
         revs = j.get("reviews") or {}
         r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"
         lines.append(paint(f"{str(j['id'])[:32]:<32} {str(j.get('mode', '-')):<5} "
@@ -189,6 +212,8 @@ def render(jobs, no_ci=False):
             sub = ci_one_line(j["id"])
             if sub:
                 lines.append(sub)
+      except Exception as e:  # never let one odd job.json take the board down
+        lines.append(f"{str(j.get('id'))[:32]:<32} (unreadable job.json: {type(e).__name__})")
     others = others_line() if not no_ci else None
     if others:
         lines += ["", others]
@@ -218,16 +243,16 @@ def main():
     if "--tmux" in sys.argv:
         if not os.environ.get("TMUX"):
             sys.exit("not inside tmux; just run .factory/watch")
-        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", os.path.dirname(HERE),
-                        os.path.abspath(__file__)])
+        cmd = shlex.join([os.path.abspath(__file__)] + (["--no-ci"] if no_ci else []))
+        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", os.path.dirname(HERE), cmd])
         return
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if args:
-        maybe_refresh_ci(no_ci)
+        maybe_refresh_ci(no_ci, wait=True)
         print(detail(jobs_dir, args[0]))
         return
     if "--once" in sys.argv:
-        maybe_refresh_ci(no_ci)
+        maybe_refresh_ci(no_ci, wait=True)
         print(render(load(jobs_dir), no_ci))
         return
     try:

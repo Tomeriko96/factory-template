@@ -16,7 +16,7 @@ hooks:
 You write **one file**: `<Job>/spec.md`. You change no code.
 
 ## Where you work
-Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Read code in
+Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch, Tmp). Read code in
 the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
 ## Heavy commands

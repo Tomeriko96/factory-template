@@ -64,6 +64,7 @@ park()   { J fail "$1" "parked by test" >/dev/null; }
 scenario=full
 out="$(J new "zq full loop")"; A=001-zq-full-loop
 has "$out" "JOB: $A"; first "$(sed -n 2p <<<"$out")" "ACTION: spawn 1 agent"; has "$out" "AGENT: factory-spec-writer"
+has "$out" "Tmp: /tmp/factory-app-$A"            # repo name in the prefix: job ids repeat across repos
 exists "$(wt $A)"
 echo SPEC > "$(jd $A)/spec.md"
 out="$(J next $A)"; has "$out" "AGENT: factory-builder"; has "$out" "Build round 1. Port: 5110. Mode: full."
@@ -89,9 +90,11 @@ for r in security code audit; do review $A 3 $r PASS; done
 J next $A >/dev/null
 printf 'DECISION: MERGE\n\n## PR\nGreeting\n' > "$(jd $A)/decision.md"
 out="$(J next $A)"; first "$out" "ACTION: deliver"; has "$out" "MODE: local"; has "$out" "decision.md (its ## PR section)"
+mkdir -p "/tmp/factory-app-$A-base"; mkdir -p "/tmp/factory-other-$A-base"   # an agent's temp worktree; another repo's
 git merge -q --no-ff "factory/$A" -m "factory: $A"
 first "$(J delivered $A merged)" "DONE: merged"
-missing "$(wt $A)"
+missing "$(wt $A)"; missing "/tmp/factory-app-$A-base"; exists "/tmp/factory-other-$A-base"
+rmdir "/tmp/factory-other-$A-base"
 [ -z "$(git branch --list "factory/$A")" ] && ok || bad "branch factory/$A not deleted"
 field $A "j['delivery']['mode']" local
 field $A "[h['stage'] for h in j['history']]" "['queued', 'spec', 'build', 'review', 'build', 'review', 'approve', 'build', 'review', 'approve', 'deliver', 'merged']"
@@ -111,9 +114,22 @@ review $B 3 code FAIL; review $B 3 security PASS   # anything but VERDICT: PASS 
 out="$(J next $B)"; first "$out" "DONE: needs-human: round 3 is the last of the budget"
 field $B "j['reviews']['code']" INVALID
 
+# ---------- rereview: a reviewer that passed in round 1 and sat out round 2 keeps its PASS ----------
+scenario=rereview
+J new "zq rereview" >/dev/null; RR=003-zq-rereview
+echo SPEC > "$(jd $RR)/spec.md"; J next $RR >/dev/null; build $RR 1; J next $RR >/dev/null
+J reviewers $RR code,ux >/dev/null
+printf 'VERDICT: CHANGES\n\n1. [blocking] app.py:1 wrong\n' > "$(jd $RR)/round-1/review-code.md"; review $RR 1 ux PASS
+J next $RR >/dev/null; build $RR 2; J next $RR >/dev/null
+out="$(J reviewers $RR code,ux)"; has "$out" "reviewers round 2: code ("; lacks "$out" "factory-reviewer-ux"
+printf 'VERDICT: CHANGES\n\n1. [blocking] app.py:2 still wrong\n' > "$(jd $RR)/round-2/review-code.md"
+J next $RR >/dev/null; build $RR 3; J next $RR >/dev/null
+out="$(J reviewers $RR code,ux)"; has "$out" "reviewers round 3: code ("; lacks "$out" "factory-reviewer-ux"
+park $RR
+
 # ---------- REWORK at the last round, ESCALATE, bad decision ----------
 scenario=decision
-J new "zq escalate" >/dev/null; E=003-zq-escalate
+J new "zq escalate" >/dev/null; E=004-zq-escalate
 echo SPEC > "$(jd $E)/spec.md"; J next $E >/dev/null; build $E 1; J next $E >/dev/null
 J reviewers $E code >/dev/null; review $E 1 code PASS
 out="$(J next $E)"; has "$out" "MODEL: sonnet"     # round 1, precheck CLEAN: sonnet approver
@@ -125,27 +141,27 @@ first "$(J fail $E 'test')" "DONE: needs-human: test"
 # ---------- spawn limit, queue, a queued docs job keeps its mode ----------
 scenario=queue
 J new "zq q one" >/dev/null; J new "zq q two" >/dev/null       # 004, 005: both slots taken
-out="$(J new --mode docs "zq q docs")"; D=006-zq-q-docs
+out="$(J new --mode docs "zq q docs")"; D=007-zq-q-docs
 first "$(sed -n 2p <<<"$out")" "WAIT: queued: 2/2 jobs active"
-J next 004-zq-q-one >/dev/null; J next 004-zq-q-one >/dev/null   # spec-writer never writes
-out="$(J next 004-zq-q-one)"; first "$out" "DONE: needs-human: spec: agent ended 3 times"
+J next 005-zq-q-one >/dev/null; J next 005-zq-q-one >/dev/null   # spec-writer never writes
+out="$(J next 005-zq-q-one)"; first "$out" "DONE: needs-human: spec: agent ended 3 times"
 has "$out" "STARTED: $D"
 field $D "j['stage'], j['mode']" "build docs"
 out="$(J list)"; has "$out" "capacity: 2/2 active"
 
 # ---------- superseded ----------
 scenario=superseded
-echo 'SPEC: ALREADY-DONE in abc123' > "$(jd 005-zq-q-two)/spec.md"
-first "$(J next 005-zq-q-two)" "DONE: superseded"
-missing "$(wt 005-zq-q-two)"
+echo 'SPEC: ALREADY-DONE in abc123' > "$(jd 006-zq-q-two)/spec.md"
+first "$(J next 006-zq-q-two)" "DONE: superseded"
+missing "$(wt 006-zq-q-two)"
 
 # ---------- docs: CLEAN, then NOT-DOCS falls back to light with a spec first ----------
 scenario=docs
 out="$(J next $D)"; has "$out" "MODEL: sonnet"; has "$out" "Feature: zq q docs"
 build $D 1 README.md
 out="$(J next $D)"; first "$out" "ACTION: deliver"; has "$out" "precheck CLEAN"; has "$out" "round-1/build.md"
-park 004-zq-q-one
-J new --mode docs "zq not docs" >/dev/null; N=007-zq-not-docs
+park 005-zq-q-one
+J new --mode docs "zq not docs" >/dev/null; N=008-zq-not-docs
 build $N 1 app.py
 out="$(J next $N)"; has "$out" "AGENT: factory-spec-writer"; has "$out" "NOT-DOCS"
 field $N "j['mode'], j['stage']" "light spec"
@@ -194,12 +210,22 @@ EOF
 field 090-zq-legacy "j['round_budget']" 5          # a reworked job keeps at least one more round
 field 091-zq-legacy-pr "j['delivery']['mode']" pr
 
+# ---------- a blocked builder stops the job instead of starting reviews ----------
+scenario=blocked
+J new "zq blocked" >/dev/null; BL=092-zq-blocked
+echo SPEC > "$(jd $BL)/spec.md"; J next $BL >/dev/null
+mkdir -p "$(jd $BL)/round-1"; printf 'BUILD: BLOCKED needs the staging API key\n\nSummary\n' > "$(jd $BL)/round-1/build.md"
+out="$(J next $BL)"; first "$out" "DONE: needs-human: builder blocked in round 1: needs the staging API key"
+lacks "$out" "choose-reviewers"
+
+park $BL
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"
 first "$(J new --mode weird x)" "ERROR: usage"
 first "$(J set 090-zq-legacy stage '"merged"')" "ERROR: usage"
-out="$(J new "zq; rm -rf / \$(id)")"; has "$out" "JOB: 092-zq-rm-rf-id"
+out="$(J new "zq; rm -rf / \$(id)")"; has "$out" "JOB: 093-zq-rm-rf-id"
 for i in 1 2 3 4 5 6; do J new "zq par $i" > "$T/par$i.out" & done; wait
 ids="$(head -qn1 "$T"/par*.out | awk '{print $2}' | sort)"
 [ "$(sort -u <<<"$ids" | wc -l)" = 6 ] && ok || bad "parallel new gave duplicate ids: $ids"

@@ -270,11 +270,11 @@ def remote_ff(job, out):
 
 
 def cleanup(job, out, remove_worktree=False, delete_branch=False):
-    """What agents leave behind: cached results, /tmp/factory-<id>-*, stale worktrees."""
+    """What agents leave behind: cached results, <Tmp>-* (see tmp_prefix), stale worktrees."""
     wt = job["worktree"]
     if os.path.isdir(wt):
         run([os.path.join(HERE, "heavy"), "clean", wt])
-    for p in glob.glob(f"/tmp/factory-{job['id']}-*"):  # id matches ID_RE: no wildcards in it
+    for p in glob.glob(glob.escape(tmp_prefix(job)) + "-*"):
         shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
     if remove_worktree and os.path.isdir(wt):
         r = run(["git", "worktree", "remove", wt])
@@ -288,9 +288,16 @@ def cleanup(job, out, remove_worktree=False, delete_branch=False):
 
 # ---------- prompts ----------
 
+def tmp_prefix(job):
+    """Prefix for the agents' temporary worktrees, logs and databases. The repo name is in it
+    because job ids are only unique per repo."""
+    repo = re.sub(r"[^a-z0-9]+", "-", os.path.basename(REPO).lower()).strip("-") or "repo"
+    return f"/tmp/factory-{repo}-{job['id']}"
+
+
 def paths(job):
     return (f"Repo: {REPO}\nWorktree: {job['worktree']}\nJob: {jdir(job['id'])}\n"
-            f"Base: {job['base']}\nBranch: {job['branch']}\n")
+            f"Base: {job['base']}\nBranch: {job['branch']}\nTmp: {tmp_prefix(job)}\n")
 
 
 def feature_line(job):
@@ -431,6 +438,10 @@ def step(job, out, start=None):
             job.pop("pending", None)
             job["round"] = n
             job.setdefault("round_heads", {})[str(n)] = git("rev-parse", "HEAD", cwd=job["worktree"])
+            fl = first_line(os.path.join(jd, f"round-{n}", "build.md")) or ""
+            if fl.startswith("BUILD: BLOCKED"):  # no line at all (older builders) counts as done
+                set_stage(job, "needs-human", f"builder blocked in round {n}: {fl[14:].strip(' :-') or 'see build.md'}")
+                continue
             job["reviews"] = {}
             if job.get("mode") != "docs":
                 set_stage(job, "review")

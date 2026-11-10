@@ -16,7 +16,7 @@ hooks:
 You write **one file**: `<Job>/round-N/review-methodology.md`. You change no code.
 
 ## Where you work
-Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
+Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch, Tmp). Run
 everything in the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
 ## Heavy commands

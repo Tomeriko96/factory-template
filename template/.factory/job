@@ -17,7 +17,8 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL]... [--untrusted]
           [--delivery local|push|pr]   (this job only; default config.delivery.mode)
           (--issue may be repeated: one job for a bundle of small related issues)
-  job triage prepare <raw-issues.json>   filter the forge's open issues, then spawn factory-triage
+  job triage prepare <raw-issues.json> [--no-agent]   filter the forge's open issues, then spawn factory-triage
+  job triage bundle <docs|light|full> <nr>...   one job for issues you chose yourself (after prepare)
   job triage plan                     validate the triage plan, print the groups (jobs to start)
   job triage start <k>                start group k of the plan as a job
   job next <id>                       apply what is due, print the next action
@@ -32,7 +33,7 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job fail <id> "<reason>"            -> needs-human
   job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
-  job set <id> pr_url|pr_state|issue_closed <json or text>
+  job set <id> pr_url|pr_state|issue_closed|issues <json or text>   (issues: a JSON list, for a bundle made by hand)
   job list | show <id> | capacity
 """
 import fcntl, glob, json, os, re, shutil, subprocess, sys, time, unicodedata
@@ -915,15 +916,20 @@ def cmd_drop(args):
 
 
 def cmd_set(args):
-    if len(args) < 3 or args[1] not in ("pr_url", "pr_state", "issue_closed"):
-        raise Fail("usage: job set <id> pr_url|pr_state|issue_closed <json or text>")
+    if len(args) < 3 or args[1] not in ("pr_url", "pr_state", "issue_closed", "issues"):
+        raise Fail("usage: job set <id> pr_url|pr_state|issue_closed|issues <json or text>")
     try:
         value = json.loads(args[2])
     except ValueError:
         value = args[2]
+    if args[1] == "issues" and not (isinstance(value, list) and value
+                                    and all(isinstance(n, int) and not isinstance(n, bool) for n in value)):
+        raise Fail("issues must be a JSON list of issue numbers, e.g. [998, 999]")
 
     def fn(job, out):
         job[args[1]] = value
+        if args[1] == "issues":   # .issue stays the first one, as `job new` writes it
+            job["issue"] = value[0]
         out.main.append(f"DONE: {job.get('stage')} ({args[1]} set)")
     return with_job(args[0], fn)
 
@@ -1026,6 +1032,10 @@ def tri_read(name):
 
 
 def triage_prepare(args):
+    no_agent = "--no-agent" in args
+    args = [a for a in args if a != "--no-agent"]
+    if not args:
+        raise Fail("usage: job triage prepare <raw-issues.json> [--no-agent]")
     cfg = config().get("issues")
     if not cfg:
         raise Fail("issue mode is off (config.issues is null)")
@@ -1095,6 +1105,10 @@ def triage_prepare(args):
         out.notes.append(f"NOTE: {more} more candidate(s) wait for the next run (at most {MAX_CANDIDATES} at once)")
     if not cands:
         out.main.append("DONE: no issues to start" + (" (see SKIPPED)" if skipped else ""))
+        return out
+    if no_agent:
+        out.main.append(f"OK: {len(cands)} candidate issue{'s' if len(cands) != 1 else ''}: "
+                        + ", ".join(f"#{c['nr']}" for c in cands))
         return out
     plan = os.path.join(TRIAGE, "plan.json")
     out.main += [f"ACTION: spawn 1 agent  ({len(cands)} candidate issue{'s' if len(cands) != 1 else ''})",
@@ -1232,10 +1246,40 @@ def triage_start(args):
     return out
 
 
+def triage_bundle(args):
+    """`bundle <docs|light|full> <nr>...`: a bundle you chose yourself, from the issues `prepare` kept."""
+    if len(args) < 2 or args[0] not in MODE_RANK:
+        raise Fail("usage: job triage bundle <docs|light|full> <nr> [<nr>...]")
+    try:
+        nrs = [int(x) for x in args[1:]]
+    except ValueError:
+        raise Fail("usage: job triage bundle <docs|light|full> <nr> [<nr>...]")
+    if len(set(nrs)) != len(nrs):
+        raise Fail("an issue is named twice")
+    data = tri_read("issues.json")
+    cands = {c["nr"]: c for c in data.get("candidates") or []}
+    gone = [n for n in nrs if n not in cands]
+    if gone:
+        raise Fail("not startable (author, label, an existing job, PR or commit; see SKIPPED from "
+                   "`triage prepare`): " + ", ".join(f"#{n}" for n in gone))
+    mode = max([args[0]] + [issue_override(cands[n]) or args[0] for n in nrs], key=MODE_RANK.get)
+    size = int(data.get("full_bundle_max") or FULL_BUNDLE_MAX) if mode == "full" else int(data.get("bundle_max") or BUNDLE_MAX)
+    if len(nrs) > size:
+        raise Fail(f"a {mode} job takes at most {size} issues (limits.bundle_max); split it")
+    solo = [n for n in nrs if SOLO_LABEL in [l.lower() for l in cands[n]["labels"]]]
+    if solo and len(nrs) > 1:
+        raise Fail(", ".join(f"#{n}" for n in solo) + f" has {SOLO_LABEL}: it is never bundled")
+    out = create_job(group_feature({"issues": nrs}, cands), mode, nrs, [cands[n].get("url") for n in nrs], untrusted=True)
+    if mode != args[0]:
+        out.notes.append(f"NOTE: effort {mode}, not {args[0]}: a label on one of the issues asks for it")
+    return out
+
+
 def cmd_triage(args):
-    subs = {"prepare": (triage_prepare, 1), "plan": (triage_plan, 0), "start": (triage_start, 1)}
+    subs = {"prepare": (triage_prepare, 1), "plan": (triage_plan, 0), "start": (triage_start, 1),
+            "bundle": (triage_bundle, 2)}
     if not args or args[0] not in subs:
-        raise Fail("usage: job triage prepare <raw-issues.json> | plan | start <k>")
+        raise Fail("usage: job triage prepare <raw-issues.json> [--no-agent] | plan | start <k> | bundle <mode> <nr>...")
     fn, need = subs[args[0]]
     if len(args) - 1 < need:
         raise Fail(f"triage {args[0]}: missing arguments")

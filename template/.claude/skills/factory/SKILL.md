@@ -233,7 +233,16 @@ A job from a bundle carries all its issue numbers (`"issues": [..]`, `"issue"` i
 Without `config.issues`, take the first unchecked item (`- [ ]`) in `.factory/backlog.md`,
 check it (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
-### `/factory issue <nr> [--force]`
+### `/factory issue <nr> [<nr>…] [--docs|--light] [--force]`
+Several numbers = **one job for all of them** (a bundle you chose yourself): `mkdir -p
+.factory/run/triage`, fetch the open issues as for `next`, `.factory/job triage prepare
+.factory/run/triage/raw.json --no-agent` (the filter, no triage agent), then `.factory/job triage bundle
+<docs|light|full> <nr> <nr>…` (`--docs`/`--light` pick the effort, else `full`; the script applies the
+size limits and the label overrides) and drive the job. Never start a bundle with `job new "<text>"` and
+a single `--issue`: then only the first issue is recorded and closed. A bundle that was made that way
+anyway is repaired with `.factory/job set <id> issues '[<nr>, <nr>, …]'`.
+
+One number:
 See **Issues**. `--force` skips the already-done check. Then `/factory <feature>` with
 `feature` = the issue text and `--issue <nr> --issue-url <url>` (the script marks the job
 untrusted, so every prompt carries the untrusted label). The mode is the issue's label

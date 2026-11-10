@@ -22,7 +22,8 @@ the judgement sits in pinned agents):
 /factory --light <feature>      small change: code review (+ security/privacy if touched)
 /factory --docs <feature>       documentation only: one carry-out step, no reviewers
 /factory … --local <feature>    this job merges locally whatever delivery.mode says
-/factory issue <nr>             from one issue (trusted authors only); label factory:docs|light|full sets the effort
+/factory issue <nr> [<nr>…]    from one issue (trusted authors only); several = one bundle job;
+                                label factory:docs|light|full sets the effort
 /factory next [--yes]           triage ALL open, non-blocked issues of trusted authors: bundles small related
                                 ones into one job, picks docs/light/full per job, shows the plan, then starts
                                 (without config.issues: the first item of .factory/backlog.md)

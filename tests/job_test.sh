@@ -435,6 +435,36 @@ PY
 first "$(J drop "$DP")" "ERROR: $DP has an open PR/MR"; park "$DP"
 first "$(J drop 000-nope)" "ERROR: no job"
 
+# ---------- hand-made bundle and repairing one ----------
+scenario=bundle
+python3 - <<'PY'
+import json
+c = json.load(open(".factory/config.json"))
+c["issues"] = {"allowed_authors": ["me"], "link": "Closes"}
+json.dump(c, open(".factory/config.json", "w"))
+def gh(n, title, labels=()):
+    return {"number": n, "title": title, "body": title + " body", "author": {"login": "me"},
+            "labels": [{"name": l} for l in labels], "url": f"https://example.test/{n}", "comments": []}
+json.dump([gh(41, "Controle one"), gh(42, "Controle two"), gh(43, "Controle three", ["factory:solo"]),
+           gh(44, "Controle four", ["factory:full"]), gh(45, "Controle five"), gh(46, "Controle six"),
+           gh(47, "Controle seven")], open(".factory/run/triage/bu.json", "w"))
+PY
+out="$(J triage prepare .factory/run/triage/bu.json --no-agent)"; first "$out" "OK: 7 candidate issues: #41, #42"; lacks "$out" "AGENT"
+first "$(J triage bundle light 41 99)" "ERROR: not startable"; first "$(J triage bundle light 41 43)" "ERROR: #43 has factory:solo"
+first "$(J triage bundle huge 41)" "ERROR: usage"; first "$(J triage bundle light 41 41)" "ERROR: an issue is named twice"
+first "$(J triage bundle light 41 42 45 46 47)" "ERROR: a light job takes at most 4"
+first "$(J triage bundle light 41 42 44)" "ERROR: a full job takes at most 2"   # #44's label lifts the whole bundle to full
+out="$(J triage bundle light 41 44)"; first "$out" "JOB: "; has "$out" "mode full  issues #41, #44"; has "$out" "effort full, not light"
+BH="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+field "$BH" "j['issues'], j['issue'], j['mode']" "[41, 44] 41 full"; park "$BH"
+# a bundle made the old way (one --issue, the rest only in the text) is repaired with `set issues`
+BO="$(newjob --issue 51 --issue-url u "zq old bundle of #51 and #52")"
+field "$BO" "'issues' in j" False
+first "$(J set "$BO" issues '[51, 52]')" "DONE: "; field "$BO" "j['issues'], j['issue']" "[51, 52] 51"
+first "$(J set "$BO" issues '"x"')" "ERROR: issues must be a JSON list"; first "$(J set "$BO" issues '[]')" "ERROR: issues must be"
+park "$BO"
+cp "$T/config.bak" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

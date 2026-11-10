@@ -180,10 +180,11 @@ about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings b
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
 
-`job` is tested in a simulated repo with a bare remote and fake agent files: the full
+`job` is tested by `bash tests/job_test.sh` (86 checks; a throwaway repo with a bare remote, the agents played by writing their files): the full
 loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
 under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
-rework after someone pushed to the branch, and sync (resolved and needs-human). The
+rework after someone pushed to the branch, sync (resolved and needs-human), job.json files from
+before `job`, input checks. The
 orchestrator driving it has not run in a real `/factory` session yet.
 
 `heavy` (slots, cache, gate, signals, exit codes), `guard` (166 allow/deny cases in `tests/guard_cases.txt`, run with `python3 -I tests/guard_test.py`, and a

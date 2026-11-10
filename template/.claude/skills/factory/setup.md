@@ -206,8 +206,9 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
   `--no-project --python 3`, so it neither syncs the repo's project nor follows its
   `.python-version` pin.
 - **Smoke test** (default; skip only if the user declines): `git switch -c
-  factory-smoketest`, run `/factory --light <trivial change, e.g. a README typo>`, check
-  that spec → build → review → decision complete. Then clean up: `git switch -`,
+  factory-smoketest`, run `/factory --light --local <trivial change, e.g. a README typo>`
+  (`--local`: delivered by a local merge into the smoke-test branch, never pushed, whatever
+  `delivery.mode` says), check that spec → build → review → decision → delivery complete. Then clean up: `git switch -`,
   `git worktree remove --force` the job worktree, `git branch -D factory-smoketest
   factory/<job-id>`, delete `.factory/jobs/<job-id>`. Not run = not verified: say so
   explicitly.

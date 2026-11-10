@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|deliver <id>", "/factory status" and "/factory setup".
+description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory status" and "/factory setup".
 effort: medium
 ---
 
@@ -263,6 +263,13 @@ the next approved round pushes to the same branch, so an open PR/MR updates itse
 `.factory/job next <id>` and drive it. The script knows what is missing: an agent file
 that was never written is spawned again (counted as a resume), a queued job starts when
 there is room, a job at rest says so.
+
+### `/factory drop <id> ["<reason>"]`
+Clears a job nobody wants any more (a leftover `needs-human`, a duplicate, work that landed another
+way): `.factory/job drop <id> "<reason>"` → `superseded`, its worktree and unpushed branch are removed.
+Only for `needs-human` or `queued` jobs; refused when the job has an open PR/MR (close that on the forge
+first). Its issue is free for `/factory next` again. A needs-human job that was never built (round 0)
+has nothing to approve: `status` and the board offer `drop` (or `resume`) for it, not `approve`.
 
 ### `/factory sync [<id>]`
 Keeps open PRs/MRs mergeable. For `<id>`, or for every job at stage `pr-open`: ask the

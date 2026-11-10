@@ -53,6 +53,7 @@ try:
         job("007-superseded", "superseded", updated=at(60 * 24 * 30)),
         job("008-syncing", "pr-open", pr_url="https://gitlab.example/g/p/-/merge_requests/9",
             syncing={"n": 1}, pending={"key": "sync-1", "spawns": 1, "at": at(4)}),
+        job("009-never-built", "needs-human", round=0, reason="Dropped by user: replaced by a bundle"),
     ]
     for j in jobs:
         os.makedirs(os.path.join(fd, "jobs", j["id"], "round-1"))
@@ -91,6 +92,8 @@ try:
     check(titles == ["NEEDS YOU", "RUNNING", "QUEUED", "OPEN PRs", "UNKNOWN STAGE"], f"section order {titles}")
     check("builder blocked in round 1: needs the staging API key" in out, "needs-human reason not shown in full")
     check("→ /factory approve 001-blocked" in out, "next command for needs-human missing")
+    check("→ /factory drop 009-never-built" in out and "approve 009" not in out,
+          "a needs-human job that was never built (round 0) should offer drop, not approve")
     check("blocked-builder-with" in out and "…" in out, "long job name not cut with an ellipsis")
     check("reviews 2/3 ✓✗ · waiting audit (resume 1)" in out, "review progress missing")
     check("approver (opus)" in out, "opus approver after ISSUES not shown")
@@ -150,7 +153,7 @@ try:
     out = watch("--once", "--repos")
     check("factory · 2 repos" in out and "other-repo/001 elsewhere" in out and "my-repo/001 blocked" in out,
           "--repos does not show both repos with their names")
-    check(out.index("NEEDS YOU (2)") < out.index("RUNNING"), "--repos does not merge sections across repos")
+    check(out.index("NEEDS YOU (3)") < out.index("RUNNING"), "--repos does not merge sections across repos")
 
     # The interactive board: every key, wide and narrow, through a pseudo-terminal
     import pty, fcntl, termios, struct, select

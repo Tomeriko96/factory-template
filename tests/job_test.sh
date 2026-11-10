@@ -416,6 +416,25 @@ cp "$T/config.bak" .factory/config.json
 first "$(J triage prepare .factory/run/triage/gl.json)" "ERROR: issue mode is off"
 first "$(J triage bogus)" "ERROR: usage"
 
+# ---------- drop: clearing a needs-human or queued job ----------
+scenario=drop
+out="$(J new "zq drop me")"; DR="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+first "$(J drop "$DR" x)" "ERROR: $DR is at spec: only a needs-human or queued job"
+J fail "$DR" "builder gave up" >/dev/null
+out="$(J next "$DR")"; has "$out" "/factory resume $DR to try again, or /factory drop $DR to clear it"
+exists "$(wt "$DR")"
+out="$(J drop "$DR" "replaced by a bundle")"; first "$out" "DONE: superseded: dropped: replaced by a bundle"
+field "$DR" "j['stage']" superseded; missing "$(wt "$DR")"
+git rev-parse --verify -q "refs/heads/factory/$DR" >/dev/null && bad "branch factory/$DR should be gone" || ok
+first "$(J drop "$DR")" "ERROR: $DR is at superseded"
+DP="$(newjob "zq drop pr")"; J fail "$DP" "park" >/dev/null
+python3 - "$DP" <<'PY'
+import json, sys
+p = f".factory/jobs/{sys.argv[1]}/job.json"; j = json.load(open(p)); j["pr_url"] = "https://example.test/pr/1"; json.dump(j, open(p, "w"))
+PY
+first "$(J drop "$DP")" "ERROR: $DP has an open PR/MR"; park "$DP"
+first "$(J drop 000-nope)" "ERROR: no job"
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

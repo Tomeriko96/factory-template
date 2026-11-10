@@ -30,6 +30,8 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job sync <id>                       start (or continue) a base merge of a pr-open job
   job sync-done <id>                  the synced branch is pushed
   job fail <id> "<reason>"            -> needs-human
+  job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
+                                      -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
   job set <id> pr_url|pr_state|issue_closed <json or text>
   job list | show <id> | capacity
 """
@@ -455,7 +457,9 @@ def step(job, out, start=None):
                 cleanup(job, out, remove_worktree=(s == "superseded"))
             hint = {"needs-human": (f"/factory rework {job['id']} \"<note>\" (its PR/MR stays open), or fix it by hand"
                                     if job.get("pr_url") else
-                                    f"/factory approve {job['id']} or /factory rework {job['id']} \"<note>\""),
+                                    f"/factory approve {job['id']} or /factory rework {job['id']} \"<note>\""
+                                    if int(job.get("round") or 0) else
+                                    f"/factory resume {job['id']} to try again, or /factory drop {job['id']} to clear it"),
                     "pr-open": "nothing until the forge merges it; /factory sync keeps it mergeable",
                     "pushed": f"/factory deliver {job['id']} pr opens a PR/MR"}.get(s)
             if hint:
@@ -890,6 +894,26 @@ def cmd_fail(args):
     return with_job(args[0], fn)
 
 
+def cmd_drop(args):
+    reason = " ".join(args[1:]).strip()[:300]
+
+    def fn(job, out):
+        if job.get("stage") not in ("needs-human", "queued"):
+            raise Fail(f"{job['id']} is at {job.get('stage')}: only a needs-human or queued job can be dropped "
+                       "(a running one: `job fail` it first)")
+        if job.get("pr_url"):
+            raise Fail(f"{job['id']} has an open PR/MR ({job['pr_url']}): close it on the forge first")
+        start = job.get("stage")
+        job.pop("syncing", None)
+        set_stage(job, "superseded", "dropped" + (f": {reason}" if reason else ""))
+        step(job, out, start)   # removes the worktree, see cleanup
+        pushed = (job.get("delivery") or {}).get("mode") in ("push", "pr")
+        if not pushed and git("rev-parse", "--verify", "-q", f"refs/heads/{job['branch']}"):
+            if git("branch", "-d", job["branch"]) is None:
+                out.notes.append(f"NOTE: branch {job['branch']} kept (git branch -d refused: it has commits that are not merged)")
+    return with_job(args[0], fn)
+
+
 def cmd_set(args):
     if len(args) < 3 or args[1] not in ("pr_url", "pr_state", "issue_closed"):
         raise Fail("usage: job set <id> pr_url|pr_state|issue_closed <json or text>")
@@ -1226,7 +1250,7 @@ def main():
     cmds = {"new": (cmd_new, 1), "next": (cmd_next, 1), "reviewers": (cmd_reviewers, 2),
             "delivered": (cmd_delivered, 2), "pr-merged": (cmd_pr_merged, 1), "approve": (cmd_approve, 1),
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
-            "fail": (cmd_fail, 2), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
+            "fail": (cmd_fail, 2), "drop": (cmd_drop, 1), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
             "triage": (cmd_triage, 1)}
     try:
         if argv[0] == "show":

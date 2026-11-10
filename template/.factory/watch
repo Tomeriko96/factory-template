@@ -425,7 +425,10 @@ def next_command(j):
     """What the user would type next for this job, or None."""
     jid, sec = j["id"], section_of(j)
     if sec == "needs":
-        return f'/factory rework {jid} "<note>"' if j.get("pr_url") else f"/factory approve {jid}"
+        if j.get("pr_url"):
+            return f'/factory rework {jid} "<note>"'
+        # never built (round 0): there is nothing to approve, only to resume or drop
+        return f"/factory approve {jid}" if int(j.get("round") or 0) else f"/factory drop {jid}"
     if sec == "running" or sec == "queued":
         return f"/factory resume {jid}"
     if sec == "prs":

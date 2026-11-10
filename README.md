@@ -26,7 +26,7 @@ the judgement sits in pinned agents):
 /factory next [--yes]           triage ALL open, non-blocked issues of trusted authors: bundles small related
                                 ones into one job, picks docs/light/full per job, shows the plan, then starts
                                 (without config.issues: the first item of .factory/backlog.md)
-/factory approve|rework|resume|deliver <id>
+/factory approve|rework|resume|drop|deliver <id>
 /factory status                 or live: .factory/watch [--tmux]   (factory-watch: all repos)
 ```
 

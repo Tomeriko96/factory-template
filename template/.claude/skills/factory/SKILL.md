@@ -169,7 +169,9 @@ Every subagent prompt starts with the paths block (Repo, Worktree, Job, Base, Br
    branch with the number in its name (`git branch -r --list "*<nr>*"`), or a commit on
    `<remote>/<base>` that references it (`git log <remote>/<base> --oneline --grep
    "#<nr>"`). Found → do not start: report what exists (`next` then takes the next issue).
-2. `.factory/job new "<feature>" [--mode light|docs] [--issue <nr> --issue-url <url>]`.
+2. `.factory/job new "<feature>" [--mode light|docs] [--issue <nr> --issue-url <url>]`
+   (`/factory … --local` adds `--delivery local`: this job merges locally whatever
+   `config.delivery.mode` says, e.g. for the setup smoke test).
    It takes the checked-out branch as `base` (detached HEAD → `ERROR`), creates the job,
    and either queues it (`WAIT`) or creates the worktree (fast-forwarding `base` from the
    remote when the checkout is clean) and prints the first action. Then drive it (see

@@ -15,6 +15,7 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
 (a queued job that just got a slot: run `job next` for it too).
 
   job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL] [--untrusted]
+          [--delivery local|push|pr]   (this job only; default config.delivery.mode)
   job next <id>                       apply what is due, print the next action
   job reviewers <id> <a,b,c>          record round N's reviewer candidates (round > 1:
                                       narrowed by .factory/rereview), then as `next`
@@ -516,7 +517,7 @@ def step(job, out, start=None):
             continue
 
         if s == "deliver":
-            mode = (config().get("delivery") or {}).get("mode") or "local"
+            mode = job.get("delivery_mode") or (config().get("delivery") or {}).get("mode") or "local"
             text = job.get("pr_text")
             out.main += ["ACTION: deliver", f"MODE: {mode}",
                          "PR-TEXT: " + (os.path.join(jd, text) + " (its ## PR section)" if text else
@@ -572,7 +573,7 @@ def slugify(text):
 
 
 def cmd_new(args):
-    mode, issue, issue_url, untrusted, feature = "full", None, None, False, []
+    mode, issue, issue_url, untrusted, delivery, feature = "full", None, None, False, None, []
     while args:
         a = args.pop(0)
         if a == "--mode":
@@ -583,11 +584,14 @@ def cmd_new(args):
             issue_url = args.pop(0)
         elif a == "--untrusted":
             untrusted = True
+        elif a == "--delivery":
+            delivery = args.pop(0) if args else ""
         else:
             feature.append(a)
     feature = " ".join(feature).strip()
-    if mode not in ("full", "light", "docs") or not feature:
-        raise Fail('usage: job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL]')
+    if mode not in ("full", "light", "docs") or not feature or delivery not in (None, "local", "push", "pr"):
+        raise Fail('usage: job new "<feature>" [--mode full|light|docs] [--issue N --issue-url URL] '
+                   '[--delivery local|push|pr]')
     base = git("branch", "--show-current")
     if not base:
         raise Fail("the main checkout has a detached HEAD: check out the base branch first")
@@ -608,6 +612,8 @@ def cmd_new(args):
             job.update(issue=issue, issue_url=issue_url, untrusted=True)
         if untrusted:
             job["untrusted"] = True
+        if delivery:
+            job["delivery_mode"] = delivery
         os.makedirs(jdir(jid))
         save(job)
         promote(out)

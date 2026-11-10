@@ -220,12 +220,22 @@ lacks "$out" "choose-reviewers"
 
 park $BL
 
+# ---------- per-job delivery override (setup smoke test) ----------
+scenario=delivery
+sed -i 's/"mode": "local"/"mode": "pr"/' .factory/config.json
+J new --mode docs --delivery local "zq smoke" >/dev/null; SM=093-zq-smoke
+build $SM 1 README.md
+out="$(J next $SM)"; first "$out" "ACTION: deliver"; has "$out" "MODE: local"
+first "$(J new --delivery ftp x)" "ERROR: usage"
+sed -i 's/"mode": "pr"/"mode": "local"/' .factory/config.json
+park $SM
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"
 first "$(J new --mode weird x)" "ERROR: usage"
 first "$(J set 090-zq-legacy stage '"merged"')" "ERROR: usage"
-out="$(J new "zq; rm -rf / \$(id)")"; has "$out" "JOB: 093-zq-rm-rf-id"
+out="$(J new "zq; rm -rf / \$(id)")"; has "$out" "JOB: 094-zq-rm-rf-id"
 for i in 1 2 3 4 5 6; do J new "zq par $i" > "$T/par$i.out" & done; wait
 ids="$(head -qn1 "$T"/par*.out | awk '{print $2}' | sort)"
 [ "$(sort -u <<<"$ids" | wc -l)" = 6 ] && ok || bad "parallel new gave duplicate ids: $ids"

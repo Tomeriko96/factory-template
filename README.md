@@ -20,6 +20,7 @@ Then, in a Claude Code session in that repo (sonnet is enough for the orchestrat
 /factory <feature>              full loop
 /factory --light <feature>      small change: code review (+ security/privacy if touched)
 /factory --docs <feature>       documentation only: one carry-out step, no reviewers
+/factory … --local <feature>    this job merges locally whatever delivery.mode says
 /factory issue <nr> | next      from an issue (trusted authors only) or .factory/backlog.md
 /factory approve|rework|resume|deliver <id>
 /factory status                 or live: .factory/watch [--tmux]
@@ -63,7 +64,7 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 | `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start when one leaves those stages. |
 | `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it. Each command has a weight (the cores it may use: 3 for Node, browser and build tools, 1 for pytest and the like); the weights running at once on the whole machine (all repos, all sessions) stay within 75% of the cores, and the CPU must not be busier than 90%, measured over a second, not from the lagging load average. It runs at low priority and sets `FACTORY_CPUS` to the weight. `heavy status` shows who holds capacity. |
 | `heavy --background` / `heavy wait` | For commands that may outlast a tool call (a queue, a long suite): `--background` returns a ticket at once, `heavy wait <ticket>` blocks up to 9 minutes and prints the result and exit code (124 = call again). Foreground calls give up after 9 minutes with exit 75 and say so, so a queue can no longer eat an agent's tool call. |
-| `heavy --cache -- <cmd>` | Validation runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree) and the reviewers, audit and approver get an instant `CACHE HIT`. Failures, dirty trees and new commits run for real. |
+| `heavy --cache -- <cmd>` | Validation runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree, same behaviour-changing env vars such as `CI`/`*_ENV`/`MODE` and `.env*` files; extend with `limits.cache_env`) and the reviewers, audit and approver get an instant `CACHE HIT`. Failures, dirty trees and new commits run for real. |
 | `.factory/guard` | A `PreToolUse` hook in every factory agent: a test, build, install, lint, type-check or browser command that is not run through `heavy` is refused with the fix in the message, so the limits do not depend on the agent remembering. It looks through `&&`/`;`/pipes, `$(…)`, loops, `bash -c`/`-lc`, wrappers (`env`, `timeout`, `xargs`, …) and runners (`uv run`, `npx`, `pnpm exec`, `python -m`, …), and knows npm-family script names (`test:*`, `typecheck`, `e2e`), `make -C`/`-j`, Python, Node, JVM, .NET, Go, Rust and R (`Rscript -e 'devtools::test()'`, `R CMD check`); `--version`/`--help` always pass. Needs a trusted workspace (Claude Code runs project-agent hooks only after the trust dialog, in bypass mode too); `limits.guard: false` turns it off. `install` also adds a `--subagents-only` variant to `.claude/settings.local.json`, so ad-hoc `general-purpose` subagents are covered while your own session stays unrestricted. |
 | `limits.open_prs` (default 5) | Jobs at `pr-open` before new ones wait: every merge makes the other open PRs conflict, and CI is the slow part (median 3-14 h from PR to merge). `watch` and `status` show open PRs, the oldest and failing pipelines; the factory never retries a pipeline. `watch` shows one live CI/CD line per `pr-open` job (stages/jobs via `.factory/ci`, GitHub Actions + GitLab CI); `watch <id>` shows the full table, `--no-ci` hides it. |
 | `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the CPU is above 90% before it spawns a spec-writer, builder or review wave. |
@@ -180,7 +181,10 @@ about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings b
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
 
-`job` is tested by `bash tests/job_test.sh` (86 checks; a throwaway repo with a bare remote, the agents played by writing their files): the full
+Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I tests/prompts_test.py`
+(prompt copies and the contracts between prompts and scripts stay in step).
+
+`job` is tested by `bash tests/job_test.sh` (98 checks; a throwaway repo with a bare remote, the agents played by writing their files): the full
 loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
 under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
 rework after someone pushed to the branch, sync (resolved and needs-human), job.json files from

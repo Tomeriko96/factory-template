@@ -329,7 +329,8 @@ All of these must hold, otherwise do nothing (and say why in one line):
 
 1. The job came from an issue (`"issue": <nr>`), has `pr_url`, and its `job.json`
    `delivery.mode` is `pr` (how this job was delivered; a local merge or a bare push has
-   not reached the forge's base branch).
+   not reached the forge's base branch). A job without a `delivery` field (made before
+   `.factory/job`) counts when it has a `pr_url`.
 2. The forge says the PR/MR is merged, into the job's `base`: `gitlab`:
    `glab api "projects/:id/merge_requests/<iid>"` → `state` is `merged`; `github`:
    `gh pr view <nr> --json state,baseRefName` → `MERGED`. Closed without merge never counts.

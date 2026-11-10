@@ -120,11 +120,27 @@ def load(jid):
         raise Fail(f"not a job id: {jid!r}")
     try:
         with open(os.path.join(jdir(jid), "job.json")) as f:
-            return json.load(f)
+            return migrate(json.load(f), jid)
     except OSError:
         raise Fail(f"no job {jid}")
     except ValueError as e:
         raise Fail(f"{jid}/job.json is not valid JSON ({e}); fix or remove it by hand")
+
+
+def migrate(job, jid):
+    """Fill in what the state machine relies on for a job.json written before .factory/job."""
+    if not isinstance(job, dict):
+        raise Fail(f"{jid}/job.json is not a JSON object; fix or remove it by hand")
+    job.setdefault("id", jid)
+    if "round_budget" not in job:
+        # The old prompt reset the budget on rework without recording it: keep its promise
+        # that at least one more round fits, so a reworked job does not stop at once.
+        n = int(job.get("round") or 0)
+        reworked = os.path.exists(os.path.join(jdir(jid), "rework.md"))
+        job["round_budget"] = max(MAX_ROUNDS, n + 1) if reworked else MAX_ROUNDS
+    if "delivery" not in job and job.get("pr_url"):
+        job["delivery"] = {"mode": "pr", "at": None}
+    return job
 
 
 def save(job):

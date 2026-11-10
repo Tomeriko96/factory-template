@@ -12,20 +12,33 @@ config.json, default below); if that is the only problem the first line is
 `PRECHECK: NOT-DOCS` so the orchestrator can fall back to the light review.
 
 Checks (each failing one is listed under Issues):
-  - spec.md and round-N/build.md exist
+  - round-N/build.md exists, and spec.md too (not in docs mode: there the feature text is the spec)
   - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
   - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue)
   - the diff touches nothing under .factory/ or .claude/
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
+  - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
   - the diff is not huge (> 40 files or > 1500 changed lines) and has no binary or > 1 MB file
+Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ is still seen.
 Also reported: files, lines, commits, [blocking] mentions per review (information only).
 """
 import fnmatch, json, os, re, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
-SECRET = re.compile(r"(^|/)(\.env(\..*)?|id_(rsa|ed25519|ecdsa)|.*\.(pem|key|p12|pfx|jks|kdbx)|"
-                    r"credentials(\.json)?|.*secret.*\.(ya?ml|json)|\.netrc|\.pgpass)$", re.I)
-DOCS_GLOBS = ["*.md", "*.mdx", "*.rst", "*.adoc", "*.txt", "docs/**", "LICENSE*", "mkdocs.yml"]
+SECRET = re.compile(r"(^|/)(\.env(?!\.(example|sample|template|dist)$)(\..*)?|id_(rsa|ed25519|ecdsa)|"
+                    r".*\.(pem|key|p12|pfx|jks|kdbx)|credentials(\.json)?|.*secrets?.*\.(ya?ml|json|toml)|"
+                    r"service[-_]?account.*\.json|\.git-credentials|\.netrc|\.pgpass)$", re.I)
+SECRET_CONTENT = [
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("GitHub token", re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})")),
+    ("GitLab token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
+    ("AWS access key", re.compile(r"\b(AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("Anthropic/OpenAI key", re.compile(r"\bsk-(ant-)?[A-Za-z0-9_-]{32,}")),
+    ("Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+]
+# No "*.txt": requirements.txt and other config would pass as documentation
+DOCS_GLOBS = ["*.md", "*.mdx", "*.rst", "*.adoc", "docs/**", "LICENSE*", "mkdocs.yml"]
 MAX_FILES, MAX_LINES, MAX_BYTES = 40, 1500, 1_000_000
 
 
@@ -70,7 +83,8 @@ def main():
     except (OSError, ValueError):
         globs = DOCS_GLOBS
 
-    for p in (os.path.join(job_dir, "spec.md"), os.path.join(rdir, "build.md")):
+    required = [os.path.join(rdir, "build.md")] + ([] if docs_mode else [os.path.join(job_dir, "spec.md")])
+    for p in required:
         if not os.path.exists(p):
             issues.append(f"missing {os.path.relpath(p, job_dir)}")
 
@@ -109,11 +123,11 @@ def main():
     files = lines = 0
     commits = "?"
     if wt and base and branch and os.path.isdir(wt):
-        numstat = git("diff", "--numstat", f"{base}...{branch}", cwd=wt)
+        numstat = git("diff", "--numstat", "--no-renames", "-z", f"{base}...{branch}", cwd=wt)
         if numstat is None:
             issues.append(f"cannot diff {base}...{branch} in {wt}")
         else:
-            for row in numstat.splitlines():
+            for row in filter(None, numstat.split("\0")):
                 a, d, name = row.split("\t", 2)
                 files += 1
                 if a == "-":
@@ -131,6 +145,21 @@ def main():
                     issues.append(f"file over 1 MB in diff: {name}")
             if files > MAX_FILES or lines > MAX_LINES:
                 issues.append(f"large diff: {files} files, {lines} changed lines")
+            found = set()
+            patch = git("diff", "--no-renames", "--no-color", "--no-ext-diff", "-U0",
+                        f"{base}...{branch}", cwd=wt) or ""
+            name = None
+            for line in patch.splitlines():
+                if line.startswith("+++ "):
+                    # "+++ b/x", or quoted ("+++ \"b/x\"") for unusual names; /dev/null = deleted
+                    raw = line[4:].strip('"')
+                    name = None if raw == "/dev/null" else raw[2:] if raw.startswith("b/") else raw
+                elif name and line.startswith("+"):
+                    for kind, rx in SECRET_CONTENT:
+                        if rx.search(line):
+                            found.add((name, kind))
+            for name, kind in sorted(found):
+                issues.append(f"secret-looking content in diff ({kind}): {name}")
         commits = (git("rev-list", "--count", f"{base}..{branch}", cwd=wt) or "?").strip()
     else:
         issues.append("worktree, base or branch missing in job.json / on disk")

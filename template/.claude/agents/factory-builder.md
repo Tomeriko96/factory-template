@@ -41,7 +41,9 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 1. `<Repo>/.factory/repo.md` (setup, validation, dev server, conventions) and
    `AGENTS.md`/`CLAUDE.md` in the worktree (if present).
 2. `<Job>/spec.md`.
-3. Round > 1: every `<Job>/round-(N-1)/review-*.md`, plus `<Job>/rework.md` if it exists.
+3. Round > 1: every `<Job>/round-(N-1)/review-*.md`, plus `<Job>/rework.md` if it exists,
+   plus `<Job>/round-(N-1)/decision.md` if its first line is `DECISION: REWORK` (the
+   approver's list of what must change; treat each item as a `[blocking]` finding).
    Fix **every** `[blocking]` finding. You may leave a `[non-blocking]` one with a
    one-line reason in build.md.
 

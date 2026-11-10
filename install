@@ -119,7 +119,7 @@ rm -rf "$repo/.claude/skills/factory"
 cp -R "$SRC/.claude/skills/factory" "$repo/.claude/skills/factory"
 rm -f "$repo"/.claude/agents/factory-*.md
 cp "$SRC"/.claude/agents/factory-*.md "$repo/.claude/agents/"
-for f in shoot serve watch heavy guard precheck rereview; do
+for f in shoot serve watch heavy guard precheck rereview ci; do
   cp "$SRC/.factory/$f" "$repo/.factory/$f"
   chmod +x "$repo/.factory/$f"
 done

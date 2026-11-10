@@ -40,7 +40,7 @@ and re-run `factory-init` in each repo.
 .claude/agents/factory-*.md  spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
                              privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, shoot, serve,
-                             heavy, guard, precheck, rereview, watch, VERSION, jobs/, run/, cache/
+                             heavy, guard, precheck, rereview, watch, ci, VERSION, jobs/, run/, cache/
 .claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
 

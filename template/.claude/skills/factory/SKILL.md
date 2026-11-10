@@ -107,7 +107,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
     precheck.md                          (.factory/precheck, before the approver)
-    decision.md                          (approver, final round)
+    decision.md                          (approver, final round; moved to round-N/ on REWORK/rework)
     sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
     rework.md                            (only after /factory rework)
 <repo>/../<repo>-worktrees/<job-id>/     (git worktree, branch factory/<job-id>)
@@ -223,7 +223,9 @@ Branch: factory/<job-id>
    - ≥1 `CHANGES` and N = `MAX_ROUNDS` → stage `needs-human`, report which reviews block.
 6. The **approver** writes `decision.md`, first line `DECISION: MERGE|REWORK|ESCALATE`:
    - `MERGE` → deliver (see Delivery) → stage `merged`, `pushed` or `pr-open`.
-   - `REWORK` → build round N+1 (counts towards `MAX_ROUNDS`).
+   - `REWORK` → move `decision.md` to `round-N/decision.md` (the builder reads its list
+     there, and no stale decision is left at the job root), then build round N+1 (counts
+     towards `MAX_ROUNDS`).
    - `ESCALATE` → stage `needs-human`; show the reason from `decision.md`.
 
 ### `/factory --light <feature>`
@@ -248,8 +250,10 @@ summary, checks run), as the approver would. Then run `.factory/precheck <job-id
 - `CLEAN` → deliver (see Delivery) with the PR section of `build.md`. Docs jobs skip
   the audit and the approver, because nothing executable changed.
 - `NOT-DOCS` (the diff touches files outside the docs paths) → the change is not
-  docs: set `"mode": "light"` and continue with the light review (code reviewer, approver).
-- `ISSUES` (secret-looking file, large diff, no `## PR` section) → `needs-human`.
+  docs: set `"mode": "light"`, spawn `factory-spec-writer` on the same feature text (the
+  reviewers and approver need `spec.md`; keep the untrusted mark), then continue with the
+  light review (code reviewer, approver) of round 1 as it stands.
+- `ISSUES` (secret-looking file or content, large diff, no `## PR` section) → `needs-human`.
 
 ### `/factory next`
 If `config.issues` is set: take the lowest-numbered open issue with label
@@ -281,7 +285,8 @@ note). Worktree gone (after `push`/`pr`)? `git worktree add <worktree> factory/<
 Pushed before? `git -C <worktree> fetch <remote> factory/<id>` and fast-forward if the
 remote is ahead (someone pushed to the PR); diverged → stage `needs-human`. After the new
 rounds are approved, delivery pushes to the same branch, so an open PR/MR updates
-itself. Write `<note>` to `rework.md`, reset the round budget so at least
+itself. Move an existing `decision.md` to `round-N/decision.md` (so a resume can never
+deliver on the old MERGE). Write `<note>` to `rework.md`, reset the round budget so at least
 one more round fits (`MAX_ROUNDS` counts afresh per rework), spawn the builder with
 `<paths> Build round N+1. Port: <port>. Mode: <mode>. Also read rework.md.`
 
@@ -472,12 +477,17 @@ creation often fails because the pipeline does not exist yet, and some CLIs fail
 
 - `gitlab`: wait until `glab api "projects/:id/merge_requests/<iid>/pipelines"` lists at
   least one pipeline, then
-  `glab api -X PUT "projects/:id/merge_requests/<iid>/merge" -f auto_merge=true
-  -f should_remove_source_branch=true`. Verify with
+  `glab api -X PUT "projects/:id/merge_requests/<iid>/merge" -f auto_merge=true`.
+  Verify with
   `glab api "projects/:id/merge_requests/<iid>"` → `merge_when_pipeline_succeeds` is true.
-- `github`: `gh pr merge <nr> --auto --delete-branch` (the merge method follows the repo's
+- `github`: `gh pr merge <nr> --auto` (the merge method follows the repo's
   setting; add `--squash`/`--merge`/`--rebase` only if the repo allows just one). Verify
   with `gh pr view <nr> --json autoMergeRequest` → not null.
+
+Never ask the forge to delete the branch on merge (`--delete-branch`,
+`should_remove_source_branch`): the factory never deletes remote branches, and `rework`
+needs `factory/<id>` after a merge. The repo's own "delete branch after merge" setting
+is the owner's choice.
 
 Not set after a retry, or the MR sits on a conflict or a missing approval → report it and
 leave the MR open; never work around it. Report whether auto-merge is on in the same line

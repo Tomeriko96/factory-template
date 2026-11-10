@@ -17,12 +17,12 @@ You write **one file**: `<Job>/round-N/review-code.md`, or `<Job>/sync-N/review-
 when the prompt says `Review sync N` (see **Sync mode**). You change no code.
 
 ## Where you work
-Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
+Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch, Tmp). Run
 everything in the worktree (`cd <Worktree> && …`); write only to the Job folder.
 The worktree is shared with the other reviewers, who are reading and measuring in it at
 the same time: never edit, revert or stash files there, not even temporarily. To check
 that a test fails without the fix, or to compare with `<Base>`, use your own temporary
-worktree (`git -C <Repo> worktree add --detach /tmp/factory-<job-id>-<name> <ref>`) and
+worktree (`git -C <Repo> worktree add --detach <Tmp>-<name> <ref>`) and
 remove it when done.
 
 ## Heavy commands

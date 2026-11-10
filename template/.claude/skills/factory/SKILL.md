@@ -157,7 +157,7 @@ On `ACTION: choose-reviewers` (round N, mode as printed):
 
 ## Paths block
 
-Every subagent prompt starts with the paths block (Repo, Worktree, Job, Base, Branch);
+Every subagent prompt starts with the paths block (Repo, Worktree, Job, Base, Branch, Tmp);
 `.factory/job` writes it into the prompts it prints.
 
 ## Commands
@@ -431,7 +431,7 @@ as the URL.
 
 ### After delivery, and when a job ends in `needs-human`/`superseded`
 `.factory/job` cleans up what the agents left: cached results (`heavy clean`),
-`/tmp/factory-<job-id>-*` (temporary worktrees, logs and databases) and stale worktree
+`<Tmp>-*` (`/tmp/factory-<repo>-<job-id>`: temporary worktrees, logs and databases) and stale worktree
 entries. Nothing else to do; never remove other `/tmp` prefixes.
 
 ### Always

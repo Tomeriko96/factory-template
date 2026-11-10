@@ -10,7 +10,8 @@ passed the previous round, on a change that only fixes someone else's findings, 
   SET: <names, comma separated>
   WHY: <one line>
 
-Rule: a reviewer runs again if it gave CHANGES in the previous round; `audit` and `code`
+Rule: a reviewer runs again if its latest verdict (from any earlier round) is not exactly
+`VERDICT: PASS`; `audit` and `code`
 always run again (cheap safety net and the claims check); everyone else only when the
 builder changed something besides fixing the findings, i.e. the files changed since the
 previous round (job.json round_heads) include a non-test, non-docs file that no finding
@@ -33,13 +34,16 @@ def main():
     job = json.load(open(os.path.join(job_dir, "job.json")))
     prev = os.path.join(job_dir, f"round-{rnd - 1}")
     verdict, pointed = {}, set()
-    if os.path.isdir(prev):
-        for f in os.listdir(prev):
+    # Latest verdict per reviewer over all earlier rounds: a reviewer that passed in round 1 and
+    # was left out of round 2 still has that PASS. Only an exact `VERDICT: PASS` is a pass.
+    for r in range(1, rnd):
+        d = os.path.join(job_dir, f"round-{r}")
+        for f in sorted(os.listdir(d)) if os.path.isdir(d) else []:
             if f.startswith("review-") and f.endswith(".md"):
                 name = f[7:-3]
-                text = open(os.path.join(prev, f), errors="replace").read()
-                verdict[name] = "CHANGES" if text.split("\n", 1)[0].find("CHANGES") >= 0 else "PASS"
-                if verdict[name] == "CHANGES":
+                text = open(os.path.join(d, f), errors="replace").read()
+                verdict[name] = "PASS" if text.split("\n", 1)[0].strip() == "VERDICT: PASS" else "CHANGES"
+                if verdict[name] == "CHANGES" and d == prev:
                     pointed.update(PATH.findall(text))
     always = {"audit", "code"}
     must = {r for r in cand if verdict.get(r, "CHANGES") == "CHANGES" or r in always}

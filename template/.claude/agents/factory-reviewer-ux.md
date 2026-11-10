@@ -19,7 +19,7 @@ the file is. Always write it, also when the diff has no UI change (then `VERDICT
 plus one line saying why). On a resume, reuse the screenshots from your earlier run.
 
 ## Where you work
-Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run
+Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch, Tmp). Run
 everything in the worktree (`cd <Worktree> && …`); write only to the Job folder. Start servers only on
 your `Port:` and stop them when done.
 

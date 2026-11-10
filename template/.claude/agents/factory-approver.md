@@ -16,7 +16,7 @@ hooks:
 You write **one file**: `<Job>/decision.md`. You change no code.
 
 ## Where you work
-Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch). Run git and
+Your prompt starts with a paths block (Repo, Worktree, Job, Base, Branch, Tmp). Run git and
 tests in the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
 ## Heavy commands

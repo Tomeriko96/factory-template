@@ -45,7 +45,7 @@ POLL = 0.5
 FOREGROUND_WAIT = 540
 BACKGROUND_WAIT = 3600
 MULTI = re.compile(r"vitest|jest|playwright|chromium|\bnpm\b|\bnpx\b|pnpm|yarn|\bnode\b|vite|webpack|\btsc\b|"
-                   r"shoot|pre-push|\bmake\b|\bjust\b|cargo|\bgo\b|gradle|mvn")
+                   r"shoot|pre-push|\bmake\b|\bjust\b|cargo|\bgo\b|gradle|mvn|dotnet|\bsbt\b|docker|podman")
 
 
 def limits():

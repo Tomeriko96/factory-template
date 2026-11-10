@@ -1,0 +1,177 @@
+# R = must be refused, A = must be allowed. One case per line: "R|A <command>".
+# --- old behaviour that must stay
+R pytest
+R pytest -x tests/test_a.py
+R npm test
+R npm ci
+R npm install
+R npm run build
+R npm run lint
+R pnpm install
+R yarn
+R yarn install
+R uv sync
+R pip install -r requirements.txt
+R make test
+R npx tsc --noEmit
+R npx playwright test
+R bash -c 'cd web && npm test'
+R cd web && npm test
+R docker build .
+R cargo test
+R go test ./...
+R mkdocs build
+R .factory/shoot http://localhost:5110
+R tsc --noEmit
+R mypy src
+R uv run pytest
+R poetry run pytest
+A .factory/heavy -- npm test
+A /abs/repo/.factory/heavy --cache -- bash -c 'npm ci && npm test'
+A /abs/repo/.factory/heavy --background -- pytest
+A git status
+A git commit -m "fix tests and build"
+A grep -rn pytest .
+A echo npm test
+A cat package.json
+A ls tests/
+A rg "make test" docs
+A npm run dev
+A npm view react version
+A npm ls
+A uv run python scripts/x.py
+A python app.py
+A python -c "print(1)"
+A which pytest
+A .factory/serve start 5110 -- npm run dev
+A .factory/job next 001-x
+A git diff --stat main...factory/001-x
+# --- wrappers (were let through)
+R env CI=1 npm test
+R nice -n 10 npm test
+R time npm test
+R timeout 600 pytest
+R timeout --signal=KILL 10m npm run build
+R nohup npm test
+R stdbuf -oL pytest
+R xvfb-run -a npx playwright test
+R CI=1 npm test
+# --- npm family variants
+R npm run test:unit
+R npm run typecheck
+R npm run e2e
+R npm run test:e2e -- --headed
+R npm --prefix web test
+R npm -w web test
+R npm --workspace=web run build
+R npm exec vitest
+R pnpm -C web test
+R pnpm --filter web build
+R pnpm -r test
+R pnpm exec jest
+R pnpm dlx vitest run
+R yarn workspace web test
+R yarn test:unit
+R yarn build
+R yarn dlx tsc
+R bun test
+R bun run build
+R bunx vitest
+R npm i
+R npm add left-pad
+# --- make & co with options
+R make -C web test
+R make -j 8 test
+R make -j8 test
+R make clean test
+R make -f Makefile.ci check
+R just test
+A make -C web help
+A make clean
+# --- shell syntax
+R bash -lc 'npm test'
+R bash -ec 'pytest'
+R sh -xc 'npm run build'
+R for f in a b; do pytest $f; done
+R if true; then npm test; fi
+R { npm test; }
+R echo `npm test`
+R echo $(pytest -q)
+R ls tests | xargs pytest
+R xargs -n1 pytest < files.txt
+R while read f; do pytest "$f"; done < list
+# --- python and installs
+R python -m pytest
+R python3 -m unittest
+R python -m unittest discover
+R python manage.py test
+R python -m pip install requests
+R python -m mypy src
+R python -m build
+R python setup.py test
+R uv add requests
+R uv pip install -e .
+R uv pip sync requirements.txt
+R uv run --with pytest-xdist pytest -n 4
+R uvx pytest
+R uv build
+R poetry install
+R poetry add requests
+R pipenv install
+R pdm install
+R hatch test
+R micromamba install -n env numpy
+R conda install numpy
+R pip3 install x
+A uv pip list
+A uv pip show requests
+A uv pip freeze
+A uv run --python 3.12 python -c "print(1)"
+A python -m http.server 8000
+A python -m json.tool x.json
+A poetry show
+# --- node
+R node --test
+R node --test tests/
+A node scripts/gen.js
+# --- other ecosystems
+R ./gradlew test
+R gradle build
+R mvn test
+R ./mvnw -q verify
+R dotnet test
+R dotnet build
+R cargo clippy
+R go build ./...
+R sbt test
+R Rscript -e 'devtools::test()'
+R Rscript -e "devtools::check()"
+R Rscript -e 'testthat::test_dir("tests")'
+R Rscript -e 'renv::restore()'
+R Rscript -e 'install.packages("dplyr")'
+R Rscript tests/testthat.R
+R R CMD check pkg_1.0.tar.gz
+R R CMD build .
+R R CMD INSTALL .
+R R -e 'devtools::install()'
+R quarto render
+R docker compose build
+R docker buildx build .
+R podman build -t x .
+A Rscript -e 'print(1)'
+A Rscript scripts/plot.R
+A R --version
+A docker ps
+A docker compose ps
+# --- version/help is harmless
+A pytest --version
+A tsc --version
+A npx playwright --version
+A npm --version
+A uv --version
+A make --help
+A mvn --version
+# --- browser flows
+R uv run --quiet --no-project --python 3 --with playwright==1.63.0 python -I flow.py
+R uv run --with=playwright python flow.py
+A uv run --with rich python x.py

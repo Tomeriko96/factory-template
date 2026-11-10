@@ -57,8 +57,9 @@ are its blocking findings resolved?
    It refuses a port that is already in use and waits until the app answers. Never
    build, install or write in the worktree.
 2. Screenshot every page the diff touches, plus one unchanged page for comparison:
-   `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ui --path <p> … --widths 375,1280 --scheme both`
-   (drop `--scheme both` if the app has no dark mode).
+   `<Repo>/.factory/heavy -- <Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ui --path <p> … --widths 375,1280`
+   (light only; add `--scheme both` only if the diff touches colours or theming and the
+   app has a dark mode, and then take at most 3 paths: paths × widths × schemes ≤ 12).
 3. **Look at every screenshot** with Read (it is an image) and read `shots/ui/shoot.json`.
 4. Stop it: `<Repo>/.factory/serve stop <port>`. Never stop processes another way.
 

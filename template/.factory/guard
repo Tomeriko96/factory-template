@@ -11,9 +11,15 @@ Wired in the frontmatter of every factory agent:
               command: "\"$CLAUDE_PROJECT_DIR\"/.factory/guard"
 
 Reads the hook JSON on stdin. If a Bash command would start a test run, build, install,
-type-check or screenshot run without `.factory/heavy` in front of it, exit 2 with a message
-(Claude Code feeds stderr back to the agent). Everything else, and any parse problem, is
-allowed: this is a guard rail against forgetting, not a sandbox.
+type-check, lint or screenshot run without `.factory/heavy` in front of it, exit 2 with a
+message (Claude Code feeds stderr back to the agent). Everything else, and any parse
+problem, is allowed: this is a guard rail against forgetting, not a sandbox.
+
+What it looks through: `;`, `&&`, `||`, pipes, subshells, `$(…)` and backticks, shell
+keywords (`for … do`, `if … then`, `{ … }`), `bash -c`/`-lc`/`-ec`, wrappers (`env`,
+`nice`, `time`, `timeout`, `nohup`, `xvfb-run`, `xargs`, …) and runners that start another
+command (`uv run`, `npx`, `pnpm exec`, `poetry run`, `python -m`, …). `--version`/`--help`
+calls are always allowed.
 
   .factory/guard --subagents-only   (settings-level hook, see install)
       only guards calls made by a subagent (the hook payload carries agent_id/agent_type),
@@ -27,20 +33,41 @@ Switch off with `"limits": {"guard": false}` in .factory/config.json.
 import json, os, re, shlex, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HEAVY_WORDS = {"pytest", "py.test", "vitest", "jest", "mypy", "pyright", "tox", "nox", "tsc", "playwright"}
-RUNNERS = {"uv", "uvx", "npx", "pnpm", "yarn", "python", "python3", "poetry", "pipx", "npm",
-           "bun", "bunx", "node", "env", "nice", "time", "ionice", "timeout", "sudo", "xvfb-run"}
-PKG = {"npm", "pnpm", "yarn", "bun"}
-PKG_HEAVY = {"ci", "install", "i", "test", "t", "build", "add", "rebuild"}
+# Test runners, type-checkers, linters and build tools that are heavy whatever their arguments
+HEAVY_WORDS = {"pytest", "py.test", "vitest", "jest", "mocha", "ava", "karma", "cypress", "mypy",
+               "pyright", "tox", "nox", "tsc", "vue-tsc", "playwright", "eslint", "webpack",
+               "sphinx-build", "gradle", "gradlew", "mvn", "mvnw", "sbt"}
+# Factory scripts: allowed as they are (heavy is the limiter itself; shoot is checked below)
+FACTORY = {"heavy", "serve", "watch", "precheck", "guard", "rereview", "job", "ci"}
 SHELLS = {"bash", "sh", "zsh", "dash"}
-BUILD_TOOLS = {"make", "just"}
-BUILD_TARGETS = {"test", "tests", "check", "ci", "build", "lint", "all", "validate"}
+SHELL_WORDS = {"do", "then", "else", "elif", "if", "while", "until", "{", "}", "!", "done", "fi"}
+PKG = {"npm", "pnpm", "yarn", "bun"}
+PKG_HEAVY = {"ci", "install", "i", "add", "rebuild", "test", "t", "tst", "build", "update", "up",
+             "upgrade", "dedupe", "link"}
+# Options of npm/pnpm/yarn/bun that take a value (skipped while looking for the subcommand)
+PKG_OPTS = {"--prefix", "-w", "--workspace", "-C", "--dir", "--filter", "-F", "--cwd", "--loglevel"}
+# package.json script names that run tests, builds, type-checks or linters
+SCRIPT = re.compile(r"^(test|tests|build|typecheck|type-check|types|tsc|lint|e2e|check|ci|validate|"
+                    r"coverage|cypress|playwright|vitest|jest)([:._-].*)?$|.*[:._-](test|tests|e2e|build)$")
+BUILD_TOOLS = {"make", "gmake", "just", "task"}
+BUILD_TARGET = re.compile(r"^(test|tests|check|ci|build|lint|all|validate|install|e2e|coverage|typecheck)"
+                          r"([-_:.].*)?$|.*[-_:.](test|tests|check|build)$")
+MAKE_OPTS = {"-C", "-f", "--directory", "--file", "--makefile", "-I", "-o", "-W", "-l"}
+# Wrappers that run the rest of the line, with their options that take a value
+WRAPPERS = {"env", "nice", "ionice", "time", "timeout", "nohup", "sudo", "xvfb-run", "stdbuf",
+            "chrt", "taskset", "exec", "command", "builtin", "xargs"}
+WRAPPER_OPTS = {"-n", "-c", "-s", "-k", "-u", "--signal", "--kill-after", "-a", "-o", "-e", "-i",
+                "-p", "-g", "-C", "-d", "-L", "-P", "-I", "--server-args", "-S"}
+R_HEAVY = re.compile(r"\b(devtools|testthat|rcmdcheck|renv|pak|remotes|targets|covr|tinytest)::"
+                     r"|install\.packages|\bR\s+CMD\b", re.I)
+VERSION = {"--version", "-V", "--help", "-h"}
 ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+DURATION = re.compile(r"^\d+(\.\d+)?[smhd]?$")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
 
 
 def segments(cmd):
-    """Split on ; & | && || ( ) and newlines that are outside quotes."""
+    """Split on ; & | && || ( ) ` { } and newlines that are outside quotes."""
     out, cur, quote, i = [], [], None, 0
     while i < len(cmd):
         c = cmd[i]
@@ -57,7 +84,7 @@ def segments(cmd):
         elif c == "\\" and i + 1 < len(cmd):
             cur.append(c + cmd[i + 1])
             i += 1
-        elif c in ";&|()\n":
+        elif c in ";&|()`\n" or (c in "{}" and not cur or c in "{}" and cur[-1] in " \t"):
             out.append("".join(cur))
             cur = []
         else:
@@ -72,64 +99,198 @@ def words(seg):
         w = shlex.split(seg)
     except ValueError:
         w = seg.split()
-    while w and (ENV_ASSIGN.match(w[0]) or w[0] in ("exec", "command", "!")):
-        w = w[1:]
     return w
 
 
-def base(w):
-    return os.path.basename(w)
+def base(word):
+    return os.path.basename(word)
+
+
+def skip_opts(w, takes_value, numeric_values=False):
+    """Drop leading options (and the values of those in takes_value) from w."""
+    i = 0
+    while i < len(w) and w[i].startswith("-") and w[i] != "--":
+        opt = w[i].split("=", 1)[0]
+        i += 1
+        if "=" not in w[i - 1] and i < len(w) and (opt in takes_value or (numeric_values and w[i].isdigit())):
+            i += 1
+    if i < len(w) and w[i] == "--":
+        i += 1
+    return w[i:]
+
+
+def unwrap(w):
+    """Strip env assignments, shell keywords and wrappers like `env`, `timeout 60`, `xargs -n1`."""
+    for _ in range(10):
+        while w and (ENV_ASSIGN.match(w[0]) or w[0] in SHELL_WORDS):
+            w = w[1:]
+        if not w or base(w[0]) not in WRAPPERS:
+            return w
+        tool, w = base(w[0]), skip_opts(w[1:], WRAPPER_OPTS)
+        if tool == "timeout" and w and DURATION.match(w[0]):
+            w = w[1:]
+        if tool == "nice" and w and re.match(r"^-?\d+$", w[0]):
+            w = w[1:]
+    return w
+
+
+def classify(w, depth=0):
+    """Reason string when the words `w` start something heavy, else None."""
+    w = unwrap(w)
+    if not w or depth > 4:
+        return None
+    first = base(w[0])
+    args = w[1:]
+    if any(a in VERSION for a in args):
+        return None
+    if first in FACTORY:
+        return None
+    if first == "shoot":
+        return ".factory/shoot"
+    if first == "pre-push.sh":
+        return "pre-push.sh"
+    if first in SHELLS:
+        for i, a in enumerate(args):
+            if re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", a) and i + 1 < len(args):
+                return heavy_reason(args[i + 1], depth + 1)
+        return "pre-push.sh" if args and base(args[0]) == "pre-push.sh" else None
+    if first in HEAVY_WORDS:
+        return first
+
+    # Python
+    if re.match(r"^python(\d(\.\d+)?)?$", first):
+        rest = skip_opts(args, set())
+        if len(args) >= 2 and "-m" in args:
+            mod = args[args.index("-m") + 1] if args.index("-m") + 1 < len(args) else ""
+            if mod in ("pytest", "unittest", "mypy", "tox", "nox", "build", "coverage", "pyright", "pylint"):
+                return f"python -m {mod}"
+            if mod == "pip" and set(args) & {"install", "download", "wheel"}:
+                return "python -m pip install"
+            return None
+        if rest and base(rest[0]) == "manage.py" and len(rest) > 1 and rest[1] == "test":
+            return "manage.py test"
+        if rest and base(rest[0]) == "setup.py" and set(rest[1:]) & {"test", "build", "install", "develop"}:
+            return "setup.py"
+        return None
+    if first in ("pip", "pip3") and args and args[0] in ("install", "download", "wheel"):
+        return f"pip {args[0]}"
+    if first == "uv":
+        rest = skip_opts(args, {"--directory", "--project", "-p", "--python", "--config-file"})
+        if not rest:
+            return None
+        sub = rest[0]
+        if sub in ("sync", "add", "build", "lock") or (sub == "tool" and rest[1:2] == ["install"]):
+            return f"uv {sub}"
+        if sub == "pip" and rest[1:2] and rest[1] in ("install", "sync", "compile"):
+            return f"uv pip {rest[1]}"
+        if sub == "run":
+            withs = [rest[i + 1] for i, a in enumerate(rest[:-1]) if a == "--with"]
+            withs += [a.split("=", 1)[1] for a in rest if a.startswith("--with=")]
+            if any(x.lower().startswith("playwright") for x in withs):
+                return "uv run --with playwright (a browser)"
+            return classify(skip_opts(rest[1:], {"--with", "--extra", "--group", "--package", "-p",
+                                                 "--python", "--directory", "--project", "--env-file",
+                                                 "--with-requirements", "--index", "--only-group"}), depth + 1)
+        return None
+    if first == "uvx" or first == "pipx" and args[:1] == ["run"]:
+        return classify(skip_opts(args[1:] if first == "pipx" else args, {"--with", "--from", "-p", "--python"}), depth + 1)
+    if first in ("poetry", "pipenv", "pdm", "hatch"):
+        if args and args[0] == "run":
+            return classify(args[1:], depth + 1)
+        if args and args[0] in ("install", "add", "sync", "update", "lock", "build", "test"):
+            return f"{first} {args[0]}"
+        return None
+    if first in ("conda", "mamba", "micromamba"):
+        if args and args[0] in ("install", "create", "update", "env"):
+            return f"{first} {args[0]}"
+        if args and args[0] == "run":
+            return classify(skip_opts(args[1:], {"-n", "--name", "-p", "--prefix"}), depth + 1)
+        return None
+
+    # Node
+    if first in ("npx", "bunx", "pnpx"):
+        return classify(skip_opts(args, {"-p", "--package", "-c", "--call"}), depth + 1)
+    if first == "node":
+        return "node --test" if "--test" in args else None
+    if first in PKG:
+        rest = skip_opts(args, PKG_OPTS)
+        while rest and rest[0].startswith("-"):
+            rest = skip_opts(rest, PKG_OPTS)
+        if not rest:
+            return f"{first} install" if first in ("yarn", "bun") and not args else None
+        sub, more = rest[0], rest[1:]
+        if sub in PKG_HEAVY:
+            return f"{first} {sub}"
+        if sub in ("exec", "dlx", "x"):
+            return classify(skip_opts(more, PKG_OPTS), depth + 1)
+        if sub == "run" or sub == "run-script":
+            more = skip_opts(more, PKG_OPTS)
+            return f"{first} run {more[0]}" if more and SCRIPT.match(more[0]) else None
+        if first == "yarn" and sub == "workspace" and len(more) > 1:
+            return classify(["yarn"] + more[1:], depth + 1)
+        if first == "yarn" and sub == "workspaces":
+            return classify(["yarn"] + [x for x in more if x not in ("foreach", "-A", "--all", "-p", "-pt")], depth + 1)
+        if first in ("yarn", "pnpm", "bun") and SCRIPT.match(sub):  # yarn <script> shorthand
+            return f"{first} {sub}"
+        return None
+
+    # Build tools
+    if first in BUILD_TOOLS:
+        targets = [t for t in _targets(args) if BUILD_TARGET.match(t)]
+        return f"{first} {targets[0]}" if targets else None
+    if first == "mkdocs" and args[:1] == ["build"]:
+        return "mkdocs build"
+    if first == "quarto" and args[:1] in (["render"], ["preview"]):
+        return f"quarto {args[0]}"
+    if first == "cargo" and args and args[0] in ("test", "build", "check", "clippy", "bench", "install", "nextest"):
+        return f"cargo {args[0]}"
+    if first == "go" and args and args[0] in ("test", "build", "vet", "install", "generate"):
+        return f"go {args[0]}"
+    if first == "dotnet" and args and args[0] in ("test", "build", "restore", "publish", "pack"):
+        return f"dotnet {args[0]}"
+    if first in ("docker", "podman"):
+        rest = args[1:] if args[:1] in (["compose"], ["buildx"]) else args
+        return f"{first} {' '.join(args[:2])}" if rest[:1] == ["build"] or (args[:1] == ["compose"] and "--build" in args) else None
+    if first == "docker-compose" and args[:1] == ["build"]:
+        return "docker-compose build"
+
+    # R
+    if first in ("Rscript", "R"):
+        if first == "R" and args[:1] == ["CMD"]:
+            return f"R CMD {args[1] if len(args) > 1 else ''}".strip() if args[1:2] and args[1] in ("check", "build", "INSTALL") else None
+        code = " ".join(args[i + 1] for i, a in enumerate(args[:-1]) if a in ("-e", "--expr"))
+        if code:
+            return "R " + R_HEAVY.search(code).group(0) if R_HEAVY.search(code) else None
+        script = next((a for a in args if not a.startswith("-")), "")
+        return f"Rscript {script}" if re.search(r"(^|/)tests?(/|thats?\.R$|\.R$)", script) else None
+    return None
+
+
+def _targets(args):
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a in MAKE_OPTS:
+            i += 2
+            continue
+        if a == "-j" and i + 1 < len(args) and args[i + 1].isdigit():
+            i += 2
+            continue
+        if not a.startswith("-") and "=" not in a:
+            out.append(a)
+        i += 1
+    return out
 
 
 def heavy_reason(cmd, depth=0):
     """Return a short description if `cmd` starts something heavy outside .factory/heavy."""
+    if depth > 4:
+        return None
     cmd = HEREDOC.sub("", cmd)
     for seg in segments(cmd):
-        w = words(seg)
-        if not w:
-            continue
-        first = base(w[0])
-        if first in ("heavy", "serve", "watch", "precheck", "guard"):
-            continue
-        if first in SHELLS and "-c" in w[1:] and depth < 3:
-            i = w.index("-c")
-            if i + 1 < len(w):
-                r = heavy_reason(w[i + 1], depth + 1)
-                if r:
-                    return r
-            continue
-        if first == "shoot":
-            return ".factory/shoot"
-        if first in ("pre-push.sh",) or (first in SHELLS and len(w) > 1 and base(w[1]) == "pre-push.sh"):
-            return "pre-push.sh"
-        if first in HEAVY_WORDS:
-            return first
-        if first == "uv" and len(w) > 1 and w[1] in ("sync", "pip") :
-            return "uv " + w[1]
-        if first == "pip" or first == "pip3":
-            if len(w) > 1 and w[1] == "install":
-                return "pip install"
-        if first in PKG:
-            rest = [x for x in w[1:] if not x.startswith("-")]
-            if rest and (rest[0] in PKG_HEAVY or (rest[0] in ("run", "exec") and len(rest) > 1 and
-                                                   (rest[1] in PKG_HEAVY or rest[1] in HEAVY_WORDS or rest[1] in BUILD_TARGETS))):
-                return f"{first} {' '.join(rest[:2])}"
-        if first in RUNNERS:
-            for tok in w[1:]:
-                if base(tok) in HEAVY_WORDS:
-                    return f"{first} … {base(tok)}"
-                if tok == "-m" :
-                    continue
-        if first in BUILD_TOOLS:
-            rest = [x for x in w[1:] if not x.startswith("-")]
-            if rest and rest[0] in BUILD_TARGETS:
-                return f"{first} {rest[0]}"
-        if first == "mkdocs" and len(w) > 1 and w[1] == "build":
-            return "mkdocs build"
-        if first in ("cargo", "go") and len(w) > 1 and w[1] in ("test", "build"):
-            return f"{first} {w[1]}"
-        if first in ("docker", "podman") and len(w) > 1 and w[1] == "build":
-            return f"{first} build"
+        why = classify(words(seg), depth)
+        if why:
+            return why
     return None
 
 

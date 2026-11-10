@@ -4,7 +4,11 @@
 #   install [<repo>]            install or update (default: current directory); without
 #                               <repo> and without a config, then starts /factory setup
 #   install --no-setup [<repo>] install or update only
-#   install --remove [<repo>]   remove it again (refuses while jobs are unfinished)
+#   install --remove [<repo>]   remove it again; keeps your data (.factory/config.json,
+#                               repo.md, backlog.md, jobs/), still git-excluded, so a
+#                               re-install continues where it was. Refuses while jobs are
+#                               unfinished; stops servers and removes clean job worktrees
+#   install --remove --purge [<repo>]   also delete that data
 #   install --link              put `factory-init` on PATH (~/.local/bin symlink)
 #
 # Files go to .claude/skills/factory/, .claude/agents/factory-*.md and .factory/, and are
@@ -16,13 +20,15 @@ set -euo pipefail
 TEMPLATE="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 SRC="$TEMPLATE/template"
 PATTERNS=("/.factory/" "/.claude/skills/factory/" "/.claude/agents/factory-*.md" "/.claude/settings.local.json")
+SCRIPTS=(shoot serve watch heavy guard precheck rereview ci job)
 
 die() { echo "factory: $*" >&2; exit 1; }
 
-remove=0 setup=1 target="."
+remove=0 purge=0 setup=1 target="."
 for a in "$@"; do
   case "$a" in
     --remove) remove=1 ;;
+    --purge) purge=1 ;;
     --no-setup) setup=0 ;;
     --link)
       mkdir -p "$HOME/.local/bin"
@@ -30,11 +36,12 @@ for a in "$@"; do
       echo "linked $HOME/.local/bin/factory-init -> $TEMPLATE/install"
       case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH" ;; esac
       exit 0 ;;
-    -h|--help) sed -n '2,13p' "$TEMPLATE/install" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$TEMPLATE/install" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*) die "unknown option $a" ;;
     *) target="$a"; setup=0 ;;
   esac
 done
+(( ! purge || remove )) || die "--purge only goes with --remove"
 
 repo="$(git -C "$target" rev-parse --show-toplevel 2>/dev/null)" || die "not a git repo: $target"
 common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir)"
@@ -56,7 +63,9 @@ try:
 except FileNotFoundError:
     cfg = {}
 except ValueError:
-    sys.exit(f"factory: {path} is not valid JSON; not touching it (the guard hook is not set up)")
+    print(f"note: {path} is not valid JSON; not touching it (the guard hook for ad-hoc subagents "
+          f"is {'not set up' if add else 'left in it'})", file=sys.stderr)
+    sys.exit(0)
 pre = cfg.setdefault("hooks", {}).setdefault("PreToolUse", [])
 def ours(e):
     return any(".factory/guard" in h.get("command", "") for h in e.get("hooks", []))
@@ -80,20 +89,66 @@ strip_block() {
   [ -f "$exclude" ] && sed -i '/^# factory:begin/,/^# factory:end/d' "$exclude" || true
 }
 
+# Jobs that are not at rest, as "id:stage" words (reads the top-level stage, not history)
+unfinished_jobs() {
+  python3 - "$1" <<'PY'
+import glob, json, os, sys
+done = {"merged", "pushed", "pr-open", "superseded"}
+for p in sorted(glob.glob(os.path.join(sys.argv[1], ".factory", "jobs", "*", "job.json"))):
+    jid = os.path.basename(os.path.dirname(p))
+    try:
+        job = json.load(open(p))
+        stage = job.get("stage") if isinstance(job, dict) else None
+    except (OSError, ValueError):
+        stage, job = "unreadable", {}
+    if stage not in done or (isinstance(job, dict) and job.get("syncing")):
+        print(f"{jid}:{stage}{'+sync' if isinstance(job, dict) and job.get('syncing') else ''}")
+PY
+}
+
 if (( remove )); then
-  open_jobs=""
-  for j in "$repo"/.factory/jobs/*/job.json; do
-    [ -f "$j" ] || continue
-    grep -Eq '"stage"[[:space:]]*:[[:space:]]*"(merged|pushed|pr-open)"' "$j" || open_jobs+=" $(basename "$(dirname "$j")")"
-  done
-  [ -z "$open_jobs" ] || die "unfinished jobs:$open_jobs. Finish (/factory approve) or delete them first."
-  settings_hook "$repo" 0
-  rm -rf "$repo/.factory" "$repo/.claude/skills/factory"
+  open_jobs="$(unfinished_jobs "$repo" | tr '\n' ' ')"
+  [ -z "$open_jobs" ] || die "unfinished jobs: $open_jobs
+Finish them (/factory approve|rework, or .factory/job fail <id> to park one) or delete their folders first."
+  # servers that serve started (it leaves a reused process id alone)
+  [ -x "$repo/.factory/serve" ] && { "$repo/.factory/serve" stop-all || echo "note: some servers did not stop; see .factory/serve status"; }
+  # job worktrees: remove the clean ones, keep and list the rest
+  wtdir="$(dirname "$repo")/$(basename "$repo")-worktrees"
+  kept_wt=""
+  while IFS= read -r wt; do
+    case "$wt" in "$wtdir"/*) git -C "$repo" worktree remove "$wt" 2>/dev/null || kept_wt+="  $wt"$'\n' ;; esac
+  done < <(git -C "$repo" worktree list --porcelain | sed -n 's/^worktree //p')
+  git -C "$repo" worktree prune
+  rmdir "$wtdir" 2>/dev/null || true
+  if [ -z "$(git -C "$repo" ls-files -- .claude/settings.local.json)" ]; then
+    settings_hook "$repo" 0
+  fi
+  rm -rf "$repo/.claude/skills/factory"
   rm -f "$repo"/.claude/agents/factory-*.md
   rmdir "$repo/.claude/skills" "$repo/.claude/agents" "$repo/.claude" 2>/dev/null || true
   strip_block
-  git -C "$repo" worktree prune
+  if (( purge )); then
+    rm -rf "$repo/.factory"
+  else
+    for f in "${SCRIPTS[@]}" VERSION; do rm -f "$repo/.factory/$f"; done
+    rm -rf "$repo/.factory/run" "$repo/.factory/cache"
+    rm -f "$repo/.factory/jobs/.lock"
+    rmdir "$repo/.factory/jobs" "$repo/.factory" 2>/dev/null || true
+    if [ -d "$repo/.factory" ]; then
+      # the kept data must stay invisible to git
+      { echo "# factory:begin (kept data of a removed factory; install --remove --purge deletes it)"
+        echo "/.factory/"
+        echo "# factory:end"; } >> "$exclude"
+      git -C "$repo" check-ignore -q .factory/x || echo "warning: .factory/ is not ignored by git; do not commit it"
+    fi
+  fi
   echo "factory removed from $repo"
+  if [ -d "$repo/.factory" ]; then
+    echo "kept (git-excluded): $(cd "$repo/.factory" && ls -A | tr '\n' ' ')— a re-install continues with it; --remove --purge deletes it"
+  fi
+  [ -z "$kept_wt" ] || printf 'worktrees kept (uncommitted changes; remove by hand):\n%s' "$kept_wt"
+  branches="$(git -C "$repo" branch --list 'factory/*' --format='%(refname:short)' | tr '\n' ' ')"
+  [ -z "$branches" ] || echo "local job branches left (pushed ones live on the remote too): $branches— delete with git branch -D <name>"
   exit 0
 fi
 
@@ -119,7 +174,7 @@ rm -rf "$repo/.claude/skills/factory"
 cp -R "$SRC/.claude/skills/factory" "$repo/.claude/skills/factory"
 rm -f "$repo"/.claude/agents/factory-*.md
 cp "$SRC"/.claude/agents/factory-*.md "$repo/.claude/agents/"
-for f in shoot serve watch heavy guard precheck rereview ci job; do
+for f in "${SCRIPTS[@]}"; do
   cp "$SRC/.factory/$f" "$repo/.factory/$f"
   chmod +x "$repo/.factory/$f"
 done

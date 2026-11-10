@@ -3,6 +3,7 @@
 
   .factory/serve start <port> --cwd <worktree> [--ready /path] [--timeout 120] -- <command…>
   .factory/serve stop <port>
+  .factory/serve stop-all
   .factory/serve status
 
 start: refuses if <port> is already in use (you would test someone else's server),
@@ -11,7 +12,9 @@ runs <command> (with {port} replaced) in its own process group, writes its log t
 exits 0. Exit 1 if the server dies or never becomes ready (the group is stopped, the
 log tail is printed).
 stop: stops exactly the process group that `start` created (TERM, then KILL after 10s)
-and checks the port is free again. Never touches other processes.
+and checks the port is free again. Never touches other processes: the group leader's start
+time is recorded, so after a restart a reused process id is recognised as stale and left
+alone (the state file is dropped). stop-all: stop for every port serve started.
 """
 import argparse, json, os, signal, socket, subprocess, sys, time, urllib.error, urllib.request
 
@@ -42,6 +45,14 @@ def alive(pgid):
         return False
     except PermissionError:
         return True
+
+def proc_start(pid):
+    """Start time of a process in clock ticks since boot (/proc/<pid>/stat field 22), or None."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return int(f.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
 
 def kill_group(pgid):
     for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
@@ -77,7 +88,7 @@ def start(a):
         p = subprocess.Popen(cmd, cwd=a.cwd, stdout=f, stderr=subprocess.STDOUT,
                              stdin=subprocess.DEVNULL, start_new_session=True)
     with open(state_file(a.port), "w") as f:
-        json.dump({"pgid": p.pid, "cmd": cmd, "cwd": a.cwd, "log": log}, f)
+        json.dump({"pgid": p.pid, "started": proc_start(p.pid), "cmd": cmd, "cwd": a.cwd, "log": log}, f)
     end = time.time() + a.timeout
     while time.time() < end:
         if p.poll() is not None:
@@ -96,13 +107,36 @@ def stop(a):
     if not os.path.exists(sf):
         sys.exit(f"serve: nothing started on port {a.port} by serve")
     with open(sf) as f:
-        pgid = json.load(f)["pgid"]
+        st = json.load(f)
+    pgid = st["pgid"]
+    now = proc_start(pgid)
+    if st.get("started") and now is not None and now != st["started"]:
+        os.remove(sf)
+        print(f"serve: port {a.port}: process {pgid} is not the server serve started (stale after a "
+              f"restart); left alone, state dropped")
+        return
     ok = kill_group(pgid)
-    os.remove(sf)
+    if ok:
+        os.remove(sf)
     time.sleep(0.3)
     if not ok or in_use(a.port):
         sys.exit(f"serve: port {a.port} still in use after stopping group {pgid}")
     print(f"serve: stopped port {a.port}")
+
+def stop_all(_):
+    ports = sorted(int(n[:-5]) for n in os.listdir(RUN) if n.endswith(".json") and n[:-5].isdigit()) \
+        if os.path.isdir(RUN) else []
+    if not ports:
+        print("serve: nothing running")
+    failed = 0
+    for port in ports:
+        try:
+            stop(argparse.Namespace(port=port))
+        except SystemExit as e:
+            failed += 1
+            print(e.code if isinstance(e.code, str) else f"serve: port {port}: failed")
+    if failed:
+        sys.exit(1)
 
 def status(_):
     if not os.path.isdir(RUN):
@@ -126,11 +160,12 @@ def main():
     t = sub.add_parser("stop")
     t.add_argument("port", type=int)
     sub.add_parser("status")
+    sub.add_parser("stop-all")
     argv = sys.argv[1:]
     cut = argv.index("--") if "--" in argv else len(argv)
     a = ap.parse_args(argv[:cut])
     a.command = argv[cut + 1:]
-    {"start": start, "stop": stop, "status": status}[a.action](a)
+    {"start": start, "stop": stop, "stop-all": stop_all, "status": status}[a.action](a)
 
 if __name__ == "__main__":
     main()

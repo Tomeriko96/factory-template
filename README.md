@@ -25,7 +25,12 @@ Then, in a Claude Code session in that repo (sonnet is enough for the orchestrat
 /factory status                 or live: .factory/watch [--tmux]
 ```
 
-`factory-init --remove` takes it out again (refuses while jobs are unfinished);
+`factory-init --remove` takes it out again. It refuses while a job is not at rest
+(`needs-human` counts as unfinished: approve, rework or park it first), stops the servers
+`serve` started, removes clean job worktrees (worktrees with uncommitted changes and local
+`factory/*` branches are listed, never deleted), and keeps your data (`.factory/config.json`,
+`repo.md`, `backlog.md`, `jobs/`, still git-excluded) so a re-install continues where it
+was; `factory-init --remove --purge` deletes that data too.
 `factory-init --no-setup` installs or updates without starting Claude. `factory-init`
 is just a symlink to `./install`, so updating the factory everywhere = `git pull` here
 and re-run `factory-init` in each repo.

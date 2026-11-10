@@ -15,6 +15,7 @@ cleanup() { case "$T" in */factory-job-test.*) rm -rf "$T" ;; esac; }
 trap cleanup EXIT
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+export FACTORY_REPOS_FILE="$T/repos"   # never touch the real list of installed repos
 
 pass=0 fail=0
 ok()   { pass=$((pass + 1)); }

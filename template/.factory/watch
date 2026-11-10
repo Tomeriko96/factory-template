@@ -1,267 +1,989 @@
 #!/usr/bin/env python3
-"""Factory board: shows every job in .factory/jobs/*/job.json.
+"""Factory board: what needs you, what runs, what waits, which PRs/MRs are open.
 
-  .factory/watch          live board (refreshes every 2s, ctrl-c stops)
-  .factory/watch --once   print once and exit
-  .factory/watch --tmux   open the board in a split pane at the bottom (inside tmux)
-  .factory/watch <job-id> detail: files in the job folder + first lines of decision.md
-                          + CI/CD stages/jobs (via .factory/ci cache)
-  .factory/watch --no-ci  skip CI/CD lines (no `gh`/`glab` calls at all)
-Unknown keys in job.json are ignored; missing fields show '-'.
-CI state comes from .factory/cache/ci-<job-id>.json (written by .factory/ci);
-watch refreshes stale entries (TTL 30s) in the background of each loop.
+  .factory/watch              interactive board in a terminal (keys below); plain text in a pipe
+  .factory/watch --once       print the board once (plain text)
+  .factory/watch <job-id>     one job: timeline, reviews per round, agent files, heavy, CI
+  .factory/watch --all        include finished jobs (merged, pushed, superseded)
+  .factory/watch --repos      every repo the factory is installed in (also: factory-watch)
+  .factory/watch --compact    one line per job instead of cards
+  .factory/watch --no-ci      no CI/CD lines and no `gh`/`glab` calls at all
+  .factory/watch --json       the board as JSON (for scripts)
+  .factory/watch --tmux       open the board in a split pane at the bottom
+
+Sections, in this order (empty ones hidden): NEEDS YOU (needs-human, with the reason and
+the next command) · RUNNING (spec/build/review/approve/deliver or a sync: what runs now,
+the heavy command in its worktree) · QUEUED · OPEN PRs (age, CI with failing checks named,
+mergeability) · DONE (counts; listed with --all or `a`).
+
+Keys in the interactive board: j/k or ↓/↑ move · h/l or ←/→ change column (wide screens) ·
+enter opens the job (beside the board on wide screens) · esc closes · a finished jobs ·
+/ filter · c copy the job's next command · v cards/compact · R this repo/all repos ·
+r refresh · ? help · q quit.
+
+The board only reads: job.json files (written by .factory/job), CI caches (written by
+.factory/ci, refreshed in the background), and .factory/heavy's slot files. Repos for
+--repos come from ~/.local/state/factory/repos (written by install). NO_COLOR turns
+colours off.
 """
-import json, os, shlex, subprocess, sys, time
+import base64, fcntl, json, os, re, shlex, shutil, subprocess, sys, time
 from datetime import datetime, timezone
 
-HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
-
-def load(jobs_dir):
-    jobs = []
-    if not os.path.isdir(jobs_dir):
-        return jobs
-    for name in sorted(os.listdir(jobs_dir)):
-        p = os.path.join(jobs_dir, name, "job.json")
-        try:
-            with open(p) as f:
-                j = json.load(f)
-        except (OSError, ValueError):
-            continue
-        if isinstance(j, dict):
-            j.setdefault("id", name)
-            jobs.append(tidy(j))
-    return jobs
-
-def tidy(j):
-    """Coerce the fields the board reads, so an odd job.json cannot crash it."""
-    if not isinstance(j.get("reviews"), dict):
-        j["reviews"] = {}
-    j["reviews"] = {str(k): (v if isinstance(v, str) or v is None else "?") for k, v in j["reviews"].items()}
-    j["history"] = [h for h in j.get("history") or [] if isinstance(h, dict)] if isinstance(j.get("history"), list) else []
-    if not isinstance(j.get("pr_state"), dict):
-        j["pr_state"] = {}
-    for k in ("stage", "mode", "updated"):
-        if j.get(k) is not None and not isinstance(j[k], str):
-            j[k] = str(j[k])
-    return j
-
-def age(iso):
-    try:
-        t = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        s = int((datetime.now(timezone.utc) - t).total_seconds())
-        return f"{s//3600}h{s%3600//60:02d}m" if s >= 3600 else f"{s//60}m{s%60:02d}s"
-    except Exception:
-        return "-"
-
+HERE = os.path.dirname(os.path.realpath(__file__))  # <repo>/.factory (or the template's)
 ACTIVE = ("spec", "build", "review", "approve", "deliver")
+DONE = ("merged", "pushed", "superseded")
+SECTIONS = [("needs", "NEEDS YOU", "red"), ("running", "RUNNING", "cyan"), ("queued", "QUEUED", "dim"),
+            ("prs", "OPEN PRs", "green"), ("other", "UNKNOWN STAGE", "yellow"), ("done", "DONE", "dim")]
+AGENT = [(r"^spec$", "spec-writer"), (r"^build-\d+$", "builder"), (r"^review-\d+$", "reviewers"),
+         (r"^approve-\d+$", "approver"), (r"^sync-review-\d+$", "sync review"), (r"^sync-\d+$", "sync builder")]
+BAD = {"failed": 0, "running": 1, "pending": 1, "unknown": 1, "manual": 2, "canceled": 3, "success": 4, "skipped": 5}
+SGR = {"red": "1;31", "green": "32", "yellow": "33", "dim": "2", "bold": "1", "cyan": "36", "rev": "7"}
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
-def header(jobs):
-    """One line: machine load and active jobs against the cap (limits in config.json)."""
+
+def registry_file():
+    return os.environ.get("FACTORY_REPOS_FILE") or os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "factory", "repos")
+
+
+# ---------- small helpers ----------
+
+def read_json(path, default=None):
     try:
-        load = float(open("/proc/loadavg").read().split()[0])
-    except (OSError, ValueError):
-        load = os.getloadavg()[0]
-    try:
-        with open(os.path.join(HERE, "config.json")) as f:
-            cap = (json.load(f).get("limits") or {}).get("active_jobs", 3)
-    except (OSError, ValueError):
-        cap = 3
-    try:
-        with open(os.path.join(HERE, "config.json")) as f:
-            pr_cap = (json.load(f).get("limits") or {}).get("open_prs", 5)
-    except (OSError, ValueError):
-        pr_cap = 5
-    act = sum(1 for j in jobs if j.get("stage") in ACTIVE)
-    queued = sum(1 for j in jobs if j.get("stage") == "queued")
-    prs = [j for j in jobs if j.get("stage") == "pr-open"]
-    line = f"load {load:.1f} on {os.cpu_count()} cores · active jobs {act}/{cap}"
-    if prs:
-        since = [h["at"] for j in prs for h in j["history"] if h.get("stage") == "pr-open" and isinstance(h.get("at"), str)][-len(prs):]
-        failing = sum(1 for j in prs if (j.get("pr_state") or {}).get("pipeline") == "failed")
-        line += (f" · PRs open {len(prs)}" + (f"/{pr_cap}" if pr_cap else "") +
-                 (f", oldest {age(min(since))}" if since else "") +
-                 (f", {failing} failing" if failing else ""))
-    return line + (f" · {queued} queued" if queued else "")
-
-COL = {"queued": "\033[2m", "needs-human": "\033[1;31m", "merged": "\033[32m", "pr-open": "\033[32m", "pushed": "\033[32m", "review": "\033[33m",
-       "build": "\033[36m", "approve": "\033[35m", "deliver": "\033[35m", "spec": "\033[34m", "superseded": "\033[2m"}
-
-def paint(text, stage):
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
-        return text
-    return f"{COL.get(stage, '')}{text}\033[0m"
-
-def detail(jobs_dir, job_id):
-    d = os.path.join(jobs_dir, job_id)
-    if not os.path.isdir(d):
-        return f"no job '{job_id}'"
-    out = [f"== {job_id}"]
-    for dp, _, fs in sorted(os.walk(d)):
-        for f in sorted(fs):
-            out.append("  " + os.path.relpath(os.path.join(dp, f), d))
-    for f in ("decision.md",):
-        p = os.path.join(d, f)
-        if os.path.exists(p):
-            out += ["", f"-- {f}"] + open(p).read().splitlines()[:12]
-    out += ["", "-- CI/CD"] + ci_detail_lines(job_id)
-    return "\n".join(out)
-
-CI_SYM = {"success": "✓", "failed": "✗", "running": "●", "pending": "○",
-          "canceled": "-", "skipped": "-", "manual": "○", "unknown": "?", "none": "-"}
-CI_COL = {"success": "\033[32m", "failed": "\033[1;31m", "running": "\033[33m",
-          "pending": "\033[2m"}
-
-
-def ci_cache(job_id):
-    p = os.path.join(HERE, "cache", f"ci-{job_id}.json")
-    try:
-        with open(p) as f:
+        with open(path) as f:
             return json.load(f)
     except (OSError, ValueError):
+        return default
+
+
+def first_line(path):
+    try:
+        with open(path, errors="replace") as f:
+            return f.readline().strip().lstrip("﻿")
+    except OSError:
+        return ""
+
+
+def fit(s, width):
+    s = " ".join(str(s).split())
+    return s if len(s) <= width else s[:max(0, width - 1)] + "…"
+
+
+def parse_time(s):
+    if not isinstance(s, str) or not s:
+        return None
+    for f in (lambda x: datetime.fromisoformat(x.replace("Z", "+00:00")),
+              lambda x: datetime.strptime(x, "%Y-%m-%dT%H:%M:%S%z")):
+        try:
+            t = f(s)
+            return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    return None
+
+
+def span(sec):
+    sec = max(0, int(sec))
+    if sec < 60:
+        return f"{sec}s"
+    if sec < 3600:
+        return f"{sec // 60}m"
+    if sec < 86400:
+        return f"{sec // 3600}h{sec % 3600 // 60:02d}m" if sec < 36000 else f"{sec // 3600}h"
+    return f"{sec // 86400}d"
+
+
+def ago(s):
+    t = s if isinstance(s, datetime) else parse_time(s)
+    return span((datetime.now(timezone.utc) - t).total_seconds()) if t else "-"
+
+
+# A "line" is a list of (text, colour) segments; renderers turn it into ANSI or curses.
+def text_of(line):
+    return "".join(t for t, _ in line)
+
+
+def ansi(line, width=None):
+    out, n = [], 0
+    for t, c in line:
+        if width is not None:
+            room = width - n
+            if room <= 0:
+                break
+            if len(t) > room:
+                t = t[:max(0, room - 1)] + "…"
+        n += len(t)
+        out.append(f"\033[{SGR[c]}m{t}\033[0m" if COLOR and c and t else t)
+    return "".join(out)
+
+
+# ---------- reading one repo ----------
+
+def tidy(j, name):
+    """Coerce the fields the board reads, so an odd job.json cannot crash it."""
+    j.setdefault("id", name)
+    j["id"] = str(j["id"])
+    for k in ("reviews", "pr_state", "pending", "syncing", "review_sets", "sync"):
+        if not isinstance(j.get(k), dict):
+            j[k] = {}
+    j["history"] = [h for h in j.get("history") or [] if isinstance(h, dict)] if isinstance(j.get("history"), list) else []
+    for k in ("stage", "mode", "reason", "pr_url", "updated", "started", "feature", "worktree"):
+        if j.get(k) is not None and not isinstance(j[k], str):
+            j[k] = str(j[k])
+    for k in ("round", "round_budget"):
+        try:
+            j[k] = int(j.get(k) or 0)
+        except (TypeError, ValueError):
+            j[k] = 0
+    return j
+
+
+class Repo:
+    def __init__(self, fd):
+        self.fd = fd
+        self.name = os.path.basename(os.path.dirname(fd))
+        cfg = read_json(os.path.join(fd, "config.json"), {})
+        self.cfg = cfg if isinstance(cfg, dict) else {}
+        self.jobs = []
+        jd = os.path.join(fd, "jobs")
+        for name in sorted(os.listdir(jd)) if os.path.isdir(jd) else []:
+            j = read_json(os.path.join(jd, name, "job.json"))
+            if isinstance(j, dict):
+                j = tidy(j, name)
+                j["_repo"], j["_dir"] = self, os.path.join(jd, name)
+                self.jobs.append(j)
+
+    def limit(self, key, default):
+        return (self.cfg.get("limits") or {}).get(key, default)
+
+    def ci(self, jid):
+        c = read_json(os.path.join(self.fd, "cache", f"ci-{re.sub(r'[^A-Za-z0-9_.-]', '_', jid)}.json"))
+        return c if isinstance(c, dict) else None
+
+    def others(self):
+        d = read_json(os.path.join(self.fd, "cache", "ci-others.json"), {})
+        p = d.get("pipelines") if isinstance(d, dict) else None
+        return [x for x in p if isinstance(x, dict)] if isinstance(p, list) else []
+
+
+def registered_repos():
+    try:
+        with open(registry_file()) as f:
+            paths = [l.strip() for l in f if l.strip()]
+    except OSError:
+        paths = []
+    seen, out = set(), []
+    for p in paths:
+        fd = os.path.join(p, ".factory")
+        if p not in seen and os.path.isdir(os.path.join(fd, "jobs")):
+            seen.add(p)
+            out.append(fd)
+    return out
+
+
+# ---------- machine ----------
+
+_cpu_prev = None
+
+
+def cpu_percent():
+    global _cpu_prev
+
+    def sample():
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        return sum(v), v[3] + (v[4] if len(v) > 4 else 0)
+    try:
+        if _cpu_prev is None:
+            _cpu_prev = sample()
+            time.sleep(0.2)
+        cur = sample()
+        dt, di = cur[0] - _cpu_prev[0], cur[1] - _cpu_prev[1]
+        _cpu_prev = cur
+        return 100.0 * (1 - di / max(1, dt))
+    except (OSError, ValueError, IndexError):
         return None
 
 
-def ci_paint(text, status):
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
-        return text
-    return f"{CI_COL.get(status, '')}{text}\033[0m"
+_heavy = None
 
 
-def ci_one_line(job_id):
-    """Compact second line under a pr-open job: stages/jobs with status."""
-    ci = ci_cache(job_id)
-    if not ci:
+def heavy_module():
+    """.factory/heavy loaded as a module, so the board uses its limits and lock dir."""
+    global _heavy
+    if _heavy is None:
+        _heavy = False
+        path = os.path.join(HERE, "heavy")
+        if os.path.exists(path):
+            try:
+                import importlib.machinery, importlib.util
+                sys.dont_write_bytecode = True
+                loader = importlib.machinery.SourceFileLoader("factory_heavy", path)
+                spec = importlib.util.spec_from_loader("factory_heavy", loader)
+                mod = importlib.util.module_from_spec(spec)
+                loader.exec_module(mod)
+                _heavy = mod
+            except Exception:
+                pass
+    return _heavy or None
+
+
+def heavy_slots():
+    """(budget, [held slot records with cwd, cmd, weight, since]) across the machine."""
+    h = heavy_module()
+    if not h:
+        return None, []
+    try:
+        lim, d = h.limits(), h.lock_dir()
+    except Exception:
+        return None, []
+    held = []
+    for i in range(lim["slots"]):
+        p = os.path.join(d, f"slot-{i}.lock")
+        if not os.path.exists(p):
+            continue
+        try:
+            with open(p, "a+") as f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    continue  # free
+                except OSError:
+                    pass
+            rec = read_json(p, {})
+            if isinstance(rec, dict):
+                held.append(rec)
+        except OSError:
+            pass
+    return lim["budget"], held
+
+
+def heavy_for(j, slots):
+    wt = j.get("worktree")
+    if not wt:
         return None
-    if ci.get("error") and not ci.get("jobs"):
-        return f"  └ CI: error ({ci['error'][:80]})"
-    jobs = ci.get("jobs") or []
-    if not jobs:
-        return f"  └ CI: pipeline={ci.get('pipeline', '-')}"
-    # Group GitLab jobs by stage, keep GitHub checks flat
-    stages = {}
-    for jb in jobs:
-        stages.setdefault(jb.get("stage") or "", []).append(jb)
-    parts = []
-    for stage, js in stages.items():
-        prefix = f"{stage}:" if stage else ""
-        cells = " ".join(ci_paint(f"{j['name']}{CI_SYM.get(j['status'], '?')}", j["status"])
-                          for j in js[:12])
-        parts.append(f"{prefix}{cells}" + ("…" if len(js) > 12 else ""))
-    pipe = ci.get("pipeline", "-")
-    line = f"  └ CI {pipe} │ " + " │ ".join(parts)
-    if ci.get("stale_error"):
-        line += " (stale)"
-    return line
+    for s in slots:
+        cwd = str(s.get("cwd") or "")
+        if cwd == wt or cwd.startswith(wt.rstrip("/") + "/"):
+            return s
+    return None
 
 
-def ci_detail_lines(job_id):
-    ci = ci_cache(job_id)
+# ---------- CI ----------
+
+def ci_checks(ci):
+    best = {}
+    for c in (ci or {}).get("jobs") or []:
+        if isinstance(c, dict):
+            name, st = str(c.get("name") or "?"), str(c.get("status") or "unknown")
+            if name not in best or BAD.get(st, 1) < BAD.get(best[name], 1):
+                best[name] = st
+    return best
+
+
+def ci_summary(ci):
     if not ci:
-        return ["no CI cache yet (run .factory/ci <job-id>)"]
-    lines = [f"pipeline={ci.get('pipeline', '-')} merge={ci.get('merge', '-')}"
-             + (f" at={ci.get('at', '-')}" if ci.get("at") else "")]
-    if ci.get("url"):
-        lines.append(ci["url"])
-    if ci.get("error"):
-        lines.append(f"error: {ci['error']}")
-    for jb in ci.get("jobs", []):
-        stage = f"[{jb.get('stage')}] " if jb.get("stage") else ""
-        lines.append(f"  {CI_SYM.get(jb.get('status'), '?')} {jb.get('status', '-'):<8} "
-                     f"{stage}{jb.get('name')}")
-    if ci.get("stale_error"):
-        lines.append(f"(stale: {ci['stale_error']})")
+        return "no CI data yet", "dim"
+    checks = ci_checks(ci)
+    if not checks:
+        if ci.get("error"):
+            return f"CI error: {ci['error']}", "red"
+        p = ci.get("pipeline") or "none"
+        return ("no CI" if p == "none" else p), {"failed": "red", "success": "green"}.get(p, "yellow")
+    failed = [n for n, s in checks.items() if s == "failed"]
+    running = [n for n, s in checks.items() if s in ("running", "pending", "unknown")]
+    stale = " (stale)" if ci.get("stale_error") else ""
+    if failed:
+        return f"✗ {', '.join(failed)}{stale}", "red"
+    if running:
+        return f"● {len(running)}/{len(checks)} running{stale}", "yellow"
+    return f"✓ {len(checks)}/{len(checks)}{stale}", "green"
+
+
+def merge_state(j, ci):
+    if j["syncing"]:
+        return f"syncing (sync {j['syncing'].get('n', '?')})", "yellow"
+    m = str((ci or {}).get("merge") or j["pr_state"].get("merge") or "").lower()
+    if m in ("clean", "mergeable", "can_be_merged", "has_hooks"):
+        return "mergeable", "green"
+    if m in ("dirty", "conflict", "conflicting", "need_rebase", "cannot_be_merged"):
+        return "conflict → sync", "red"
+    if m == "behind":
+        return "behind base", "yellow"
+    if "draft" in m:
+        return "draft", "dim"
+    if m in ("blocked", "not_approved", "discussions_not_resolved"):
+        return "blocked", "dim"
+    if m in ("unstable", "ci_still_running", "checking", "unchecked"):
+        return "checks pending", "yellow"
+    return ("", None) if not m else (m, "dim")
+
+
+def pr_ref(url):
+    m = re.search(r"/pull/(\d+)", url or "")
+    if m:
+        return "#" + m.group(1)
+    m = re.search(r"/merge_requests/(\d+)", url or "")
+    return "!" + m.group(1) if m else "-"
+
+
+class CIRefresher:
+    """Runs each repo's .factory/ci --quiet in the background, one at a time, round robin."""
+    def __init__(self):
+        self.proc, self.i = None, 0
+
+    def tick(self, repos, wait=False):
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        cands = [r for r in repos if os.path.exists(os.path.join(r.fd, "ci"))
+                 and any(j.get("stage") == "pr-open" for j in r.jobs)]
+        if not cands:
+            return
+        todo = cands if wait else [cands[self.i % len(cands)]]
+        self.i += 1
+        for r in todo:
+            try:
+                self.proc = subprocess.Popen([os.path.join(r.fd, "ci"), "--quiet"], cwd=os.path.dirname(r.fd),
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if wait:
+                    self.proc.wait(timeout=60)
+            except Exception:
+                pass
+
+
+# ---------- what a job is ----------
+
+def section_of(j):
+    st = j.get("stage")
+    if st == "needs-human":
+        return "needs"
+    if st in ACTIVE or j["syncing"]:
+        return "running"
+    if st == "queued":
+        return "queued"
+    if st == "pr-open":
+        return "prs"
+    if st in DONE:
+        return "done"
+    return "other"
+
+
+def stage_since(j):
+    for h in reversed(j["history"]):
+        if h.get("stage") == j.get("stage") and not h.get("event"):
+            return h.get("at")
+    return j.get("updated")
+
+
+def pr_since(j):
+    for h in j["history"]:
+        if h.get("stage") == "pr-open" and not h.get("event"):
+            return h.get("at")
+    return stage_since(j)
+
+
+def reviews_status(j):
+    n = j["round"]
+    names = j["review_sets"].get(str(n)) or list(j["reviews"].keys())
+    rdir = os.path.join(j["_dir"], f"round-{n}")
+    glyphs, waiting = [], []
+    for r in names:
+        fl = first_line(os.path.join(rdir, f"review-{r}.md"))
+        if not fl:
+            waiting.append(r)
+        else:
+            glyphs.append(("✓", "green") if fl == "VERDICT: PASS" else ("✗", "red"))
+    return len(names) - len(waiting), len(names), glyphs, waiting
+
+
+def now_line(j):
+    """Segments: what runs or is awaited, and for how long."""
+    stage, pend = j.get("stage"), j["pending"]
+    who = next((label for rx, label in AGENT if re.match(rx, str(pend.get("key") or ""))), None)
+    resume = f" (resume {int(pend['spawns']) - 1})" if int(pend.get("spawns") or 1) > 1 else ""
+    since = " · " + ago(pend.get("at") or stage_since(j))
+    if j["syncing"]:
+        return [(f"sync {j['syncing'].get('n', '?')}: {who or 'merging base'}{resume}", None), (since, "dim")]
+    if stage == "review":
+        done, total, glyphs, waiting = reviews_status(j)
+        if not total:
+            return [("choosing reviewers", None), (since, "dim")]
+        line = [(f"reviews {done}/{total} ", None)] + glyphs
+        if waiting:
+            line.append((f" · waiting {', '.join(waiting)}", None))
+        return line + [(resume, "yellow"), (since, "dim")]
+    if stage == "deliver":
+        mode = j.get("delivery_mode") or (j["_repo"].cfg.get("delivery") or {}).get("mode") or "local"
+        return [(f"delivering ({mode})", None), (since, "dim")]
+    default = {"spec": "spec-writer", "build": "builder", "approve": "approver"}.get(stage, stage or "?")
+    opus = stage == "approve" and (j.get("precheck") not in (None, "CLEAN") or j["round"] > 1)
+    return [(f"{who or default}{' (opus)' if opus else ''}", None), (resume, "yellow"), (since, "dim")]
+
+
+def next_command(j):
+    """What the user would type next for this job, or None."""
+    jid, sec = j["id"], section_of(j)
+    if sec == "needs":
+        return f'/factory rework {jid} "<note>"' if j.get("pr_url") else f"/factory approve {jid}"
+    if sec == "running" or sec == "queued":
+        return f"/factory resume {jid}"
+    if sec == "prs":
+        m, _ = merge_state(j, j["_repo"].ci(jid))
+        return f"/factory sync {jid}" if m.startswith("conflict") else f'/factory rework {jid} "<review comments>"'
+    if j.get("stage") == "pushed":
+        return f"/factory deliver {jid} pr"
+    return None
+
+
+# ---------- cards ----------
+
+def card(j, width, compact, show_repo, no_ci, slots, selected=False):
+    """Lines (segment lists) for one job."""
+    num, _, slug = j["id"].partition("-")
+    sec = section_of(j)
+    mark = {"needs": ("!", "red"), "running": ("▶", "cyan"), "prs": ("◆", "green"), "queued": ("·", "dim"),
+            "done": ("✓", "dim"), "other": ("?", "yellow")}[sec]
+    repo = (f"{j['_repo'].name}/", "dim") if show_repo else ("", None)
+    budget = f" r{j['round']}/{j['round_budget'] or 3}" if j["round"] and sec != "done" else ""
+    stage = "sync" if j["syncing"] else j.get("stage") or "?"
+    age = ago(pr_since(j) if sec == "prs" else stage_since(j) if sec != "done" else j.get("updated"))
+    meta = f"  {j.get('mode') or '-'} · {stage}{budget} · {age}"
+    head_room = max(8, width - 6 - len(num) - len(repo[0]) - len(meta))
+    head = [(" ", None), mark, (" ", None), repo, (num + " ", "bold"), (fit(slug, head_room), "bold" if sec != "done" else "dim"),
+            (meta, "dim")]
+    if sec == "prs":
+        ci = None if no_ci else j["_repo"].ci(j["id"])
+        ctext, ccol = ci_summary(ci) if not no_ci else ("", None)
+        mtext, mcol = merge_state(j, ci)
+        info = [(pr_ref(j.get("pr_url")) + "  ", None)] + ([(ctext, ccol)] if ctext else []) \
+            + ([("  ·  " if ctext else "", "dim"), (mtext, mcol)] if mtext else [])
+    elif sec == "running":
+        info = now_line(j)
+    elif sec == "needs":
+        info = [(j.get("reason") or "see the job's files", "red")]
+    elif sec == "queued":
+        info = [((f"back to {j['resume_stage']} after a rework; " if j.get("resume_stage") else "") + "waits for a slot", "dim")]
+    elif sec == "done":
+        info = [(pr_ref(j.get("pr_url")) if j.get("pr_url") else j.get("stage") or "", "dim")]
+    else:
+        info = [(f"stage {j.get('stage')!r} is not one the board knows", "yellow")]
+    if compact:
+        line = head + [("   ", None)] + info
+        return [line]
+    if width < 60:
+        # Narrow (a column of the wide board): name on its own line, the text wrapped, meta last
+        import textwrap
+        name = [(" ", None), mark, (" ", None), repo, (num + " ", "bold"),
+                (fit(slug, max(8, width - 4 - len(num) - len(repo[0]))), "bold" if sec != "done" else "dim")]
+        colour = next((c for t, c in info if c and t.strip()), None)
+        body = textwrap.wrap(text_of(info).strip(), width - 4) or [""]
+        lines = [name] + [[("   ", None), (t, colour)] for t in body[:3]]
+        if len(body) > 3:
+            lines[-1][-1] = (fit(body[2], width - 5) + "…", colour)
+        cmd = next_command(j) if sec == "needs" else None
+        if cmd:
+            lines.append([("   → ", "dim"), (fit(cmd, width - 6), None)])
+        lines.append([("   " + f"{j.get('mode') or '-'}{budget} · {age}", "dim")])  # the column says the stage
+        return lines
+    lines = [head, [("     ", None)] + info]
+    hv = heavy_for(j, slots) if sec == "running" else None
+    if hv:
+        lines.append([("     ⚙ ", "yellow"), (fit(str(hv.get("cmd") or "?"), 60), None),
+                      (f" · {hv.get('weight', '?')} cores · {ago(datetime.fromtimestamp(hv.get('since', time.time()), timezone.utc))}", "dim")])
+    elif sec == "needs":
+        cmd = next_command(j)
+        if cmd:
+            lines.append([("     → ", "dim"), (cmd, None)])
+    if selected:
+        lines = [[(t, c) for t, c in ln] for ln in lines]
     return lines
 
 
-_refresh = None
-
-def maybe_refresh_ci(no_ci, wait=False):
-    """Refresh stale CI caches. In the live loop it runs in the background (one at a time), so
-    a slow forge never stalls the board; --once and the detail view wait for it."""
-    global _refresh
-    if no_ci:
-        return
-    ci = os.path.join(HERE, "ci")
-    if not os.path.exists(ci):
-        return
-    if _refresh is not None and _refresh.poll() is None:
-        return
-    try:
-        _refresh = subprocess.Popen([ci, "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    cwd=os.path.dirname(HERE))
-        if wait:
-            _refresh.wait(timeout=60)
-    except Exception:
-        pass
-
-def render(jobs, no_ci=False):
-    if not jobs:
-        return "factory board: no jobs yet"
-    sym = {"PASS": "✓", "CHANGES": "✗", None: "·"}
-    lines = [header(jobs), f"{'JOB':<32} {'MODE':<5} {'STAGE':<12} {'RND':>3} {'PORT':>5}  {'REVIEWS':<38} UPDATED"]
-    for j in jobs:
-      try:
-        revs = j.get("reviews") or {}
-        r = " ".join(f"{k}{sym.get(v, '?')}" for k, v in revs.items()) or "-"
-        lines.append(paint(f"{str(j['id'])[:32]:<32} {str(j.get('mode', '-')):<5} "
-                           f"{str(j.get('stage', '-')):<12} "
-                           f"{j.get('round', '-')!s:>3} {j.get('port', '-')!s:>5}  "
-                           f"{r:<38} {age(j['updated']) if j.get('updated') else '-'}",
-                           j.get("stage")))
-        if not no_ci and j.get("stage") == "pr-open":
-            sub = ci_one_line(j["id"])
-            if sub:
-                lines.append(sub)
-      except Exception as e:  # never let one odd job.json take the board down
-        lines.append(f"{str(j.get('id'))[:32]:<32} (unreadable job.json: {type(e).__name__})")
-    others = others_line() if not no_ci else None
-    if others:
-        lines += ["", others]
-    return "\n".join(lines)
+def header(repos, width):
+    cpu = cpu_percent()
+    budget, slots = heavy_slots()
+    used = sum(int(s.get("weight") or 1) for s in slots)
+    jobs = [j for r in repos for j in r.jobs]
+    active = sum(1 for j in jobs if section_of(j) == "running")
+    prs = sum(1 for j in jobs if section_of(j) == "prs")
+    if len(repos) == 1:
+        r = repos[0]
+        cap, pr_cap = r.limit("active_jobs", 3), r.limit("open_prs", 5)
+        left = f"factory · {r.name}"
+        counts = f"active {active}/{cap} · PRs {prs}" + (f"/{pr_cap}" if pr_cap else "")
+    else:
+        left = f"factory · {len(repos)} repos"
+        counts = f"active {active} · PRs {prs}"
+    right = " · ".join(x for x in (f"CPU {cpu:.0f}%" if cpu is not None else "",
+                                   f"heavy {used}/{budget} cores" if budget else "", counts) if x)
+    return [(left, "bold"), (" " * max(2, width - len(left) - len(right)), None), (right, None)], slots
 
 
-def others_line():
-    """One footer line with recent non-factory pipelines (repo-wide CI)."""
-    p = os.path.join(HERE, "cache", "ci-others.json")
-    try:
-        with open(p) as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+def grouped(repos, show_done, query=""):
+    """[(section key, title, colour, [jobs])] in board order; DONE only when shown."""
+    jobs = [j for r in repos for j in r.jobs]
+    if query:
+        q = query.lower()
+        jobs = [j for j in jobs if q in " ".join(str(j.get(k) or "") for k in ("id", "feature", "reason", "stage", "pr_url")).lower()
+                or q in j["_repo"].name.lower()]
+    out = []
+    for key, title, color in SECTIONS:
+        js = [j for j in jobs if section_of(j) == key]
+        if key == "prs":
+            js.sort(key=lambda j: pr_since(j) or "")
+        if key == "done":
+            js.sort(key=lambda j: j.get("updated") or "", reverse=True)
+        out.append((key, title, color, js))
+    return out
+
+
+def done_line(repos):
+    done = [j for r in repos for j in r.jobs if section_of(j) == "done"]
+    if not done:
         return None
-    pipes = data.get("pipelines") or []
-    if not pipes:
-        return None
-    cells = []
-    for pl in pipes[:5]:
-        sym = CI_SYM.get(pl.get("status"), "?")
-        cells.append(ci_paint(f"{pl.get('branch', '?')[:24]}{sym}", pl.get("status")))
-    return "other CI: " + "  ".join(cells)
+    now = datetime.now(timezone.utc)
+    week = sum(1 for j in done if (t := parse_time(j.get("updated"))) and (now - t).days < 7)
+    counts = " · ".join(f"{n} {s}" for s in DONE if (n := sum(1 for j in done if j.get("stage") == s)))
+    return f"DONE  {counts}" + (f" · {week} this week" if week else "")
+
+
+def others_line(repos):
+    cells, seen = [], set()
+    for r in repos:
+        for p in r.others():
+            b = str(p.get("branch") or "?")
+            key = (r.name, b)
+            if key in seen:
+                continue
+            seen.add(key)
+            st = str(p.get("status") or "unknown")
+            label = (f"{r.name}:" if len(repos) > 1 else "") + fit(b, 28)
+            cells.append((f"{label} {({'success': '✓', 'failed': '✗'}).get(st, '●')}  ",
+                          {"success": "green", "failed": "red"}.get(st, "yellow")))
+    return [("other CI  ", "dim")] + cells[:4] if cells else None
+
+
+def board_lines(repos, width, show_done=False, compact=False, no_ci=False, query=""):
+    """The whole board as lines, plus the job each line belongs to (for selection)."""
+    head, slots = header(repos, width)
+    lines, owners = [head], [None]
+    groups = grouped(repos, show_done, query)
+    shown = 0
+    for key, title, color, js in groups:
+        if not js or (key == "done" and not show_done):
+            continue
+        lines.append([(f"{title} ({len(js)})", color)])
+        owners.append(None)
+        for j in js:
+            for ln in card(j, width, compact, len(repos) > 1, no_ci, slots):
+                lines.append(ln)
+                owners.append(j)
+            shown += 1
+    d = done_line(repos)
+    if d and not show_done:
+        lines.append([(d + "   (a / --all lists them)", "dim")])
+        owners.append(None)
+    if not any(r.jobs for r in repos):
+        lines.append([("no jobs yet: /factory <feature>", "dim")])
+        owners.append(None)
+    elif not shown and not query:
+        lines.append([("nothing running", "dim")])
+        owners.append(None)
+    elif query and not shown:
+        lines.append([(f"no job matches {query!r}", "yellow")])
+        owners.append(None)
+    if not no_ci:
+        o = others_line(repos)
+        if o:
+            lines.append(o)
+            owners.append(None)
+    return lines, owners
+
+
+# ---------- one job ----------
+
+def detail_lines(j, width, no_ci):
+    jd = j["_dir"]
+    out = [[(j["id"], "bold"), (f" · {j['_repo'].name} · {j.get('mode') or '-'} · {j.get('stage') or '-'}"
+                                + (f" · round {j['round']}/{j['round_budget'] or 3}" if j["round"] else ""), None)]]
+    if j.get("feature"):
+        out.append([("feature  ", "dim"), (fit(j["feature"], 600), None)])
+    if j.get("reason"):
+        out.append([("reason   ", "dim"), (j["reason"], "red")])
+    if section_of(j) == "running":
+        out.append([("now      ", "dim")] + now_line(j))
+    _, slots = heavy_slots()
+    hv = heavy_for(j, slots)
+    if hv:
+        out.append([("heavy    ", "dim"), (f"{hv.get('cmd')} · {hv.get('weight')} cores · "
+                                            f"{ago(datetime.fromtimestamp(hv.get('since', time.time()), timezone.utc))}", "yellow")])
+    if j.get("pr_url"):
+        ci = None if no_ci else j["_repo"].ci(j["id"])
+        ctext, ccol = ci_summary(ci) if not no_ci else ("", None)
+        mtext, mcol = merge_state(j, ci)
+        out.append([("PR       ", "dim"), (j["pr_url"] + "  ", None), (ctext, ccol),
+                    ((("  ·  " if ctext else "") + mtext) if mtext else "", mcol)])
+    cmd = next_command(j)
+    if cmd:
+        out.append([("next     ", "dim"), (cmd, None)])
+
+    hist = j["history"]
+    if hist:
+        out += [[], [("timeline", "bold")]]
+        for i, h in enumerate(hist):
+            t = parse_time(h.get("at"))
+            nxt = parse_time(hist[i + 1].get("at")) if i + 1 < len(hist) else datetime.now(timezone.utc)
+            dur = span((nxt - t).total_seconds()) if t and nxt else "-"
+            when = t.astimezone().strftime("%d %b %H:%M") if t else "-"
+            row = [(f"  {str(h.get('event') or h.get('stage', '?')):<16} {dur:>6}  {when}", None)]
+            if i == len(hist) - 1 and j.get("stage") not in DONE:
+                row.append((" ← now", "cyan"))
+            if h.get("reason"):
+                row.append((f"  {h['reason']}", "dim"))
+            out.append(row)
+
+    rounds = sorted(int(d[6:]) for d in os.listdir(jd) if re.match(r"^round-\d+$", d)) if os.path.isdir(jd) else []
+    names = []
+    for r in rounds:
+        for f in sorted(os.listdir(os.path.join(jd, f"round-{r}"))):
+            if f.startswith("review-") and f.endswith(".md") and f[7:-3] not in names:
+                names.append(f[7:-3])
+    if names:
+        out += [[], [(f"{'reviews':<17}" + "".join(f"r{r:<3}" for r in rounds), "bold")]]
+        for n in names:
+            row = [(f"  {n:<15}", None)]
+            for r in rounds:
+                fl = first_line(os.path.join(jd, f"round-{r}", f"review-{n}.md"))
+                row += [("✓", "green") if fl == "VERDICT: PASS" else ("✗", "red") if fl else ("·", "dim"), ("   ", None)]
+            out.append(row)
+
+    rels = ["spec.md", "precheck.md", "decision.md", "rework.md"]
+    rels += [f"round-{r}/{f}" for r in rounds for f in ("build.md", "decision.md")]
+    if os.path.isdir(jd):
+        rels += sorted(f"{d}/{f}" for d in os.listdir(jd) if d.startswith("sync-") and os.path.isdir(os.path.join(jd, d))
+                       for f in os.listdir(os.path.join(jd, d)))
+    files = [[(f"  {rel:<26} ", "dim"), (fl, None)] for rel in rels if (fl := first_line(os.path.join(jd, rel)))]
+    if files:
+        out += [[], [("agent files (first line)", "bold")]] + files
+
+    if j.get("pr_url") and not no_ci:
+        ci = j["_repo"].ci(j["id"])
+        checks = ci_checks(ci)
+        if checks:
+            out += [[], [("CI", "bold")]]
+            for label, sts, col in (("failed", ("failed",), "red"), ("running", ("running", "pending", "unknown"), "yellow"),
+                                    ("passed", ("success", "skipped"), "green")):
+                group = [n for n, s in checks.items() if s in sts]
+                if group:
+                    out.append([(f"  {label:<8} ", col), (f"{len(group)} checks" if label == "passed" else ", ".join(group), None)])
+            if ci.get("run_url") or ci.get("url"):
+                out.append([(f"  {ci.get('run_url') or ci['url']}", "dim")])
+    return out
+
+
+# ---------- JSON ----------
+
+def as_json(repos, no_ci):
+    out = []
+    for r in repos:
+        for j in r.jobs:
+            sec = section_of(j)
+            item = {"repo": r.name, "id": j["id"], "section": sec, "stage": j.get("stage"), "mode": j.get("mode"),
+                    "round": j["round"], "budget": j["round_budget"] or 3, "since": stage_since(j),
+                    "pr": j.get("pr_url"), "next": next_command(j)}
+            if sec == "needs":
+                item["reason"] = j.get("reason")
+            if sec == "running":
+                item["now"] = text_of(now_line(j))
+            if sec == "prs" and not no_ci:
+                ci = r.ci(j["id"])
+                item["ci"], item["merge"] = ci_summary(ci)[0], merge_state(j, ci)[0]
+            out.append(item)
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+# ---------- interactive ----------
+
+HELP = ["j/k ↓/↑  move between jobs", "h/l ←/→  change column (wide screens)",
+        "enter    open the job (beside the board when wide)", "esc      close the job", "a        finished jobs on/off",
+        "/        filter (id, feature, reason, repo); esc clears", "c        copy the job's next command",
+        "v        cards / compact", "R        this repo / all repos", "r        refresh now", "?        this help",
+        "q        quit"]
+
+
+def copy_osc52(text):
+    """Copy via the terminal (OSC 52; tmux needs set-clipboard on)."""
+    seq = f"\033]52;c;{base64.b64encode(text.encode()).decode()}\a"
+    if os.environ.get("TMUX"):
+        seq = "\033Ptmux;" + seq.replace("\033", "\033\033") + "\033\\"
+    try:
+        with open("/dev/tty", "w") as tty:
+            tty.write(seq)
+        return True
+    except OSError:
+        return False
+
+
+def tui(load, opts):
+    import curses, locale
+    locale.setlocale(locale.LC_ALL, "")
+    state = {"sel": 0, "col": 0, "detail": False, "done": opts["all"], "compact": opts["compact"], "query": "",
+             "help": False, "msg": "", "scroll": 0, "dscroll": 0, "repos": opts["repos"], "repaint": True}
+    refresher = CIRefresher()
+
+    def run(scr):
+        curses.curs_set(0)
+        scr.timeout(2000)
+        pairs = {}
+        if curses.has_colors() and not os.environ.get("NO_COLOR"):
+            curses.start_color()
+            curses.use_default_colors()
+            for i, (name, fg) in enumerate((("red", curses.COLOR_RED), ("green", curses.COLOR_GREEN),
+                                            ("yellow", curses.COLOR_YELLOW), ("cyan", curses.COLOR_CYAN)), 1):
+                curses.init_pair(i, fg, -1)
+                pairs[name] = curses.color_pair(i)
+        attr = {"bold": curses.A_BOLD, "dim": curses.A_DIM, "red": pairs.get("red", 0) | curses.A_BOLD,
+                "green": pairs.get("green", 0), "yellow": pairs.get("yellow", 0), "cyan": pairs.get("cyan", 0)}
+
+        def put(y, x, line, width, extra=0):
+            for t, c in line:
+                if x >= width:
+                    break
+                t = t[:max(0, width - x)]
+                try:
+                    scr.addstr(y, x, t, attr.get(c, 0) | extra)
+                except curses.error:
+                    pass
+                x += len(t)
+
+        while True:
+            repos = load(state["repos"])
+            refresher.tick(repos)
+            H, W = scr.getmaxyx()
+            if state["repaint"]:  # after a key the layout may change: repaint all, not a diff
+                scr.clear()
+                state["repaint"] = False
+            else:
+                scr.erase()
+            wide = W >= 140
+            side = state["detail"] and W >= 120
+            board_w = int(W * 0.55) if side else W
+            groups = [g for g in grouped(repos, state["done"], state["query"]) if g[3] and (g[0] != "done" or state["done"])]
+            jobs = [j for g in groups for j in g[3]]
+            state["sel"] = max(0, min(state["sel"], len(jobs) - 1)) if jobs else 0
+            cur = jobs[state["sel"]] if jobs else None
+            head, slots = header(repos, W)
+            put(0, 0, head, W)
+            body_h = H - 2
+
+            if state["help"]:
+                for i, h in enumerate(["keys"] + HELP):
+                    put(2 + i, 2, [(h, "bold" if i == 0 else None)], W)
+            elif state["detail"] and cur and not side:
+                dl = detail_lines(cur, W, opts["no_ci"])
+                state["dscroll"] = max(0, min(state["dscroll"], len(dl) - body_h))
+                for i, ln in enumerate(dl[state["dscroll"]:state["dscroll"] + body_h]):
+                    put(1 + i, 1, ln, W - 1)
+            elif wide and not side and not state["compact"]:
+                cols = [g for g in groups if g[0] != "done"] or groups
+                cw = max(30, (W - 1) // max(1, len(cols)))
+                for ci, (key, title, color, js) in enumerate(cols):
+                    x = ci * cw
+                    put(1, x + 1, [(f"{title} ({len(js)})", color)], x + cw - 1)
+                    y = 2
+                    for j in js:
+                        lines = card(j, cw - 2, False, len(repos) > 1, opts["no_ci"], slots)
+                        if y + len(lines) > H - 1:
+                            put(y, x + 1, [(f"… {len(js)} in all", "dim")], x + cw - 1)
+                            break
+                        sel = j is cur
+                        for ln in lines:
+                            put(y, x + 1, ln, x + cw - 1, curses.A_REVERSE if sel else 0)
+                            y += 1
+                        y += 1
+                d = done_line(repos)
+                if d and not state["done"]:
+                    put(H - 2, 1, [(d + "   (a lists them)", "dim")], W)
+            else:
+                lines, owners = board_lines(repos, board_w, state["done"], state["compact"], opts["no_ci"], state["query"])
+                lines, owners = lines[1:], owners[1:]  # header drawn already
+                first = next((i for i, o in enumerate(owners) if o is cur), 0)
+                last = max((i for i, o in enumerate(owners) if o is cur), default=0)
+                if first < state["scroll"]:
+                    state["scroll"] = max(0, first - 1)
+                elif last >= state["scroll"] + body_h:
+                    state["scroll"] = last - body_h + 1
+                for i in range(body_h):
+                    k = state["scroll"] + i
+                    if k >= len(lines):
+                        break
+                    put(1 + i, 0, lines[k], board_w, curses.A_REVERSE if cur is not None and owners[k] is cur else 0)
+                if side and cur:
+                    for i, ln in enumerate(detail_lines(cur, W - board_w - 2, opts["no_ci"])[state["dscroll"]:][:body_h]):
+                        put(1 + i, board_w + 2, ln, W)
+                    for y in range(1, H - 1):
+                        try:
+                            scr.addstr(y, board_w, "│", curses.A_DIM)
+                        except curses.error:
+                            pass
+
+            status = state["msg"] or (f"filter: {state['query']}   " if state["query"] else "") + \
+                "j/k move · enter open · a done · / filter · c copy · v density · R repos · ? help · q quit"
+            put(H - 1, 0, [(status, "dim")], W)
+            scr.refresh()
+            state["msg"] = ""
+
+            key = scr.getch()
+            if key == -1:
+                continue
+            state["repaint"] = True
+            ch = chr(key) if 0 <= key < 256 else ""
+            if ch == "q":
+                return
+            if state["help"]:
+                state["help"] = False
+                continue
+            if ch == "?":
+                state["help"] = True
+            elif ch in ("j",) or key == curses.KEY_DOWN:
+                if state["detail"] and not side:
+                    state["dscroll"] += 1
+                else:
+                    state["sel"] += 1
+                    state["dscroll"] = 0
+            elif ch in ("k",) or key == curses.KEY_UP:
+                if state["detail"] and not side:
+                    state["dscroll"] = max(0, state["dscroll"] - 1)
+                else:
+                    state["sel"] = max(0, state["sel"] - 1)
+                    state["dscroll"] = 0
+            elif key in (curses.KEY_NPAGE,):
+                state["dscroll"] += body_h // 2
+            elif key in (curses.KEY_PPAGE,):
+                state["dscroll"] = max(0, state["dscroll"] - body_h // 2)
+            elif ch in ("l",) or key == curses.KEY_RIGHT:
+                if wide and not state["detail"] and not state["compact"] and cur:
+                    cols = [g for g in groups if g[0] != "done"] or groups
+                    idx = next((i for i, g in enumerate(cols) if cur in g[3]), 0)
+                    if idx + 1 < len(cols) and cols[idx + 1][3]:
+                        state["sel"] = jobs.index(cols[idx + 1][3][0])
+                else:
+                    state["detail"], state["dscroll"] = True, 0
+            elif ch in ("h",) or key == curses.KEY_LEFT:
+                if state["detail"]:
+                    state["detail"] = False
+                elif wide and not state["compact"] and cur:
+                    cols = [g for g in groups if g[0] != "done"] or groups
+                    idx = next((i for i, g in enumerate(cols) if cur in g[3]), 0)
+                    if idx > 0 and cols[idx - 1][3]:
+                        state["sel"] = jobs.index(cols[idx - 1][3][0])
+            elif key in (10, 13, curses.KEY_ENTER):
+                state["detail"], state["dscroll"] = not state["detail"], 0
+            elif key == 27:
+                if state["detail"]:
+                    state["detail"] = False
+                else:
+                    state["query"] = ""
+            elif ch == "a":
+                state["done"] = not state["done"]
+            elif ch == "v":
+                state["compact"] = not state["compact"]
+            elif ch == "R":
+                if registered_repos():
+                    state["repos"] = not state["repos"]
+                    state["sel"] = 0
+                else:
+                    state["msg"] = "no other repos registered (install registers them)"
+            elif ch == "r":
+                refresher.tick(repos, wait=False)
+                state["msg"] = "refreshing CI…"
+            elif ch == "c":
+                cmd = next_command(cur) if cur else None
+                if cmd:
+                    ok = copy_osc52(cmd)
+                    state["msg"] = ("copied: " if ok else "copy this: ") + cmd
+                else:
+                    state["msg"] = "nothing to copy for this job"
+            elif ch == "/":
+                curses.curs_set(1)
+                scr.timeout(-1)
+                q = state["query"]
+                while True:
+                    put(H - 1, 0, [(f"/{q}" + " " * W, None)], W)
+                    scr.move(H - 1, min(W - 1, 1 + len(q)))
+                    k2 = scr.get_wch()
+                    if k2 in ("\n", "\r", curses.KEY_ENTER):
+                        break
+                    if k2 == "\x1b":
+                        q = ""
+                        break
+                    if k2 in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                        q = q[:-1]
+                    elif isinstance(k2, str) and k2.isprintable():
+                        q += k2
+                state["query"], state["sel"] = q, 0
+                curses.curs_set(0)
+                scr.timeout(2000)
+
+    curses.wrapper(run)
+
+
+# ---------- main ----------
 
 def main():
-    jobs_dir = os.path.join(HERE, "jobs")
-    no_ci = "--no-ci" in sys.argv
-    if "--tmux" in sys.argv:
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print(__doc__)
+        return 0
+    all_repos = "--repos" in args or os.path.basename(sys.argv[0]) == "factory-watch"
+    opts = {"all": "--all" in args, "compact": "--compact" in args, "no_ci": "--no-ci" in args, "repos": all_repos}
+    local = HERE if os.path.isdir(os.path.join(HERE, "jobs")) else None
+
+    def load(repos_mode):
+        fds = registered_repos() if repos_mode or not local else [local]
+        if repos_mode and local and local not in fds:
+            fds.insert(0, local)
+        return [Repo(fd) for fd in fds]
+
+    width = shutil.get_terminal_size((120, 40)).columns
+    if "--tmux" in args:
         if not os.environ.get("TMUX"):
             sys.exit("not inside tmux; just run .factory/watch")
-        cmd = shlex.join([os.path.abspath(__file__)] + (["--no-ci"] if no_ci else []))
-        subprocess.run(["tmux", "split-window", "-v", "-l", "12", "-c", os.path.dirname(HERE), cmd])
-        return
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    if args:
-        maybe_refresh_ci(no_ci, wait=True)
-        print(detail(jobs_dir, args[0]))
-        return
-    if "--once" in sys.argv:
-        maybe_refresh_ci(no_ci, wait=True)
-        print(render(load(jobs_dir), no_ci))
-        return
+        cmd = shlex.join([os.path.realpath(__file__)] + [a for a in args if a in ("--no-ci", "--all", "--repos", "--compact")])
+        subprocess.run(["tmux", "split-window", "-v", "-l", "16", "-c", os.path.dirname(HERE), cmd])
+        return 0
+    repos = load(opts["repos"])
+    if not repos:
+        print("no factory repos found: run this from <repo>/.factory/watch, or install the factory first")
+        return 1
+    targets = [a for a in args if not a.startswith("-")]
+    interactive = sys.stdout.isatty() and sys.stdin.isatty() and "--once" not in args and "--json" not in args
+    if not interactive and not opts["no_ci"]:
+        CIRefresher().tick(repos, wait=True)
+        repos = load(opts["repos"])
+    if targets:
+        j = None
+        for r in repos:
+            j = j or next((x for x in r.jobs if x["id"] == targets[0]), None)
+        for r in repos:
+            j = j or next((x for x in r.jobs if x["id"].startswith(targets[0])), None)
+        if not j:
+            print(f"no job {targets[0]!r} (see .factory/watch --all)")
+            return 1
+        print("\n".join(ansi(l, width) for l in detail_lines(j, width, opts["no_ci"])))
+        return 0
+    if "--json" in args:
+        print(as_json(repos, opts["no_ci"]))
+        return 0
+    if not interactive:
+        lines, _ = board_lines(repos, width, opts["all"], opts["compact"], opts["no_ci"])
+        print("\n".join(ansi(l, width) for l in lines))
+        return 0
     try:
-        while True:
-            maybe_refresh_ci(no_ci)
-            print("\033[2J\033[H" + render(load(jobs_dir), no_ci) + "\n\n(ctrl-c to stop)")
-            time.sleep(2)
+        tui(load, opts)
     except KeyboardInterrupt:
         pass
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

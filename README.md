@@ -23,8 +23,27 @@ Then, in a Claude Code session in that repo (sonnet is enough for the orchestrat
 /factory … --local <feature>    this job merges locally whatever delivery.mode says
 /factory issue <nr> | next      from an issue (trusted authors only) or .factory/backlog.md
 /factory approve|rework|resume|deliver <id>
-/factory status                 or live: .factory/watch [--tmux]
+/factory status                 or live: .factory/watch [--tmux]   (factory-watch: all repos)
 ```
+
+## The board
+
+`.factory/watch` is an interactive board in the terminal (plain text in a pipe or with
+`--once`, JSON with `--json`). Jobs are grouped by what you need to do: **NEEDS YOU** (the
+reason and the command to type), **RUNNING** (which agent runs, review progress, the `heavy`
+command in its worktree, for how long), **QUEUED**, **OPEN PRs** (age since opened, CI with
+only the failing checks named, mergeability) and a one-line **DONE** count. On terminals
+of 140+ columns the sections are columns; narrower, a list of cards.
+
+Keys: `j`/`k` move, `h`/`l` change column, `enter` opens a job (beside the board when
+wide: timeline with durations, reviewer × round table, the first line of every agent file,
+CI by status, the next command), `a` finished jobs, `/` filter, `c` copies the selected job's
+next command (OSC 52, also through tmux), `v` cards or one line per job, `R` this repo or
+all repos, `?` help, `q` quit. It only reads; `.factory/job` is the only writer.
+
+`install` keeps a list of the repos it installed into (`~/.local/state/factory/repos`), and
+`install --link` also puts `factory-watch` on PATH: one board for all of them, with the repo
+in front of each job.
 
 `factory-init --remove` takes it out again. It refuses while a job is not at rest
 (`needs-human` counts as unfinished: approve, rework or park it first), stops the servers
@@ -72,7 +91,7 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 Defaults need no configuration; override with `limits` in `config.json`
 (`active_jobs`, `open_prs`, `heavy_slots`, `cpu_budget`, `cpu_max`, `load_max`) or the env
 vars `FACTORY_HEAVY_SLOTS`, `FACTORY_CPU_BUDGET`, `FACTORY_CPU_MAX`, `FACTORY_LOAD_MAX`,
-`FACTORY_LOCK_DIR`. `.factory/watch` shows the load and active jobs
+`FACTORY_LOCK_DIR`. `.factory/watch` shows CPU, the `heavy` cores in use and active jobs
 against the cap. The audit also has bounds: at most 3 mutation checks (only for criteria that add
 behaviour), a suspect file at most twice, base comparisons only for the claim concerned, about 30 tool calls in total.
 
@@ -181,7 +200,8 @@ about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings b
 and tag stable versions (`git tag v0.x.y`), because `install` records
 `git describe` in `.factory/VERSION`.
 
-Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I tests/prompts_test.py`
+Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I tests/prompts_test.py`,
+`python3 -I tests/watch_test.py` (the board, two repos, and every key through a pseudo-terminal)
 (prompt copies and the contracts between prompts and scripts stay in step).
 
 `job` is tested by `bash tests/job_test.sh` (98 checks; a throwaway repo with a bare remote, the agents played by writing their files): the full

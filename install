@@ -33,7 +33,9 @@ for a in "$@"; do
     --link)
       mkdir -p "$HOME/.local/bin"
       ln -sfn "$TEMPLATE/install" "$HOME/.local/bin/factory-init"
+      ln -sfn "$TEMPLATE/template/.factory/watch" "$HOME/.local/bin/factory-watch"
       echo "linked $HOME/.local/bin/factory-init -> $TEMPLATE/install"
+      echo "linked $HOME/.local/bin/factory-watch -> one board for every repo the factory is installed in"
       case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "note: ~/.local/bin is not on PATH" ;; esac
       exit 0 ;;
     -h|--help) sed -n '2,17p' "$TEMPLATE/install" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -83,6 +85,16 @@ if cfg:
 elif os.path.exists(path):
     os.remove(path)
 PY
+}
+
+# The list of repos the factory is installed in, for `factory-watch` (one board for all)
+REGISTRY="${FACTORY_REPOS_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/factory/repos}"
+register() {    # register <repo> 1|0
+  mkdir -p "$(dirname "$REGISTRY")"
+  touch "$REGISTRY"
+  grep -vxF -- "$1" "$REGISTRY" > "$REGISTRY.tmp" || true
+  if [ "$2" = 1 ]; then echo "$1" >> "$REGISTRY.tmp"; fi
+  mv "$REGISTRY.tmp" "$REGISTRY"
 }
 
 strip_block() {
@@ -142,6 +154,7 @@ Finish them (/factory approve|rework, or .factory/job fail <id> to park one) or 
       git -C "$repo" check-ignore -q .factory/x || echo "warning: .factory/ is not ignored by git; do not commit it"
     fi
   fi
+  register "$repo" 0
   echo "factory removed from $repo"
   if [ -d "$repo/.factory" ]; then
     echo "kept (git-excluded): $(cd "$repo/.factory" && ls -A | tr '\n' ' ')— a re-install continues with it; --remove --purge deletes it"
@@ -196,6 +209,7 @@ leak="$(git -C "$repo" status --porcelain --untracked-files=all -- .factory .cla
 [ -z "$leak" ] || die "git still sees factory files:
 $leak"
 
+register "$repo" 1
 echo "factory $(cat "$repo/.factory/VERSION") installed in $repo (local-only, git-excluded)"
 if [ -f "$repo/.factory/config.json" ]; then
   echo "config kept; run /factory setup again only to re-tailor"

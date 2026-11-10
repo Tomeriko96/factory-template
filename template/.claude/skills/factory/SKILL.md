@@ -288,11 +288,9 @@ For jobs at `pr-open`, first run
 statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
 failing, Z waiting on CI". Run `job next` for every `queued` job (it starts when there is
 room). Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
-has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board
-(it shows one CI/CD line per `pr-open` job with stages/jobs from `.factory/ci`,
-refreshed live; `.factory/watch <id>` shows the full stage/job table;
-`.factory/watch --no-ci` hides CI; `.factory/ci --others` lists recent pipelines
-outside `factory/*` branches).
+has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board the
+user can keep open (interactive: what needs them, what runs, open PRs with CI; enter opens a
+job; `factory-watch` shows every repo). Do not run it yourself: `job list` is your view.
 
 ### `/factory setup`
 Follow `setup.md` in this skill's directory.

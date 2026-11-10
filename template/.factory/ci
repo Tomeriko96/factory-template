@@ -105,6 +105,21 @@ def gh_pr_number(pr_url):
     return m.group(1) if m else None
 
 
+def gh_repo(pr_url):
+    """OWNER/REPO from a PR URL, so gh asks the repo the PR is in, not its default repo."""
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/", pr_url or "")
+    return m.group(1) if m else None
+
+
+def gh_check(c):
+    """Status of one statusCheckRollup entry: a CheckRun (status + conclusion) or a
+    StatusContext (state), e.g. SonarCloud."""
+    if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
+        return {"SUCCESS": "success", "FAILURE": "failed", "ERROR": "failed",
+                "PENDING": "pending", "EXPECTED": "pending"}.get((c.get("state") or "").upper(), "unknown")
+    return normalize_gh_run(c.get("status"), c.get("conclusion"))
+
+
 def fetch_github(job, deep=True):
     """Returns dict {pipeline, merge, jobs:[{name,stage,status,url}], error}."""
     pr_url = job.get("pr_url") or ""
@@ -112,40 +127,29 @@ def fetch_github(job, deep=True):
     branch = job.get("branch") or ""
     if not num:
         return {"error": "no pr_url with /pull/<n> in job.json"}
-    pr, err = run(["gh", "pr", "view", num, "--json",
+    repo = gh_repo(pr_url)
+    pr, err = run(["gh", "pr", "view", pr_url if repo else num, "--json",
                    "number,state,mergeStateStatus,headRefName,statusCheckRollup"])
     if err:
         return {"error": err}
     rollup = pr.get("statusCheckRollup") or []
     jobs = []
     for c in rollup:
-        # status: QUEUED/IN_PROGRESS/COMPLETED ; conclusion: SUCCESS/FAILURE/...
-        st = (c.get("status") or "").upper()
-        concl = (c.get("conclusion") or "").upper()
-        if st == "COMPLETED":
-            norm = {"SUCCESS": "success", "FAILURE": "failed",
-                    "CANCELLED": "canceled", "SKIPPED": "skipped"}.get(concl, "unknown")
-        elif st == "IN_PROGRESS":
-            norm = "running"
-        else:
-            norm = "pending"
-        jobs.append({"name": c.get("name", "?"), "stage": "",
-                     "status": norm, "url": c.get("detailsUrl") or ""})
-    pipeline = "none" if not rollup else (
-        "failed" if any(j["status"] == "failed" for j in jobs)
-        else "running" if any(j["status"] in ("running", "pending") for j in jobs)
-        else "success")
+        jobs.append({"name": c.get("name") or c.get("context") or "?", "stage": "",
+                     "status": gh_check(c), "url": c.get("detailsUrl") or c.get("targetUrl") or ""})
+    pipeline = overall(jobs) if rollup else "none"
     merge = str(pr.get("mergeStateStatus") or "UNKNOWN").lower()
     out = {"forge": "github", "pipeline": pipeline, "merge": merge,
            "pr_state": pr.get("state"), "jobs": jobs, "url": pr_url,
            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     # Deep: per-step jobs of the latest run on this branch (gh run view --json jobs)
     if deep and branch:
-        runs, rerr = run(["gh", "run", "list", "--branch", branch, "--limit", "1",
+        rflag = ["-R", repo] if repo else []
+        runs, rerr = run(["gh", "run", "list", *rflag, "--branch", branch, "--limit", "1",
                           "--json", "databaseId,status,conclusion,url,createdAt"])
         if not rerr and runs:
             rid = str(runs[0].get("databaseId"))
-            det, derr = run(["gh", "run", "view", rid, "--json", "jobs"])
+            det, derr = run(["gh", "run", "view", *rflag, rid, "--json", "jobs"])
             if not derr and isinstance(det, dict) and det.get("jobs"):
                 djobs = []
                 for jb in det["jobs"]:
@@ -153,23 +157,32 @@ def fetch_github(job, deep=True):
                     djobs.append({"name": jb.get("name", "?"), "stage": "",
                                   "status": st, "url": runs[0].get("url", "")})
                 if djobs:
-                    out["jobs"] = djobs
+                    # Add the latest run's jobs to the rollup, never replace it: other
+                    # workflows and commit statuses (Sonar) must stay visible.
+                    seen = {j["name"] for j in djobs}
+                    out["jobs"] = djobs + [j for j in jobs if j["name"] not in seen]
                     out["run_url"] = runs[0].get("url")
-                    if any(j["status"] == "failed" for j in djobs):
-                        out["pipeline"] = "failed"
-                    elif any(j["status"] == "running" for j in djobs):
-                        out["pipeline"] = "running"
+                    out["pipeline"] = overall(out["jobs"])
     return out
 
 
 def normalize_gh_run(status, conclusion):
     s, c = (status or "").upper(), (conclusion or "").upper()
-    if s == "COMPLETED":
-        return {"SUCCESS": "success", "FAILURE": "failed",
-                "CANCELLED": "canceled", "SKIPPED": "skipped"}.get(c, "unknown")
+    if s == "COMPLETED" or (c and not s):
+        return {"SUCCESS": "success", "NEUTRAL": "success", "FAILURE": "failed",
+                "TIMED_OUT": "failed", "STARTUP_FAILURE": "failed", "ACTION_REQUIRED": "failed",
+                "CANCELLED": "canceled", "SKIPPED": "skipped", "STALE": "skipped"}.get(c, "unknown")
     if s == "IN_PROGRESS":
         return "running"
     return "pending"
+
+
+def overall(jobs):
+    if any(j["status"] == "failed" for j in jobs):
+        return "failed"
+    if any(j["status"] in ("running", "pending", "unknown") for j in jobs):
+        return "running"
+    return "success"
 
 
 def fetch_github_others(limit=5):
@@ -214,14 +227,24 @@ def gitlab_project_path():
 
 
 def gitlab_project_id():
+    """Project id for the remote's path; cached (it never changes for a path)."""
     path = gitlab_project_path()
     if not path:
-        return None, "no origin remote to derive project path"
+        return None, "no remote to derive the project path from"
+    cpath = os.path.join(CACHE, "ci-gitlab-project.json")
+    known = read_cache(cpath) or {}
+    if known.get("path") == path and known.get("id"):
+        return known["id"], None
     enc = urllib.parse.quote(path, safe="")
     proj, err = run(["glab", "api", f"projects/{enc}"])
     if err:
         return None, err
     pid = proj.get("id") if isinstance(proj, dict) else None
+    if pid:
+        try:
+            write_cache(cpath, {"path": path, "id": pid})
+        except OSError:
+            pass
     return pid, None if pid else "project not found"
 
 
@@ -285,14 +308,14 @@ def fetch_gitlab_others(pid, limit=5):
 
 # ---------- main ----------
 
-def refresh_job(job, forge, ttl, force, quiet):
+def refresh_job(job, forge, ttl, force, quiet, pid=None):
     if job.get("stage") != "pr-open":
         return None
     path = cache_path(job["id"])
     if not force and cache_fresh(path, ttl):
         return read_cache(path)
     if forge == "gitlab":
-        data = fetch_gitlab(job)
+        data = fetch_gitlab(job, pid)
     elif forge == "github":
         data = fetch_github(job)
     else:
@@ -310,6 +333,11 @@ def refresh_job(job, forge, ttl, force, quiet):
             except OSError:
                 pass
             return old
+        # No earlier state: cache the error too, so it is retried after the TTL, not every tick
+        try:
+            write_cache(path, data)
+        except OSError:
+            pass
     else:
         write_cache(path, data)
     return data
@@ -338,9 +366,11 @@ def main():
             sys.exit(f"no job '{targets[0]}'")
     pr_jobs = [j for j in jobs if j.get("stage") == "pr-open"]
     pid = None
-    if forge == "gitlab" and pr_jobs:
+    force = force or "--once" in args
+    stale = [j for j in pr_jobs if force or not cache_fresh(cache_path(j["id"]), ttl)]
+    if forge == "gitlab" and stale:
         pid, _ = gitlab_project_id()
-    results = [refresh_job(j, forge, ttl, force or "--once" in args, quiet) for j in pr_jobs]
+    results = [refresh_job(j, forge, ttl, force, quiet, pid) for j in pr_jobs]
     results = [r for r in results if r]
 
     if targets and not quiet:
@@ -364,8 +394,7 @@ def main():
                 others = fetch_gitlab_others(pid) if pid else {"error": "unknown project"}
             else:
                 others = {"error": f"unknown forge '{forge}'"}
-            if not others.get("error"):
-                write_cache(others_path, others)
+            write_cache(others_path, others)  # an error too: retried after the TTL, not every tick
         if "--others" in args and not quiet:
             print(json.dumps(read_cache(others_path) or {}, indent=2))
             return

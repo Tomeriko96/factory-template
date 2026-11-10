@@ -40,7 +40,21 @@ the cores, cpu_max = 90, load_max = off).
 import ctypes, fcntl, hashlib, json, os, re, secrets, shutil, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
-CPUS = os.cpu_count() or 1
+def _cpus():
+    """Cores this container may use: the cgroup quota (podman --cpus) and the affinity mask
+    count, not the host's core count."""
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            quota, period = f.read().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, -(-int(quota) // int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, n)
+
+
+CPUS = _cpus()
 POLL = 0.5
 FOREGROUND_WAIT = 540
 BACKGROUND_WAIT = 3600
@@ -58,7 +72,13 @@ def limits():
 
     def pick(env, key, default, cast):
         v = os.environ.get(env) or cfg.get(key)
-        return cast(v) if v not in (None, "") else default
+        if v in (None, ""):
+            return default
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            say(f"ignoring {env}/limits.{key} = {v!r}: not a number; using {default}")
+            return default
     return {
         "slots": max(1, pick("FACTORY_HEAVY_SLOTS", "heavy_slots", max(2, CPUS // 2), int)),
         "budget": max(1, pick("FACTORY_CPU_BUDGET", "cpu_budget", max(1, int(CPUS * 0.75)), int)),
@@ -318,8 +338,13 @@ def cmd_status(argv):
                 pass
         h = read_json(p)
         since = int(time.time() - h.get("since", time.time()))
+        gone = ""
+        if h.get("pid") and not alive(h["pid"]):
+            who = holders(p)
+            gone = (f" · wrapper gone, held by leftover pid(s) {', '.join(map(str, who))}: stop them to free it"
+                    if who else " · wrapper gone")
         print(f"  slot {i}: weight {h.get('weight', '?')} · pid {h.get('pid', '?')} · {since}s · "
-              f"{h.get('cwd', '?')} · {h.get('cmd', '?')[:80]}")
+              f"{h.get('cwd', '?')} · {h.get('cmd', '?')[:80]}{gone}")
     cache = os.path.join(HERE, "cache")
     n = len([f for f in os.listdir(cache) if f.endswith(".json")]) if os.path.isdir(cache) else 0
     print(f"  cached passing results in this repo: {n}")
@@ -360,14 +385,83 @@ def git(*args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+# Environment that changes what a test run does. Part of the cache key, so a run with another
+# value is not answered from the cache. Extend with limits.cache_env (list of names).
+CACHE_ENV = re.compile(r"^(CI|ENV|MODE|DEBUG|NODE_ENV|APP_ENV|RAILS_ENV|FLASK_ENV|DATABASE_URL|"
+                       r"DJANGO_SETTINGS_MODULE|PYTEST_ADDOPTS|PYTHONPATH|NODE_OPTIONS|TZ|LANG|"
+                       r"VITE_.*|NEXT_PUBLIC_.*|REACT_APP_.*)$")
+
+
+def env_fingerprint():
+    """Behaviour-changing env vars and the .env* files of the current directory (gitignored,
+    so not in the tree hash)."""
+    extra = set()
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            extra = set((json.load(f).get("limits") or {}).get("cache_env") or [])
+    except (OSError, ValueError):
+        pass
+    env = sorted((k, v) for k, v in os.environ.items() if CACHE_ENV.match(k) or k in extra)
+    files = []
+    for name in sorted(os.listdir(".")):
+        if name.startswith(".env") and os.path.isfile(name):
+            with open(name, "rb") as f:
+                files.append((name, hashlib.sha256(f.read()).hexdigest()))
+    return [env, files]
+
+
 def tree_key(command):
     """Cache key for `command` on the current tree, or None when not cacheable."""
     tree = git("rev-parse", "HEAD^{tree}")
     # --untracked-files=all: a user setting status.showUntrackedFiles=no must not hide a new file
     if not tree or git("status", "--porcelain", "--untracked-files=all") != "":
         return None, None
-    h = hashlib.sha256(json.dumps([tree, os.getcwd(), command]).encode()).hexdigest()[:24]
+    h = hashlib.sha256(json.dumps([tree, os.getcwd(), command, env_fingerprint()]).encode()).hexdigest()[:24]
     return h, tree
+
+
+def stop_group(pgid):
+    """TERM, then KILL, what is left in a process group. Returns how many were there."""
+    def members():
+        out = []
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    if os.getpgid(int(d)) == pgid:
+                        out.append(int(d))
+                except OSError:
+                    pass
+        return out
+    left = members()
+    if not left:
+        return 0
+    for sig, wait in ((signal.SIGTERM, 5), (signal.SIGKILL, 2)):
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            break
+        end = time.time() + wait
+        while time.time() < end and members():
+            time.sleep(0.2)
+        if not members():
+            break
+    return len(left)
+
+
+def holders(path):
+    """PIDs that hold `path` open (the slot lock is inherited by the command's whole tree)."""
+    out = []
+    for d in os.listdir("/proc"):
+        if not d.isdigit():
+            continue
+        try:
+            for fd in os.listdir(f"/proc/{d}/fd"):
+                if os.readlink(f"/proc/{d}/fd/{fd}") == path:
+                    out.append(int(d))
+                    break
+        except OSError:
+            pass
+    return out
 
 
 def cmd_run(argv):
@@ -422,9 +516,10 @@ def cmd_run(argv):
     if not shutil.which(command[0]):
         say(f"cannot run {command[0]}: command not found")
         return 127
+    deadline = time.time() + wait_max  # one budget for both waits, not wait_max each
     if not wait_until_calm(lim, wait_max):
         say(f"CPU still above {lim['cpu_max']:.0f}% after {wait_max}s; asking for a slot anyway")
-    lock = take_slot(lim, weight, wait_max, shown)
+    lock = take_slot(lim, weight, max(0, deadline - time.time()), shown)
     if lock is None:
         say(f"no room within {wait_max}s; run it with --background and `heavy wait <ticket>`")
         return 75
@@ -477,6 +572,11 @@ def cmd_run(argv):
     rc = proc.wait()
     if rc < 0:
         rc = 128 - rc
+    # Processes the command left running in its group (a server started with `&`, a daemon
+    # that did not detach) would keep the slot: the lock is inherited by the whole tree.
+    left = stop_group(proc.pid)
+    if left:
+        say(f"stopped {left} process(es) the command left running")
     if key and rc == 0:
         rec = {"cmd": command, "tree": tree, "cwd": os.getcwd(), "exit": 0,
                "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "seconds": int(time.time() - started),

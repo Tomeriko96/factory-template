@@ -57,11 +57,11 @@ are its blocking findings resolved?
    It refuses a port that is already in use and waits until the app answers. Never
    build, install or write in the worktree.
 2. Static state of the touched pages:
-   `<Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> …`
+   `<Repo>/.factory/heavy -- <Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> …`
 3. Flows from spec.md (clicking, filling forms, invalid input): write a short
    Playwright script to `<Job>/round-N/shots/ux/flow.py` (headless Chromium,
    `page.screenshot` per step into the same folder) and run it with
-   `uv run --quiet --no-project --python 3 --with playwright==1.63.0 python -I <Job>/round-N/shots/ux/flow.py`
+   `<Repo>/.factory/heavy -- uv run --quiet --no-project --python 3 --with playwright==1.63.0 python -I <Job>/round-N/shots/ux/flow.py`
    (`--no-project` keeps uv out of the worktree's project; `--python 3` ignores its pin).
    Also test the keyboard: reach the main action with only `Tab` + `Enter`.
 4. **Look at the screenshots** with Read and read `shots/ux/shoot.json`. Stop the app:

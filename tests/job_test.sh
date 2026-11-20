@@ -764,6 +764,21 @@ FACTORY_LOCK_DIR="$T/hlocks" FACTORY_CPU_MAX=100 timeout 20 "$H" --priority low 
 missing "$T/hlocks/waiter-999999999.json"
 FACTORY_LOCK_DIR="$T/hlocks" "$H" --priority urgent -- true 2>/dev/null && bad "--priority urgent accepted" || ok
 
+# ---------- heavy: FIFO within a priority, so a big waiter is not starved by newer small ones ----------
+scenario=heavy-fifo
+(
+  export FACTORY_LOCK_DIR="$T/hfifo" FACTORY_HEAVY_SLOTS=3 FACTORY_CPU_BUDGET=3 FACTORY_CPU_MAX=100
+  mkdir -p "$T/hfifo"; : > "$T/forder"
+  "$H" --weight 2 -- sleep 3 2>/dev/null &               # holds 2 of 3 cores
+  for _ in $(seq 50); do "$H" status | grep -q "slot .*weight 2" && break; sleep 0.1; done
+  "$H" --weight 3 -- bash -c "echo big >> '$T/forder'" 2>/dev/null &      # older, does not fit yet
+  for _ in $(seq 50); do "$H" status | grep -q "waiting: normal" && break; sleep 0.1; done
+  sleep 0.3
+  "$H" --weight 1 -- bash -c "echo small >> '$T/forder'" 2>/dev/null &   # newer, would fit now
+  wait
+)
+[ "$(tr '\n' ' ' < "$T/forder")" = "big small " ] && ok || bad "order: $(tr '\n' ' ' < "$T/forder"), want the older weight-3 waiter first"
+
 # ---------- routing: effort per spawn and the builder's escalation ladder ----------
 scenario=routing
 L="$(newjob --mode light "zq ladder")"

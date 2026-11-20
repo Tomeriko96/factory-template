@@ -19,7 +19,9 @@ run:    waits until the machine has room, then runs <command> at low priority in
         Foreground waits at most --wait-max (default 540s, inside a tool call's timeout);
         exit 75 = no room in time: use --background.
 --priority  high, normal (default) or low; env FACTORY_HEAVY_PRIORITY. A waiting command only
-        takes a free slot when no command of a higher priority is waiting for one (waiters are
+        takes a free slot when no command of a higher priority, and no command of the same
+        priority that queued earlier, is waiting for one (FIFO within a priority, so freed
+        slots drain until a big command fits instead of going to newer small ones; waiters are
         recorded in the lock dir; a waiter whose process is gone is ignored). The factory runs
         the precheck's full validation and the builder at high, audits and timing or measurement
         runs at low, everything else at normal.
@@ -171,11 +173,12 @@ def waiter_path(d, pid=None):
     return os.path.join(d, f"waiter-{pid or os.getpid()}.json")
 
 
-def register_waiter(priority, label):
+def register_waiter(priority, label, since=None):
     d = lock_dir()
     p = waiter_path(d)
     with open(p + ".tmp", "w") as f:
-        json.dump({"pid": os.getpid(), "priority": priority, "cmd": label, "since": time.time()}, f)
+        json.dump({"pid": os.getpid(), "priority": priority, "cmd": label,
+                   "since": time.time() if since is None else since}, f)
     os.replace(p + ".tmp", p)
     return p
 
@@ -206,11 +209,17 @@ def waiters(d):
     return out
 
 
-def outranked(d, priority):
-    """The priority of a live waiter above `priority`, or None."""
+def queued_ahead(d, priority, since):
+    """A live waiter that goes first: a higher priority, or the same priority and queued
+    earlier (FIFO, so a big command is not starved by a stream of small ones). Or None."""
     me = PRIORITY.get(priority, 1)
-    above = [w for w in waiters(d) if w.get("pid") != os.getpid() and PRIORITY.get(w.get("priority"), 1) > me]
-    return max((w.get("priority") for w in above), key=lambda x: PRIORITY.get(x, 1)) if above else None
+    for w in waiters(d):
+        if w.get("pid") == os.getpid():
+            continue
+        p = PRIORITY.get(w.get("priority"), 1)
+        if p > me or (p == me and (w.get("since", 0), w.get("pid", 0)) < (since, os.getpid())):
+            return w
+    return None
 
 
 def survey(d, slots):
@@ -228,13 +237,13 @@ def survey(d, slots):
     return used, free
 
 
-def try_admit(lim, weight, label, priority="normal"):
-    """Take a slot if the weights running host-wide leave room and no waiter of a higher
-    priority is queued. Returns the locked file or None."""
+def try_admit(lim, weight, label, priority="normal", since=None):
+    """Take a slot if the weights running host-wide leave room and no waiter goes first
+    (a higher priority, or the same priority queued earlier). Returns the locked file or None."""
     d = lock_dir()
     with open(os.path.join(d, "admit.lock"), "a+") as admit:
         fcntl.flock(admit, fcntl.LOCK_EX)
-        if outranked(d, priority):
+        if queued_ahead(d, priority, time.time() if since is None else since):
             return None
         used, free = survey(d, lim["slots"])
         w = min(weight, lim["budget"])
@@ -255,18 +264,20 @@ def try_admit(lim, weight, label, priority="normal"):
 
 def take_slot(lim, weight, wait_max, label, priority="normal"):
     end, last = time.time() + wait_max, 0
-    register_waiter(priority, label)
+    since = time.time()
+    register_waiter(priority, label, since)
     try:
         while True:
-            f = try_admit(lim, weight, label, priority)
+            f = try_admit(lim, weight, label, priority, since)
             if f:
                 return f
             if time.time() > end:
                 return None
             if time.time() - last > 30:
-                above = outranked(lock_dir(), priority)
+                first = queued_ahead(lock_dir(), priority, since)
                 say(f"no room yet (needs weight {weight} of {lim['budget']} cores"
-                    + (f"; a {above}-priority command waits first" if above else "")
+                    + (f"; a {first.get('priority', 'normal')}-priority command queued earlier or higher"
+                       f" goes first: {str(first.get('cmd', '?'))[:40]}" if first else "")
                     + f"), waiting ({label[:60]})")
                 last = time.time()
             time.sleep(POLL)

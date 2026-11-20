@@ -24,7 +24,7 @@ for line in open(CASES):
     want, cmd = line[0], line[2:]
     total += 1
     try:
-        why = guard.heavy_reason(cmd)
+        why = guard.stash_reason(cmd) or guard.heavy_reason(cmd)
     except Exception as e:  # the hook allows on errors; a crash here is a bug either way
         why = None
         print(f"CRASH {cmd!r}: {e!r}")

@@ -176,3 +176,13 @@ A mvn --version
 R uv run --quiet --no-project --python 3 --with playwright==1.63.0 python -I flow.py
 R uv run --with=playwright python flow.py
 A uv run --with rich python x.py
+# --- git stash is shared by all worktrees of a clone: refused, read-only subcommands allowed
+R git stash
+R git stash push -m wip
+R git stash pop
+R git -C ../wt stash apply
+R bash -c 'git stash && pytest; git stash pop'
+A git stash list
+A git stash show -p
+A git status
+A git worktree add --detach /tmp/base HEAD

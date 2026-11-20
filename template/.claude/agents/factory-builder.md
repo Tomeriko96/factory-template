@@ -89,6 +89,10 @@ Adapted from obra/superpowers (test-driven-development, verification-before-comp
 systematic-debugging; MIT, see NOTICE in factory-template).
 - **Red, then green.** A bug fix starts with a regression test, run on the unfixed code:
   it must fail, and for the reason the bug describes (not an import error or a typo).
+  Write the test first and run it before you change the code. If the fix already exists,
+  run the test on the base in a separate detached worktree (`git worktree add --detach
+  "$TMPDIR/base-<job>" <Base>`, removed afterwards); never `git stash`: the stash is shared
+  by every parallel job's worktree (the guard refuses it).
   Then fix and run it again: it passes. Both runs go in build.md under Validation (the
   command, the failing assertion, then the pass). New behaviour the same way where
   practical: a test you never saw fail may test nothing. Every test run, red ones included,

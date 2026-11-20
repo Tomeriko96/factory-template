@@ -102,7 +102,7 @@ Adapted from obra/superpowers (test-driven-development, systematic-debugging; MI
 - A bug-fix criterion needs red-green evidence in build.md: the regression test failing on
   the unfixed code for the bug's reason, then passing. Check that it is there and that the
   red failure is the bug (not an import error). Within your mutation budget, re-measure
-  it: the test on `<Base>` (temporary worktree) fails, on the branch it passes. Missing red
+  it: the test on `<Base>` (a temporary detached worktree, never `git stash`) fails, on the branch it passes. Missing red
   evidence is `[non-blocking]`; your measurement showing the test passes on `<Base>` too
   (it does not test the fix) is `[blocking]`.
 - When your own measurement fails, find the cause before you report it: read the whole

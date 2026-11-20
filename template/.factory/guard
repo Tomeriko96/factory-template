@@ -294,6 +294,15 @@ def heavy_reason(cmd, depth=0):
     return None
 
 
+# `git stash` keeps ONE stack per clone, shared by every worktree: parallel jobs that stash swap
+# each other's changes (seen in practice). Read-only `stash list|show` is fine.
+STASH = re.compile(r"(?<![\w./-])git(?:\s+(?:-C\s+\S+|-c\s+\S+|--[\w-]+(?:=\S+)?))*\s+stash\b(?!\s+(?:list|show)\b)")
+
+
+def stash_reason(cmd):
+    return "git stash" if STASH.search(HEREDOC.sub("", cmd)) else None
+
+
 def main():
     try:
         with open(os.path.join(HERE, "config.json")) as f:
@@ -306,9 +315,19 @@ def main():
         if "--subagents-only" in sys.argv and not (data.get("agent_id") or data.get("agent_type")):
             return 0
         cmd = (data.get("tool_input") or {}).get("command") or ""
-        what = heavy_reason(cmd)
+        stash = stash_reason(cmd)
+        what = None if stash else heavy_reason(cmd)
     except Exception:
         return 0
+    if stash:
+        sys.stderr.write(
+            "factory guard: `git stash` is refused. The stash stack is shared by every worktree of "
+            "this clone, so parallel jobs swap each other's changes. To run code without your "
+            "change (e.g. to show a test fails on the base), check the base out separately:\n"
+            "  git worktree add --detach \"$TMPDIR/base-$$\" HEAD   (or the base commit)\n"
+            "run the test there, then `git worktree remove --force` it; or read a file with "
+            "`git show <base>:<path>`. To set work aside, make a WIP commit on your own branch.\n")
+        return 2
     if what:
         sys.stderr.write(
             f"factory guard: `{what}` is a heavy command and must go through the limiter, "

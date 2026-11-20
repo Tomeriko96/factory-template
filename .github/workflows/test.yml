@@ -1,0 +1,44 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # `install` writes `git describe --tags` into .factory/VERSION
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Versions
+        run: python3 --version && bash --version | head -1 && git --version
+      - name: job state machine (tests/job_test.sh)
+        run: bash tests/job_test.sh
+      - name: guard
+        run: python3 -I tests/guard_test.py
+      - name: prompts and contracts
+        run: python3 -I tests/prompts_test.py
+      - name: watch board
+        run: python3 -I tests/watch_test.py
+      - name: forgecheck
+        run: python3 -I tests/forgecheck_test.py
+      - name: any other test suite
+        run: |
+          set -e
+          for t in tests/*_test.py; do
+            case "$t" in */guard_test.py|*/prompts_test.py|*/watch_test.py|*/forgecheck_test.py) continue ;; esac
+            echo "== $t"; python3 -I "$t"
+          done

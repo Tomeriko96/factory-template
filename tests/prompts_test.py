@@ -65,6 +65,8 @@ check("validate.md" in texts.get("builder", "") and "Targeted tests only" in tex
 for n, t in texts.items():
     if n.startswith("reviewer-"):
         check("Never run the full suite" in t and "coverage" in t, f"{n}: may still run the full suite or coverage")
+check("cached validation" not in texts.get("reviewer-audit", "") and "not yours to measure" in texts.get("reviewer-audit", ""),
+      "reviewer-audit: still starts from a full validation that only runs after the reviews")
 check("--validate" in JOB and "VALIDATE: PENDING" in open(os.path.join(T, ".factory", "precheck")).read(),
       "job/precheck: --validate step missing")
 

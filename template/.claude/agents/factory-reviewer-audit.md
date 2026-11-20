@@ -126,8 +126,10 @@ acceptance criterion tests a mock, or passes without the fix); otherwise `[non-b
 
 ## Budget
 You are the slowest reviewer and every round waits for you (median 11 min, p90 29, the
-others 1-2). Aim for at most ~30 tool calls: claims table first from the cached validation
-and the diff, then only the checks above. A claim you cannot measure within the budget is
+others 1-2). Aim for at most ~30 tool calls: claims table first from the diff and the builder's targeted
+runs (replayed with `heavy --cache`: cache hits), then only the checks above. The full
+validation has not run yet when you review: it runs once after the reviews, in the
+precheck step, and is not yours to measure. A claim you cannot measure within the budget is
 `⏭️` with the reason, not an open-ended investigation.
 
 ## Output

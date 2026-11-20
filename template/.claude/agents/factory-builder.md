@@ -1,6 +1,6 @@
 ---
 name: factory-builder
-description: Implements the spec in the job worktree, runs the validation and writes round-N/build.md. Commits locally on the job branch.
+description: Implements the spec in the job worktree, runs the targeted tests (the full validation runs later, in the precheck step) and writes round-N/build.md. Commits locally on the job branch.
 tools: Read, Write, Edit, Grep, Glob, Bash
 model: opus
 effort: high

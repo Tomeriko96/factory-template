@@ -97,6 +97,11 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `timeout_min` (180).
 - `ui_review` (optional, default `auto`) and `ui_page_globs`: the form of the ux/ui reviews, see
   **Reviewers**.
+- `worktree_seed` (optional, default `true`): a new job worktree gets the main checkout's
+  `node_modules` (next to a `package-lock.json`/`npm-shrinkwrap.json`) and `.venv` (next to a
+  `uv.lock`) as hardlinks (`cp -al`; a plain copy across filesystems; never a symlink) when that
+  lockfile is identical to the main checkout's; otherwise nothing and the normal install runs.
+  The builder's prompt then says `Dependencies seeded: …`. `false` switches it off.
 - `adopt_conflicting` (optional, default `false`): `true` lets `.factory/job adoptable` adopt every
   open PR/MR by an allowed author in this repo that has a merge conflict and no job (see
   `/factory adopt`); `false` only lists them as adoptable.

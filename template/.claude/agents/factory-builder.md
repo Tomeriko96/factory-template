@@ -39,7 +39,8 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
   (add `--no-cov` / `-p no:cov`, or leave `--coverage` off, when the repo's config turns it
   on): coverage is left to CI.
 - **The full suite is not yours.** The Validate commands of repo.md run once per round, in
-  the precheck step after the reviews (`.factory/precheck --validate`, through `heavy`).
+  the precheck step after the reviews (`.factory/precheck --validate`, through `heavy`, or on
+  the forge's CI with `validate.mode: ci`).
   Do not run them yourself, except in Sync mode. If that run fails, the next round starts
   with `round-(N-1)/validate.md` as a blocking finding.
 - Run your final targeted tests on the committed tree with `--cache`, verbatim as you write
@@ -48,6 +49,11 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 - A timeout or failure while the load is high is not proof of a bug and never a reason
   to raise a test timeout: check `heavy status`, rerun that file alone, then decide.
 - Prepare output (build directories) must be git-ignored; if it is not, say so in build.md.
+- **Seeded dependencies.** A `Dependencies seeded:` line in your prompt means those folders
+  (`node_modules`, `.venv`) were hardlinked from the main checkout because the lockfiles are
+  identical: run the install as usual but in its fast form (`uv sync`, `npm install`, never
+  `npm ci`, which deletes them first), and never edit a file inside them in place (a patch to
+  a dependency would also change the main checkout's copy).
 - **Read heavy's last line.** Every run and `heavy wait` ends with `heavy: exit=<n> log=<path>`;
   exit 75 means heavy refused (no room in time) and the command did **not** run. Never pipe
   heavy's output (`heavy … | tail -1` hides the exit code, so a refused build looked fine and

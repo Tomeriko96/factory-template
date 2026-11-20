@@ -168,6 +168,29 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
   `.factory/job set <id> ui_review light|full|auto` sets it for one job.
 - **No size limits as acceptance criteria:** "diff under N lines" is guidance, never blocking.
 
+## Shared dependencies per worktree
+
+Every job worktree used to run `npm ci` / `uv sync` from scratch. With `worktree_seed` (default
+`true`) `.factory/job` seeds a new worktree: for every tracked `package-lock.json` /
+`npm-shrinkwrap.json` (→ `node_modules`) and `uv.lock` (→ `.venv`) that is byte-identical to the
+main checkout's, it copies the main checkout's folder next to it with `cp -al` (hardlinks; a plain
+`cp -a` across filesystems; never a symlink). A lockfile that differs: nothing, the normal install
+runs. The builder's prompt says `Dependencies seeded: …` (run the fast install, never `npm ci`,
+never edit a file inside them in place).
+
+Hardlinks are only safe when the tools replace files instead of writing into them, so this was
+measured (npm 11.19, uv 0.13 on Linux, 2026-11): after `cp -al`, installing a newer
+version, uninstalling a package, `npm install` and `npm ci` in the copy left every file of the
+original byte-identical, **except** `node_modules/.package-lock.json`, which npm rewrites in place.
+So top-level dot entries of a seeded folder are real copies, never links, and caches (`.cache`,
+`.vite`, …) are left out. uv installs by hardlinking from its own cache and never writes into an
+installed file (Python's `.pyc` writes are atomic renames too); but a venv holds absolute paths to
+itself and to the project (script shebangs, `activate`, editable `.pth` and finder files,
+`direct_url.json`), so those files are rewritten for the worktree as new files: without that the
+worktree's `pytest` ran the main checkout's interpreter and imported the main checkout's code.
+After a dependency change in the copy, `uv sync` there left the original venv unchanged.
+pnpm and yarn are not seeded (not verified). Switch it off with `"worktree_seed": false`.
+
 ## Routing and metrics
 
 Every spawn block that `.factory/job` prints carries `MODEL:` and `EFFORT:`; the orchestrator
@@ -414,7 +437,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 591 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 614 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 61 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |

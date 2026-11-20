@@ -441,7 +441,147 @@ def ensure_worktree(job, out):
     if r.returncode != 0:
         return f"git worktree add failed: {(r.stderr or r.stdout).strip()[:300]}"
     out.notes.append(f"NOTE: worktree {wt} ({how})")
+    job.pop("seeded", None)
+    try:
+        seed_worktree(job, out)
+    except OSError as e:   # a seed is an optimisation: never stop a job for it
+        out.notes.append(f"NOTE: worktree seed skipped ({e})")
     return None
+
+
+# ---------- worktree seed: dependencies hardlinked from the main checkout ----------
+# (lockfile, directory) pairs that are safe to hardlink-copy. Verified (README, "Shared
+# dependencies"): npm replaces a package's files (new inodes) when it updates or removes one,
+# except node_modules/.package-lock.json, which it rewrites in place: top-level dot entries are
+# therefore copied, never linked, and caches (.cache, .vite) are left out. uv installs by
+# hardlinking from its own cache and never writes into an installed file; a venv holds absolute
+# paths to itself and to the project (scripts' shebangs, activate, editable .pth/finder files,
+# direct_url.json), which are rewritten as new files. pnpm and yarn are not seeded (unverified).
+SEED_TOOLS = (("package-lock.json", "node_modules"), ("npm-shrinkwrap.json", "node_modules"), ("uv.lock", ".venv"))
+SEED_DROP = (".cache", ".vite", ".vitest", ".turbo", ".parcel-cache")
+
+
+def seed_enabled():
+    return config().get("worktree_seed", True) is not False
+
+
+def same_file(a, b):
+    try:
+        if os.path.getsize(a) != os.path.getsize(b):
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            return fa.read() == fb.read()
+    except OSError:
+        return False
+
+
+def unshare(path):
+    """Replace a hardlinked file by its own copy (a new inode), so writing to it in place
+    cannot reach the main checkout."""
+    tmp = path + ".seed-copy"
+    shutil.copy2(path, tmp, follow_symlinks=False)
+    os.replace(tmp, path)
+
+
+def rewrite_paths(path, old, new):
+    """Rewrite `old` -> `new` (a path, at a path boundary) in a small text file, as a NEW file."""
+    try:
+        if os.path.islink(path) or os.path.getsize(path) > 1 << 20:
+            return False
+        data = open(path, "rb").read()
+    except OSError:
+        return False
+    if old.encode() not in data:
+        return False
+    rx = re.compile(re.escape(old.encode()) + rb"(?=[/'\"\s:]|$)")
+    mode = os.stat(path).st_mode
+    os.unlink(path)
+    with open(path, "wb") as f:
+        f.write(rx.sub(new.replace("\\", "\\\\").encode(), data))
+    os.chmod(path, mode)
+    return True
+
+
+def relocate_venv(venv, old, new):
+    """The venv's own absolute paths (main checkout -> worktree), each fixed file a new inode."""
+    n = 0
+    bindir = os.path.join(venv, "bin")
+    for f in os.listdir(bindir) if os.path.isdir(bindir) else []:
+        n += rewrite_paths(os.path.join(bindir, f), old, new)
+    n += rewrite_paths(os.path.join(venv, "pyvenv.cfg"), old, new)
+    for sp in glob.glob(os.path.join(venv, "lib*", "python*", "site-packages")):
+        for f in os.listdir(sp):
+            p = os.path.join(sp, f)
+            if os.path.isfile(p):                       # .pth files, setuptools' __editable__ finders
+                n += rewrite_paths(p, old, new)
+            elif f.endswith(".dist-info"):
+                n += rewrite_paths(os.path.join(p, "direct_url.json"), old, new)
+    return n
+
+
+def copy_tree(src, dst):
+    """Hardlink-copy src to dst (`cp -al`; a plain `cp -a` across filesystems). Top-level dot
+    entries are real copies, caches are dropped. Returns how it copied, or None."""
+    tmp = dst + ".seed-tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    how = "hardlinks"
+    if run(["cp", "-al", src, tmp], timeout=900).returncode != 0:
+        shutil.rmtree(tmp, ignore_errors=True)
+        how = "copy"
+        if run(["cp", "-a", src, tmp], timeout=1800).returncode != 0:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return None
+    if how == "hardlinks":
+        for e in os.listdir(tmp):
+            p = os.path.join(tmp, e)
+            if not e.startswith(".") or e == ".bin" or os.path.islink(p):
+                continue
+            if e in SEED_DROP:
+                shutil.rmtree(p, ignore_errors=True) if os.path.isdir(p) else os.remove(p)
+            elif os.path.isdir(p):
+                shutil.rmtree(p)
+                shutil.copytree(os.path.join(src, e), p, symlinks=True)
+            else:
+                unshare(p)
+    os.replace(tmp, dst)
+    return how
+
+
+def seed_worktree(job, out):
+    """A new worktree gets the main checkout's dependency folders when the lockfile next to them
+    is identical (see SEED_TOOLS); otherwise nothing (the normal install runs). config.worktree_seed
+    false switches it off."""
+    if not seed_enabled():
+        return
+    wt = job["worktree"]
+    names = git("ls-files", "-z", "--", *[f"*{lock}" for lock, _ in SEED_TOOLS], cwd=wt)
+    done, skipped = [], []
+    for rel in sorted(filter(None, (names or "").split("\0"))):
+        lock = os.path.basename(rel)
+        target = next((d for l, d in SEED_TOOLS if l == lock), None)
+        if not target or "node_modules/" in rel:
+            continue
+        d = os.path.dirname(rel)
+        src, dst = os.path.join(REPO, d, target), os.path.join(wt, d, target)
+        name = os.path.join(d, target)
+        if not os.path.isdir(src) or os.path.islink(src) or os.path.lexists(dst):
+            continue
+        if not same_file(os.path.join(REPO, rel), os.path.join(wt, rel)):
+            skipped.append(f"{name} ({rel} differs)")
+            continue
+        how = copy_tree(src, dst)
+        if not how:
+            skipped.append(f"{name} (copy failed)")
+            continue
+        if target == ".venv":
+            for old in {REPO, os.path.realpath(REPO)}:
+                relocate_venv(dst, old, wt)
+        done.append(name + ("" if how == "hardlinks" else " (copied: another filesystem)"))
+    if done:
+        job["seeded"] = done
+        out.notes.append(f"NOTE: worktree seeded from the main checkout (lockfile identical): {', '.join(done)}")
+    if skipped:
+        out.notes.append(f"NOTE: not seeded (the normal install runs): {', '.join(skipped)}")
 
 
 def remote_ff(job, out):
@@ -559,6 +699,10 @@ def builder_block(job, n):
             p += (f"\nUI work: {why}. Before you change UI, read "
                   f"{os.path.join(REPO, '.claude', 'skills', 'frontend-design', 'SKILL.md')} (design reference; "
                   "below the house style and the repo's own design system).")
+    if job.get("seeded"):
+        p += ("\nDependencies seeded: " + ", ".join(job["seeded"]) + " are hardlinked from the main checkout "
+              "(their lockfiles are identical). Use them: `uv sync` / `npm install` finish at once; do not run "
+              "`npm ci` (it deletes node_modules and installs from scratch) and never edit a file inside them in place.")
     if job.get("rework_round") == n:
         p += "\nAlso read rework.md."
         if job.get("rework_untrusted"):

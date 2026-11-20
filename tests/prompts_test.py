@@ -193,6 +193,13 @@ check(section(texts.get("reviewer-ui", ""), "Light or full: your prompt says whi
 check('"--axe"' in SHOOT and "axe.min.js" in SHOOT, "shoot: no --axe check")
 check("`UI review: full`" in texts.get("spec-writer", "") and "UI_REVIEW_SPEC_RE" in JOB, "spec-writer: UI review: full line not described")
 check("ui_review" in SKILL and "ui_page_globs" in SKILL, "SKILL.md: ui_review / ui_page_globs not documented")
+# Worktree seed: the job prints the line the builder knows, SKILL.md and setup.md document the key
+check('"\\nDependencies seeded: "' in JOB and "`Dependencies seeded:`" in texts.get("builder", "")
+      and "npm ci" in texts.get("builder", ""), "worktree seed: job line not explained to the builder")
+check("worktree_seed" in SKILL and "worktree_seed" in SETUP and 'get("worktree_seed", True)' in JOB,
+      "worktree_seed not documented in SKILL.md and setup.md")
+check('"cp", "-al"' in JOB and "symlink" not in JOB.split("def copy_tree", 1)[1].split("def seed_worktree", 1)[0].replace("symlinks=True", "").replace("islink", ""),
+      "worktree seed: not a cp -al hardlink copy")
 check('"House style: ' in JOB or "House style: load" in JOB, "job: no House style: line")
 check("house_style" in SKILL and "house_style" in SETUP, "house_style not documented in SKILL.md and setup.md")
 check("check-style" in texts.get("reviewer-code", "") and "`gate`" in texts.get("builder", "") and "write-issue" in SKILL,

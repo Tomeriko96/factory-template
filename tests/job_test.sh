@@ -1295,6 +1295,55 @@ unset FACTORY_VALIDATE_BUDGET FACTORY_CI_POLL
 export PATH="$OLDPATH"
 cp "$T/config.vci" .factory/config.json
 
+# ---------- worktree seed: node_modules/.venv hardlinked from the main checkout when the lockfile matches ----------
+scenario=seed
+cp .factory/config.json "$T/config.seed"
+printf 'node_modules/\n.venv/\n' >> .git/info/exclude
+mkdir -p web; echo '{"lockfileVersion": 3}' > package-lock.json; echo '{"lockfileVersion": 3}' > web/package-lock.json
+printf 'version = 1\n' > uv.lock; git add package-lock.json web/package-lock.json uv.lock; git commit -qm "locks"
+mkdir -p node_modules/left-pad node_modules/.cache web/node_modules/a .venv/bin ".venv/lib/python3.12/site-packages/proj-0.1.dist-info"
+echo 'module.exports = 1' > node_modules/left-pad/index.js; echo '{"hidden": 1}' > node_modules/.package-lock.json
+echo cache > node_modules/.cache/x; echo a > web/node_modules/a/index.js
+printf '#!%s/.venv/bin/python\nimport pytest\n' "$R" > .venv/bin/pytest; chmod +x .venv/bin/pytest
+printf "VIRTUAL_ENV='%s/.venv'\n" "$R" > .venv/bin/activate
+printf '%s/src\n' "$R" > .venv/lib/python3.12/site-packages/_proj.pth
+printf '{"url": "file://%s", "dir_info": {"editable": true}}' "$R" > .venv/lib/python3.12/site-packages/proj-0.1.dist-info/direct_url.json
+echo 'x = 1' > .venv/lib/python3.12/site-packages/six.py
+ino() { stat -c %i "$1"; }
+S1="$(newjob "zq seed")"; out="$(J show "$S1")"
+W="$(wt "$S1")"
+[ "$(ino node_modules/left-pad/index.js)" = "$(ino "$W/node_modules/left-pad/index.js")" ] && ok || bad "node_modules not hardlinked"
+[ "$(ino .venv/lib/python3.12/site-packages/six.py)" = "$(ino "$W/.venv/lib/python3.12/site-packages/six.py")" ] && ok || bad ".venv not hardlinked"
+[ "$(ino web/node_modules/a/index.js)" = "$(ino "$W/web/node_modules/a/index.js")" ] && ok || bad "nested web/node_modules not seeded"
+# npm rewrites node_modules/.package-lock.json in place: a copy, never a link; caches stay behind
+[ "$(ino node_modules/.package-lock.json)" != "$(ino "$W/node_modules/.package-lock.json")" ] && ok || bad ".package-lock.json shared"
+cmp -s node_modules/.package-lock.json "$W/node_modules/.package-lock.json" && ok || bad ".package-lock.json content"
+missing "$W/node_modules/.cache"; [ -L "$W/node_modules" ] && bad "node_modules is a symlink" || ok
+# the venv's absolute paths point at the worktree, in new files; the main checkout's are untouched
+[ "$(head -1 "$W/.venv/bin/pytest")" = "#!$W/.venv/bin/python" ] && ok || bad "shebang: $(head -1 "$W/.venv/bin/pytest")"
+[ "$(head -1 .venv/bin/pytest)" = "#!$R/.venv/bin/python" ] && ok || bad "main shebang changed"
+[ -x "$W/.venv/bin/pytest" ] && ok || bad "rewritten script lost its mode"
+[ "$(cat "$W/.venv/lib/python3.12/site-packages/_proj.pth")" = "$W/src" ] && ok || bad "editable .pth not relocated"
+[ "$(cat .venv/lib/python3.12/site-packages/_proj.pth)" = "$R/src" ] && ok || bad "main .pth changed"
+command grep -qF "file://$W\"" "$W/.venv/lib/python3.12/site-packages/proj-0.1.dist-info/direct_url.json" && ok || bad "direct_url.json not relocated"
+command grep -qF "VIRTUAL_ENV='$W/.venv'" "$W/.venv/bin/activate" && ok || bad "activate not relocated"
+[ "$(ino .venv/bin/pytest)" != "$(ino "$W/.venv/bin/pytest")" ] && ok || bad "rewritten script still shares the inode"
+field "$S1" "j['seeded']" "['node_modules', '.venv', 'web/node_modules']"
+echo SPEC > "$(jd "$S1")/spec.md"; out="$(J next "$S1")"
+has "$out" "Dependencies seeded: node_modules, .venv, web/node_modules are hardlinked"; has "$out" "do not run \`npm ci\`"
+park "$S1"
+# a lockfile that differs from the main checkout's: that folder is not seeded, the others are
+printf 'version = 2\n' > uv.lock
+out="$(J new "zq seed diff")"; S2="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+exists "$(wt "$S2")/node_modules/left-pad/index.js"; missing "$(wt "$S2")/.venv"
+has "$out" "NOTE: not seeded (the normal install runs): .venv (uv.lock differs)"
+git checkout -q uv.lock; park "$S2"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["worktree_seed"]=False; json.dump(c, open(".factory/config.json","w"))'
+S3="$(newjob "zq seed off")"; missing "$(wt "$S3")/node_modules"; missing "$(wt "$S3")/.venv"; park "$S3"
+rm -rf node_modules web .venv; git rm -q package-lock.json uv.lock; git commit -qm "no locks"
+sed -i '/^node_modules\/$/d; /^\.venv\/$/d' .git/info/exclude
+cp "$T/config.seed" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

@@ -140,6 +140,13 @@ of PRs/MRs that may be open at once before new jobs wait (every merge makes the 
 conflict; `0` = no limit, use it when `delivery.mode` is not `pr`). Leave `guard` and
 `docs_globs` out unless the user wants the hook off or the repo keeps docs elsewhere.
 
+**Worktree seed:** leave `worktree_seed` out (default `true`: a job worktree whose lockfile
+equals the main checkout's gets its `node_modules`/`.venv` as hardlinks instead of a fresh
+install). It only helps when the main checkout has those folders installed: if repo.md's Setup
+installs dependencies, run that install once in the main checkout now (through `heavy`) and say so.
+Set `false` only if the repo patches files inside `node_modules` or `.venv` in place (patch-package
+style edits without a reinstall).
+
 **Validation commands** run through `.factory/heavy --cache` by every agent, verbatim, so
 write them as the exact strings agents should paste, one per line, each a single
 executable command (a compound one as `bash -c '…'`, with `cd` inside). The same string is

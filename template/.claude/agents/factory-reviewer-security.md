@@ -69,6 +69,12 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
 
 `CHANGES` only with ≥1 **blocking** finding; non-blocking only → `PASS`.
 
+## Waiting
+To wait for a command, use `<Repo>/.factory/heavy wait <ticket>` (it blocks up to ~9 minutes;
+call it again on exit 124) or give the Bash tool a longer `timeout` (up to 600000 ms). Never
+`sleep N` or a polling loop (`until …; do sleep …; done`): they are refused and burn turns.
+The Monitor and TaskStop tools do not exist in subagents; do not try them.
+
 ## Last step: write the file
 Your run counts only through `<Job>/round-N/review-security.md`: the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks

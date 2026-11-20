@@ -61,6 +61,12 @@ the rest.
 Keep it under ~80 lines, in English. Ask the user no questions. If the feature changes
 existing human-facing text, say in the Approach that it stays in that file's language.
 
+## Waiting
+To wait for a command, use `<Repo>/.factory/heavy wait <ticket>` (it blocks up to ~9 minutes;
+call it again on exit 124) or give the Bash tool a longer `timeout` (up to 600000 ms). Never
+`sleep N` or a polling loop (`until …; do sleep …; done`): they are refused and burn turns.
+The Monitor and TaskStop tools do not exist in subagents; do not try them.
+
 ## Last step: write the file
 Your run counts only through `<Job>/spec.md`: the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks

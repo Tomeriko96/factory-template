@@ -187,6 +187,14 @@ check("heavy: exit={rc} log=" in HEAVY_SRC and "heavy: exit=<n> log=<path>" in t
                                                         "(written last: see the final section)") or ""),
       "heavy result line: not printed by heavy, guarded, or quoted in build.md")
 
+# Waiting: heavy wait or a Bash timeout, never sleep loops; Monitor/TaskStop do not exist in subagents
+for n, t in list(texts.items()) + [("SKILL.md", SKILL)]:
+    w = section(t, "Waiting") if n != "SKILL.md" else SKILL
+    check(w and "heavy wait <ticket>" in w and "sleep" in w and "Monitor" in w and "TaskStop" in w
+          and "timeout" in w, f"{n}: no waiting rule (heavy wait / timeout, no sleep, no Monitor/TaskStop)")
+_waits = {section(t, "Waiting") for t in texts.values()}
+check(len(_waits) == 1, "'## Waiting' differs between agents")
+
 # Every agent's output file is its last, explicit step (an approver once gave MERGE only in its reply)
 for n, t in texts.items():
     last = re.findall(r"^## (.+)$", re.sub(r"```.*?```", "", t, flags=re.S), re.M)

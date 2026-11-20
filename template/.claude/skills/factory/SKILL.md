@@ -712,6 +712,11 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   role works on any model. Report one line per
   transition or event ("013 built · reviews running"), never a recap of an agent's reply
   and never a status table unless asked (`status`). Read agent files only as this skill says.
+- **Waiting.** To wait, use `.factory/heavy wait <ticket>` (blocks up to ~9 minutes; again on
+  exit 124), `.factory/heavy gate`, or the Bash tool's `timeout` (up to 600000 ms); a spawned
+  agent reports back by itself. Never `sleep N` or polling loops (`until …; do sleep …`):
+  they are refused and burn turns. The Monitor and TaskStop tools do not exist in subagents:
+  never tell an agent to use them.
 - **Long sessions:** all state is on disk. After about 10 jobs have been delivered in one
   session, or when the session feels slow, tell the user once: "state is on disk; `/clear`
   and run `/factory status` to continue with a fresh context".

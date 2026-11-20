@@ -107,6 +107,29 @@ rmdir "/tmp/factory-other-$A-base"
 field $A "j['delivery']['mode']" local
 field $A "[h['stage'] for h in j['history']]" "['queued', 'spec', 'build', 'review', 'build', 'review', 'approve', 'build', 'review', 'approve', 'deliver', 'merged']"
 
+# ---------- metrics: one line per spawn and per verdict; job report ----------
+scenario=metrics
+M="$R/.factory/metrics.jsonl"; exists "$M"
+# mq <python expression over rows (the job's metric lines)> <expected>
+mq() {
+  local got
+  got="$(python3 -c "import json,sys; rows=[json.loads(l) for l in open('$M') if json.loads(l).get('job')=='$A']; print($1)" 2>&1)"
+  [ "$got" = "$2" ] && ok || bad "metrics: $1 = '$got', want '$2'"
+}
+mq "sum(r['event']=='spawn' and r['agent']=='factory-builder' for r in rows)" 3
+mq "sum(r['event']=='spawn' and r['agent']=='factory-reviewer-security' for r in rows)" 4   # 3 rounds + 1 resume
+mq "[r['verdict'] for r in rows if r['event']=='verdict' and r['agent']=='factory-reviewer-code']" "['CHANGES', 'PASS', 'PASS']"
+mq "[r['first_round_pass'] for r in rows if r['event']=='verdict' and r['agent']=='factory-reviewer-audit']" "[True, False, False]"
+mq "[r['resumes'] for r in rows if r['event']=='verdict' and r['agent']=='factory-reviewer-security']" "[0, 1, 0]"
+mq "[r['verdict'] for r in rows if r['event']=='verdict' and r['agent']=='factory-approver']" "['REWORK', 'MERGE']"
+mq "[(r['round'], r['passed']) for r in rows if r['event']=='round']" "[(1, False), (2, True), (3, True)]"
+mq "all(isinstance(r['duration_s'], int) for r in rows if r['event']=='verdict' and r['agent']=='factory-builder')" True
+mq "{r['model'] for r in rows if r['event']=='spawn' and r['agent']=='factory-approver'}" "{'opus'}"
+out="$(J report)"; first "$out" "REPORT:"
+has "$out" "builder"; has "$out" "0% (0/1)"; has "$out" "reviewer-code"; has "$out" "CHANGES 1"
+has "$out" "agent runs per job, by job mode:"; has "$out" "full   1 job: approver 2, builder 3"
+J report --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['roles']['reviewer-security']['runs']==4" && ok || bad "report --json"
+
 # ---------- budget: blocking reviews in the last round, a non-PASS verdict, a stuck reviewer ----------
 scenario=budget
 out="$(J new --mode light "zq budget")"; B=002-zq-budget

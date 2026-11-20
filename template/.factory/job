@@ -36,12 +36,15 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
   job set <id> pr_url|pr_state|issue_closed|issues <json or text>   (issues: a JSON list, for a bundle made by hand)
   job list | show <id> | capacity
+  job report [--json]                 from metrics.jsonl: per role runs, first-pass yield, median
+                                      duration, verdict mix; per job mode the agent runs per job
 """
 import fcntl, fnmatch, glob, json, os, re, shutil, subprocess, sys, time, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 REPO = os.path.dirname(HERE)
 JOBS = os.path.join(HERE, "jobs")
+METRICS = os.path.join(HERE, "metrics.jsonl")
 MAX_ROUNDS, MAX_RESUMES, MAX_SYNCS = 3, 2, 3
 TRIAGE = os.path.join(HERE, "run", "triage")
 MODE_RANK = {"docs": 0, "light": 1, "full": 2}
@@ -119,6 +122,56 @@ def first_line(path):
             return f.readline().strip().lstrip("﻿")
     except OSError:
         return None
+
+
+def agent_front(agent):
+    """model: and effort: from the agent's frontmatter in the repo ({} when unreadable)."""
+    try:
+        text = open(os.path.join(REPO, ".claude", "agents", agent + ".md"), errors="replace").read()
+    except OSError:
+        return {}
+    m = re.match(r"---\n(.*?)\n---", text, re.S)
+    return dict(re.findall(r"^(model|effort):\s*(\S+)\s*$", m.group(1), re.M)) if m else {}
+
+
+# ---------- metrics ----------
+# One JSON line per agent spawn and per verdict the script reads, in .factory/metrics.jsonl
+# (append-only, local like the rest of .factory/). `job report` sums it up.
+
+PASSING = ("PASS", "MERGE", "DONE", "WRITTEN", "RESOLVED", "CLEAN")
+
+
+def metric(event, job, **kw):
+    row = {"event": event, "at": now(), "job": job.get("id"), "mode": job.get("mode")}
+    row.update(kw)
+    try:
+        with open(METRICS, "a") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        pass   # metrics never stop a job
+
+
+def key_round(key, job):
+    m = re.search(r"-(\d+)", key or "")
+    return int(m.group(1)) if m else int(job.get("round") or 0)
+
+
+def verdict_metric(job, agent, key, path, verdict):
+    """Record what an agent's file says, with its duration (spawn to file written) and resumes."""
+    pend = job.get("pending") or {}
+    mine = pend.get("key") == key
+    dur = None
+    if mine and pend.get("t0"):
+        try:
+            dur = max(0, round(os.path.getmtime(path) - float(pend["t0"])))
+        except OSError:
+            pass
+    rnd = key_round(key, job)
+    metric("verdict", job, agent=agent, key=key, round=rnd, verdict=verdict, duration_s=dur,
+           resumes=(int(pend.get("spawns") or 1) - 1) if mine else 0,
+           first_round_pass=(rnd == 1 and verdict in PASSING),
+           model=pend.get("models", {}).get(agent) if mine else None,
+           effort=pend.get("efforts", {}).get(agent) if mine else None)
 
 
 # ---------- storage ----------
@@ -361,7 +414,8 @@ def spawn(job, out, key, blocks):
         set_stage(job, "needs-human", f"{key}: agent ended {count - 1} times without writing its file")
         out.main.append(f"DONE: needs-human: {job['reason']}")
         return
-    job["pending"] = {"key": key, "spawns": count, "at": now()}
+    t0 = (pend.get("t0") if pend.get("key") == key else None) or time.time()
+    job["pending"] = {"key": key, "spawns": count, "at": now(), "t0": t0, "models": {}, "efforts": {}}
     if count > 1:
         job["resumes"] = int(job.get("resumes") or 0) + 1
     many = len(blocks) > 1
@@ -371,6 +425,13 @@ def spawn(job, out, key, blocks):
     for agent, model, prompt, writes in blocks:
         if count > 1:
             prompt += "\n" + RESUME_NOTE
+        front = agent_front(agent)
+        model = model or front.get("model")
+        effort = front.get("effort")
+        job["pending"]["models"][agent] = model
+        job["pending"]["efforts"][agent] = effort
+        metric("spawn", job, agent=agent, key=key, round=key_round(key, job), model=model, effort=effort,
+               resume=count - 1)
         out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}",
                      f"WRITES: {os.path.join(jdir(job['id']), writes)}", "PROMPT:", prompt]
     out.main += ["---", f"THEN: when the agent{'s have' if many else ' has'} returned: "
@@ -509,8 +570,10 @@ def step(job, out, start=None):
             p = os.path.join(jd, "spec.md")
             if not os.path.exists(p):
                 return spawn(job, out, "spec", [("factory-spec-writer", None, paths(job) + feature_line(job), "spec.md")])
+            already = (first_line(p) or "").startswith("SPEC: ALREADY-DONE")
+            verdict_metric(job, "factory-spec-writer", "spec", p, "ALREADY-DONE" if already else "WRITTEN")
             job.pop("pending", None)
-            if (first_line(p) or "").startswith("SPEC: ALREADY-DONE"):
+            if already:
                 set_stage(job, "superseded", "spec-writer: the base already does this (see spec.md)")
                 continue
             n = int(job.get("round") or 0)
@@ -523,12 +586,14 @@ def step(job, out, start=None):
             if n > budget(job):
                 set_stage(job, "needs-human", f"round budget used up ({n - 1} rounds) with blocking findings left")
                 continue
-            if not os.path.exists(os.path.join(jd, f"round-{n}", "build.md")):
+            bp = os.path.join(jd, f"round-{n}", "build.md")
+            if not os.path.exists(bp):
                 return spawn(job, out, f"build-{n}", [builder_block(job, n)])
+            fl = first_line(bp) or ""
+            verdict_metric(job, "factory-builder", f"build-{n}", bp, "BLOCKED" if fl.startswith("BUILD: BLOCKED") else "DONE")
             job.pop("pending", None)
             job["round"] = n
             job.setdefault("round_heads", {})[str(n)] = git("rev-parse", "HEAD", cwd=job["worktree"])
-            fl = first_line(os.path.join(jd, f"round-{n}", "build.md")) or ""
             if fl.startswith("BUILD: BLOCKED"):  # no line at all (older builders) counts as done
                 set_stage(job, "needs-human", f"builder blocked in round {n}: {fl[14:].strip(' :-') or 'see build.md'}")
                 continue
@@ -572,10 +637,16 @@ def step(job, out, start=None):
             missing = [x for x in names if not os.path.exists(os.path.join(jd, f"round-{n}", f"review-{x}.md"))]
             if missing:
                 return spawn(job, out, f"review-{n}", [reviewer_block(job, n, x) for x in missing])
-            job.pop("pending", None)
             latest = latest_verdicts(job, n)
             job["reviews"] = {x: word(latest[x][1]) for x in names}
             blocking = sorted(x for x, (_, fl) in latest.items() if fl != "VERDICT: PASS")
+            if not (job.get("metric_rounds") or {}).get(str(n)):   # once per round, also after a crash
+                for x in names:
+                    verdict_metric(job, f"factory-reviewer-{x}", f"review-{n}",
+                                   os.path.join(jd, f"round-{n}", f"review-{x}.md"), job["reviews"][x])
+                metric("round", job, round=n, passed=not blocking, blocking=blocking)
+                job.setdefault("metric_rounds", {})[str(n)] = True
+            job.pop("pending", None)
             if blocking:
                 if n < budget(job):
                     out.notes.append(f"NOTE: round {n}: blocking reviews from {', '.join(blocking)}; building round {n + 1}")
@@ -618,8 +689,10 @@ def step(job, out, start=None):
                 model = "opus" if job.get("precheck") != "CLEAN" or n > 1 else "sonnet"
                 prompt = paths(job) + f"Final round: {n}. Mode: {job.get('mode')}."
                 return spawn(job, out, f"approve-{n}", [("factory-approver", model, prompt, "decision.md")])
-            job.pop("pending", None)
             fl = first_line(p) or ""
+            verdict_metric(job, "factory-approver", f"approve-{n}", p,
+                           next((w for w in ("MERGE", "REWORK", "ESCALATE") if fl.startswith("DECISION: " + w)), "INVALID"))
+            job.pop("pending", None)
             if fl.startswith("DECISION: MERGE"):
                 job["pr_text"] = "decision.md"
                 set_stage(job, "deliver")
@@ -671,6 +744,10 @@ def sync_step(job, out, start):
         prompt = paths(job) + f"Sync {n}. Port: {job['port']}. Mode: {job.get('mode')}."
         return spawn(job, out, f"sync-{n}", [("factory-builder", "sonnet", prompt, f"sync-{n}/build.md")])
     fl = first_line(b) or ""
+    if (job.get("pending") or {}).get("key") == f"sync-{n}":
+        verdict_metric(job, "factory-builder", f"sync-{n}", b,
+                       next((w for w in ("RESOLVED", "CLEAN", "NEEDS-HUMAN") if fl.startswith("SYNC: " + w)), "INVALID"))
+        job.pop("pending", None)
     if not fl.startswith(("SYNC: RESOLVED", "SYNC: CLEAN")):
         job.pop("syncing", None)
         why = ("the merge needs a decision" if fl.startswith("SYNC: NEEDS-HUMAN") else f"build.md starts with {fl[:40]!r}")
@@ -689,6 +766,8 @@ def sync_step(job, out, start):
         prompt = (paths(job) + f"Review sync {n}. Port: {job['port']}.\nYou must write sync-{n}/review-code.md "
                   "(first line VERDICT: PASS|CHANGES); it is required and part of your task.")
         return spawn(job, out, f"sync-review-{n}", [("factory-reviewer-code", None, prompt, f"sync-{n}/review-code.md")])
+    if (job.get("pending") or {}).get("key") == f"sync-review-{n}":
+        verdict_metric(job, "factory-reviewer-code", f"sync-review-{n}", r, word(first_line(r) or ""))
     job.pop("pending", None)
     if first_line(r) != "VERDICT: PASS":
         job.pop("syncing", None)
@@ -1126,6 +1205,109 @@ def cmd_list(args):
     return out
 
 
+def read_metrics():
+    rows = []
+    try:
+        with open(METRICS, errors="replace") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict):
+                    rows.append(r)
+    except OSError:
+        pass
+    return rows
+
+
+def median(xs):
+    xs = sorted(xs)
+    if not xs:
+        return None
+    k = len(xs) // 2
+    return xs[k] if len(xs) % 2 else (xs[k - 1] + xs[k]) / 2
+
+
+def fmt_dur(sec):
+    if sec is None:
+        return "-"
+    sec = int(sec)
+    return f"{sec}s" if sec < 90 else f"{round(sec / 60)}m" if sec < 5400 else f"{sec / 3600:.1f}h"
+
+
+def report_data(rows):
+    """Per role: runs, first-pass yield, median duration, verdict mix; per job mode: agent runs per job.
+    The builder's first pass is its round 1 passing every review (a `round` event); every other
+    role's is a passing verdict in round 1."""
+    role = lambda a: str(a or "?").removeprefix("factory-")
+    roles = {}
+    for r in rows:
+        if r.get("event") not in ("spawn", "verdict"):
+            continue
+        d = roles.setdefault(role(r.get("agent")), {"runs": 0, "resumes": 0, "escalated": 0, "durations": [],
+                                                    "verdicts": {}, "first": [0, 0]})
+        if r["event"] == "spawn":
+            d["runs"] += 1
+            d["resumes"] += 1 if r.get("resume") else 0
+            d["escalated"] += 1 if r.get("escalation") else 0
+            continue
+        if r.get("duration_s") is not None:
+            d["durations"].append(r["duration_s"])
+        v = str(r.get("verdict") or "?")
+        d["verdicts"][v] = d["verdicts"].get(v, 0) + 1
+        if r.get("round") == 1 and role(r.get("agent")) != "builder" and not str(r.get("key", "")).startswith("sync"):
+            d["first"][1] += 1
+            d["first"][0] += 1 if r.get("first_round_pass") else 0
+    b = roles.get("builder")
+    if b:
+        r1 = [r for r in rows if r.get("event") == "round" and r.get("round") == 1]
+        b["first"] = [sum(1 for r in r1 if r.get("passed")), len(r1)]
+    modes, last = {}, {}
+    for r in rows:
+        if r.get("job"):
+            last[r["job"]] = r.get("mode") or last.get(r["job"]) or "?"
+    for r in rows:
+        if r.get("event") == "spawn" and r.get("job"):
+            m = modes.setdefault(last[r["job"]], {"jobs": set(), "runs": {}})
+            m["runs"][role(r.get("agent"))] = m["runs"].get(role(r.get("agent")), 0) + 1
+    for jid, m in last.items():
+        modes.setdefault(m, {"jobs": set(), "runs": {}})["jobs"].add(jid)
+    out_roles = {k: {"runs": d["runs"], "resumes": d["resumes"], "escalated": d["escalated"],
+                     "first_pass": {"yes": d["first"][0], "of": d["first"][1]},
+                     "median_s": median(d["durations"]), "verdicts": d["verdicts"]} for k, d in sorted(roles.items())}
+    out_modes = {k: {"jobs": len(m["jobs"]),
+                     "runs_per_job": {a: round(c / max(1, len(m["jobs"])), 2) for a, c in sorted(m["runs"].items())}}
+                 for k, m in sorted(modes.items())}
+    return {"roles": out_roles, "modes": out_modes}
+
+
+def cmd_report(args):
+    out = Out()
+    rows = read_metrics()
+    data = report_data(rows)
+    if "--json" in args:
+        out.main.append(json.dumps(data, indent=2))
+        return out
+    if not rows:
+        out.main.append(f"REPORT: no metrics yet ({METRICS})")
+        return out
+    out.main.append(f"REPORT: {len(rows)} events, {sum(m['jobs'] for m in data['modes'].values())} jobs ({METRICS})")
+    out.main.append(f"{'role':<28} {'runs':>5} {'first pass':>12} {'median':>7}  verdicts")
+    for k, d in data["roles"].items():
+        fp = d["first_pass"]
+        fps = f"{round(100 * fp['yes'] / fp['of'])}% ({fp['yes']}/{fp['of']})" if fp["of"] else "-"
+        mix = ", ".join(f"{v} {c}" for v, c in sorted(d["verdicts"].items(), key=lambda x: -x[1]))
+        extra = "".join(f"; {n} {w}" for n, w in ((d["resumes"], "resumed"), (d["escalated"], "escalated")) if n)
+        out.main.append(f"{k:<28} {d['runs']:>5} {fps:>12} {fmt_dur(d['median_s']):>7}  {mix or '-'}{extra}")
+    out.main.append("")
+    out.main.append("agent runs per job, by job mode:")
+    for k, m in data["modes"].items():
+        per = ", ".join(f"{a} {c:g}" for a, c in m["runs_per_job"].items())
+        out.main.append(f"  {k:<6} {m['jobs']} job{'s' if m['jobs'] != 1 else ''}: {per or '-'}")
+    return out
+
+
 # ---------- issue triage: which open issues become which jobs ----------
 # The orchestrator fetches the forge's open issues into a file; this script filters them
 # mechanically (author, labels, jobs, work that already exists), the factory-triage agent
@@ -1469,7 +1651,7 @@ def main():
             "delivered": (cmd_delivered, 2), "pr-merged": (cmd_pr_merged, 1), "approve": (cmd_approve, 1),
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
             "fail": (cmd_fail, 2), "drop": (cmd_drop, 1), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
-            "triage": (cmd_triage, 1)}
+            "triage": (cmd_triage, 1), "report": (cmd_report, 0)}
     try:
         if argv[0] == "show":
             print(json.dumps(load(argv[1] if len(argv) > 1 else ""), indent=2))

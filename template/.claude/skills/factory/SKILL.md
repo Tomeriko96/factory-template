@@ -115,6 +115,7 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
   cache/                                 (.factory/heavy: passing validation results per tree;
                                           .factory/ci: CI/CD state per job as ci-<job-id>.json)
   run/triage/                            (`/factory next`: issues.json, plan.json, groups.json)
+  metrics.jsonl                          (.factory/job: one line per spawn and per verdict; `job report`)
   jobs/<job-id>/
     job.json                             (written only by .factory/job)
     spec.md
@@ -374,6 +375,9 @@ room). Never retry or skip a failing pipeline; report it. Then run **Closing iss
 has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board the
 user can keep open (interactive: what needs them, what runs, open PRs with CI; enter opens a
 job; `factory-watch` shows every repo). Do not run it yourself: `job list` is your view.
+`/factory status report` (or when the user asks how the agents perform): run `.factory/job report`
+and show its output as is (per role: runs, first-pass yield, median duration, verdict mix; per job
+mode the agent runs per job, from `.factory/metrics.jsonl`).
 
 ### `/factory setup`
 Follow `setup.md` in this skill's directory.

@@ -145,8 +145,12 @@ for n, t in texts.items():
     m = re.search(r"^effort: (\S+)$", front, re.M)
     check(m and m.group(1) in LEVELS, f"{n}: no valid effort: in the frontmatter")
     check(re.search(r"^model: (sonnet|opus|haiku)$", front, re.M), f"{n}: no model: in the frontmatter")
-    want = "high" if n in ("builder", "reviewer-audit", "reviewer-security") else "medium"
+    want = "high" if n in ("builder", "reviewer-audit") else "medium"
     check(not m or m.group(1) == want, f"{n}: effort {m and m.group(1)}, want {want}")
+    wmodel = "opus" if n in ("builder", "reviewer-audit") else "sonnet"
+    check(f"\nmodel: {wmodel}\n" in front, f"{n}: model is not {wmodel} (only the builder and the audit run on opus)")
+check("def security_floor" in JOB and '"FLOOR: ' in JOB and "security_floor" in SKILL and "`FLOOR: " in SKILL,
+      "security floor: not in job or SKILL.md")
 check('f"EFFORT: ' in JOB and "ESCALATED: +" in JOB, "job: does not print EFFORT:/ESCALATED: lines")
 check("`EFFORT:`" in SKILL and "`effort`" in SKILL and "## Routing" in SKILL, "SKILL.md: how to pass EFFORT: not described")
 check("routing" in SKILL and "blocked_retries" in SKILL, "SKILL.md: config.routing not documented")

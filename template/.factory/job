@@ -220,6 +220,13 @@ def route(job, agent, model, key):
     pick = lambda v: v.get(mode) if isinstance(v, dict) else v
     model, effort = pick(own.get("model")) or model, pick(own.get("effort")) or effort
     taken, why = 0, []
+    if agent == "factory-reviewer-security" and key.startswith("review-"):
+        fl = security_floor(job)
+        if fl:
+            up = at_least(model, effort, fl[0], fl[1])
+            if up != (model, effort):
+                why = [f"security floor: {fl[2]}"]
+            model, effort = up
     if agent == "factory-builder" and key.startswith("build-"):
         esc = (job.get("escalation") or {}).get("builder") or {}
         for _ in range(int(esc.get("steps") or 0)):
@@ -229,6 +236,47 @@ def route(job, agent, model, key):
             model, effort, taken = up[0], up[1], taken + 1
         why = (esc.get("why") or [])[:taken]
     return model, effort, taken, why
+
+
+# Security runs on sonnet by default; a diff that reaches a floor class (the auto-merge hold
+# classes: CI/pipeline config, dependencies, containers/deploy, schema/migrations, auth/secrets) or a
+# secrets-handling path gets it at routing.security_floor (default opus/high).
+SECURITY_FLOOR = {"model": "opus", "effort": "high"}
+SECRET_PATH_GLOBS = ["*secret*", "*credential*", "*crypt*", "*password*", "*token*", "*vault*", "*.sops.*", "*keyring*"]
+_floor_cache = {}
+
+
+def security_floor(job):
+    """(model, effort, why) when the security reviewer must run at the floor, else None."""
+    fl = routing().get("security_floor", SECURITY_FLOOR)
+    if fl is False:
+        return None
+    fl = fl if isinstance(fl, dict) else SECURITY_FLOOR
+    head = git("rev-parse", "HEAD", cwd=job["worktree"]) if os.path.isdir(job.get("worktree") or "") else None
+    key = (job["id"], head)
+    if key not in _floor_cache:
+        held = hold_files(job)
+        why = held[0] if held else None
+        if not why and head:
+            names = git("diff", "--name-only", "--no-renames", f"{job['base']}...HEAD", cwd=job["worktree"]) or ""
+            extra = [g for g in (routing().get("security_floor_globs") or []) if isinstance(g, str)]
+            hit = [x for x in names.split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, SECRET_PATH_GLOBS + extra)]
+            why = f"secrets handling: {hit[0]}" if hit else None
+        _floor_cache[key] = why
+    why = _floor_cache[key]
+    if not why:
+        return None
+    return (fl.get("model") if fl.get("model") in MODELS else "opus",
+            fl.get("effort") if fl.get("effort") in EFFORTS else "high", why)
+
+
+def at_least(model, effort, fm, fe):
+    """The higher of two levels, model and effort each."""
+    if fm in MODELS and (model not in MODELS or MODELS.index(fm) > MODELS.index(model)):
+        model = fm
+    if fe in EFFORTS and (effort not in EFFORTS or EFFORTS.index(fe) > EFFORTS.index(effort)):
+        effort = fe
+    return model, effort
 
 
 def builder_level(job, n):
@@ -816,6 +864,8 @@ def spawn(job, out, key, blocks):
         out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}", f"EFFORT: {effort or 'default'}"]
         if steps:
             out.main.append(f"ESCALATED: +{steps} step{'s' if steps > 1 else ''} ({'; '.join(why)})")
+        elif why:
+            out.main.append(f"FLOOR: {model}/{effort} ({'; '.join(why)})")
         out.main += [f"WRITES: {target}", "PROMPT:", prompt]
     out.main += ["---", f"THEN: when the agent{'s have' if many else ' has'} returned: "
                  f".factory/job next {job['id']}"]

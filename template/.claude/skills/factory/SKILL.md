@@ -86,7 +86,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `{"light": "low"}`) wins over the script's choice and the agent's frontmatter;
   `routing.escalate: false` switches the ladder off; `routing.cap` (default
   `{"model": "opus", "effort": "xhigh"}`) is its top; `routing.blocked_retries` (default 1)
-  is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
+  is how often a `BUILD: BLOCKED` is retried one step up in the same round; `routing.security_floor`
+  and `routing.security_floor_globs` set when security leaves sonnet. See **Routing**.
 - `validate` (optional): where the round's full validation runs. `{"mode": "local"}` (default):
   repo.md's Validate commands through `heavy` on this machine. `{"mode": "ci", "open_pr": true|false,
   "draft": true|false}` (setup writes it when `.factory/forgecheck` finds CI that runs the suite for
@@ -157,9 +158,16 @@ or relay their content.
 ## Routing
 
 Every spawn block carries `MODEL:` and `EFFORT:` (see **Job state**). The defaults are in the
-agents' frontmatter (`model:`, `effort:`): spec-writer, approver and most reviewers medium,
-audit and security high; the builder runs at high in `full`, medium in `light` and low in
-`docs` jobs (the script sets that per mode). **Escalation ladder:** after a round with blocking
+agents' frontmatter (`model:`, `effort:`): every reviewer except the audit (code, security,
+llm-safety, privacy, data-quality, methodology, ux, ui), the spec-writer and the approver on
+sonnet at medium; the audit on opus at high; the builder on opus at high in `full`, medium in
+`light` and low in `docs` jobs (the script sets that per mode). **Security floor:** when the
+diff reaches a floor class (CI/pipeline config, dependencies, containers/deploy, schema or
+migrations, auth, `delivery.auto_merge_never`) or a secrets-handling path (`*secret*`,
+`*credential*`, `*crypt*`, `*password*`, `*token*`, `*vault*`, `*.sops.*`, `*keyring*`, plus
+`routing.security_floor_globs`), the security reviewer runs at `routing.security_floor`
+(default `{"model": "opus", "effort": "high"}`; `false` switches it off) and its block shows
+`FLOOR: <model>/<effort> (why)`. The floor only raises: a `routing.agents` setting above it stays. **Escalation ladder:** after a round with blocking
 reviews, a failed full validation or an approver REWORK, the next builder goes one step up:
 effort first, then the model (sonnet → opus), up to `routing.cap` (opus/xhigh). A
 `BUILD: BLOCKED` is retried once in the same round one step up (`round-N/build-blocked-K.md`

@@ -871,7 +871,8 @@ out="$(J next "$L" --respawn)"; has "$out" "AGENT: factory-spec-writer"; has "$o
 echo SPEC > "$(jd "$L")/spec.md"
 out="$(J next "$L")"; has "$out" "MODEL: opus"; has "$out" "EFFORT: medium"; lacks "$out" "ESCALATED"   # light builder
 build "$L" 1; J next "$L" >/dev/null
-out="$(J reviewers "$L" code,security)"; has "$out" "EFFORT: high"   # security
+out="$(J reviewers "$L" code,security)"; b="$(blk "$out" factory-reviewer-security)"   # app.py: no floor class
+has "$b" "MODEL: sonnet"; has "$b" "EFFORT: medium"; lacks "$b" "FLOOR:"; has "$(blk "$out" factory-reviewer-code)" "MODEL: sonnet"
 review "$L" 1 code CHANGES; review "$L" 1 security PASS
 out="$(J next "$L")"; has "$out" "EFFORT: high"; has "$out" "ESCALATED: +1 step (round 1: CHANGES from code)"
 has "$out" "opus/medium -> opus/high"
@@ -925,6 +926,32 @@ build "$L2" 1; J next "$L2" >/dev/null
 out="$(J reviewers "$L2" code)"; has "$out" "AGENT: factory-reviewer-code"; has "$out" "MODEL: opus"; has "$out" "EFFORT: low"
 review "$L2" 1 code CHANGES; out="$(J next "$L2")"; lacks "$out" "ESCALATED"; has "$out" "EFFORT: low"; park "$L2"
 cp "$T/config.rt" .factory/config.json
+
+# ---------- security on sonnet, at the floor (opus/high) when the diff reaches a floor class ----------
+scenario=security-floor
+cp .factory/config.json "$T/config.sf"
+SF1="$(newjob "zq sf auth")"; tobuilt "$SF1" src/auth/login.py
+out="$(J reviewers "$SF1" security,code,audit)"; b="$(blk "$out" factory-reviewer-security)"
+has "$b" "MODEL: opus"; has "$b" "EFFORT: high"; has "$b" "FLOOR: opus/high (security floor: auth: src/auth/login.py)"
+b="$(blk "$out" factory-reviewer-audit)"; has "$b" "MODEL: opus"; has "$b" "EFFORT: high"; lacks "$b" "FLOOR:"
+has "$(blk "$out" factory-reviewer-code)" "MODEL: sonnet"
+python3 -c "import json; rows=[json.loads(l) for l in open('$R/.factory/metrics.jsonl')]; \
+r=[x for x in rows if x['job']=='$SF1' and x['event']=='spawn' and x['agent']=='factory-reviewer-security']; \
+assert [(x['model'], x['effort']) for x in r]==[('opus','high')], r" && ok || bad "floor not in the spawn metrics"
+park "$SF1"
+SF2="$(newjob "zq sf deps")"; tobuilt "$SF2" package.json
+has "$(blk "$(J reviewers "$SF2" security,code)" factory-reviewer-security)" "FLOOR: opus/high (security floor: dependencies: package.json)"; park "$SF2"
+SF3="$(newjob "zq sf secret")"; tobuilt "$SF3" src/secret_store.py
+has "$(blk "$(J reviewers "$SF3" security,code)" factory-reviewer-security)" "FLOOR: opus/high (security floor: secrets handling: src/secret_store.py)"; park "$SF3"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["routing"]={"security_floor": False}; json.dump(c, open(".factory/config.json","w"))'
+SF4="$(newjob "zq sf off")"; tobuilt "$SF4" src/auth/x.py
+b="$(blk "$(J reviewers "$SF4" security,code)" factory-reviewer-security)"; has "$b" "MODEL: sonnet"; lacks "$b" "FLOOR:"; park "$SF4"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["routing"]={"security_floor": {"model": "opus", "effort": "xhigh"}, "agents": {"factory-reviewer-security": {"effort": "low"}}}; json.dump(c, open(".factory/config.json","w"))'
+SF5="$(newjob "zq sf cfg")"; tobuilt "$SF5" .github/workflows/ci.yml
+b="$(blk "$(J reviewers "$SF5" security,code)" factory-reviewer-security)"; has "$b" "EFFORT: xhigh"; has "$b" "MODEL: opus"; park "$SF5"
+SF6="$(newjob "zq sf cfg plain")"; tobuilt "$SF6" src/plain.py
+b="$(blk "$(J reviewers "$SF6" security,code)" factory-reviewer-security)"; has "$b" "EFFORT: low"; has "$b" "MODEL: sonnet"; park "$SF6"
+cp "$T/config.sf" .factory/config.json
 
 # ---------- UI work: the builder reads frontend-design only when the spec or diff names a UI path ----------
 scenario=ui-work

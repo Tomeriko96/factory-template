@@ -195,9 +195,14 @@ pnpm and yarn are not seeded (not verified). Switch it off with `"worktree_seed"
 
 Every spawn block that `.factory/job` prints carries `MODEL:` and `EFFORT:`; the orchestrator
 passes them as the Agent tool's `model` and `effort`. Defaults sit in the agents'
-frontmatter: spec-writer, acceptance-writer, approver and most reviewers at medium, the
-audit and security reviewers at high; the builder at high in `full`, medium in `light` and
-low in `docs` jobs. The approver stays on sonnet unless the precheck found issues or it is
+frontmatter: the reviewers that almost always pass (31 of 32 reviews on a measured day) run on
+sonnet at medium: code, security, llm-safety, privacy, data-quality, methodology, ux and ui, like
+the spec-writer, acceptance-writer and approver; the audit reviewer stays on opus at high, the
+builder on opus at high in `full`, medium in `light` and low in `docs` jobs. One safeguard:
+when the diff reaches a floor class (CI/pipeline config, dependencies, containers, schema or
+migrations, auth, `auto_merge_never`) or a secrets-handling path (`*secret*`, `*credential*`,
+`*token*`, …; extend with `routing.security_floor_globs`), security runs on opus at high
+(`routing.security_floor`, `false` = off) and the spawn shows `FLOOR: opus/high (why)`. The approver stays on sonnet unless the precheck found issues or it is
 round 2+ (then opus).
 
 **Escalation ladder.** A round with blocking reviews, a failed full validation or an
@@ -211,6 +216,8 @@ stays as `round-N/build-blocked-1.md`); at the cap or on a second block the job 
 "routing": {
   "agents": { "factory-builder": { "effort": { "light": "low" } }, "factory-reviewer-ux": { "model": "sonnet" } },
   "cap": { "model": "opus", "effort": "xhigh" },
+  "security_floor": { "model": "opus", "effort": "high" },
+  "security_floor_globs": ["src/keys/**"],
   "escalate": true,
   "blocked_retries": 1
 }
@@ -437,7 +444,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 614 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 633 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 61 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |

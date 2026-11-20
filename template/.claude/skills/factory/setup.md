@@ -79,9 +79,11 @@ code live if they are not named `*prompt*`/`*agent*`/`*llm*`. ux/ui use the "UI 
 line of repo.md, in the light form (screenshots + axe per changed page) unless a `full` job adds
 a new page/route; leave `ui_review` out (auto) unless the user asks.
 
-Models live in the agent frontmatter (builder, security, privacy, llm-safety and audit on
-opus; approver and the rest on sonnet; the orchestrator raises the approver to opus when
-the precheck finds issues). Do not change them. Advise the user to run the
+Models live in the agent frontmatter (builder and audit on opus; every other reviewer, the
+spec-writer and the approver on sonnet at medium; `.factory/job` raises security to opus/high
+when the diff reaches CI, dependencies, containers, schema, auth or secrets handling, and the
+approver to opus when the precheck finds issues). Do not change them; `routing` in config.json
+overrides them per agent if the user asks. Advise the user to run the
 `/factory` sessions themselves on sonnet.
 
 **Ports:** `port_base` 5100 unless the scan found a conflict; then pick another base

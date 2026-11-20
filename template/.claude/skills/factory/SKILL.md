@@ -84,7 +84,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `routing.agents.<agent>.model|effort` (a value, or one per job mode such as
   `{"light": "low"}`) wins over the script's choice and the agent's frontmatter;
   `routing.escalate: false` switches the ladder off; `routing.cap` (default
-  `{"model": "opus", "effort": "high"}`) is its top; `routing.blocked_retries` (default 1)
+  `{"model": "opus", "effort": "xhigh"}`) is its top; `routing.blocked_retries` (default 1)
   is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
 - `house_style` (optional, no default; set by whoever runs the factory, never by setup):
   `{"skills": ["<skill>", …]}`. The builder and the ux/ui reviewers get a `House style:`
@@ -139,7 +139,7 @@ agents' frontmatter (`model:`, `effort:`): spec-writer, approver and most review
 audit and security high; the builder runs at high in `full`, medium in `light` and low in
 `docs` jobs (the script sets that per mode). **Escalation ladder:** after a round with blocking
 reviews, a failed full validation or an approver REWORK, the next builder goes one step up:
-effort first, then the model (sonnet → opus), up to `routing.cap` (opus/high). A
+effort first, then the model (sonnet → opus), up to `routing.cap` (opus/xhigh). A
 `BUILD: BLOCKED` is retried once in the same round one step up (`round-N/build-blocked-K.md`
 keeps the old file); at the cap, or on the second block, the job goes to `needs-human` as
 before. The block then shows `ESCALATED: +k steps (why)`. If the Agent tool in this session

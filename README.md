@@ -164,7 +164,7 @@ round 2+ (then opus).
 
 **Escalation ladder.** A round with blocking reviews, a failed full validation or an
 approver REWORK raises the next builder one step: effort first, then sonnet → opus, up to
-opus/high. A `BUILD: BLOCKED` is retried once in the same round one step up (the old file
+opus/xhigh (one rung above the `full` builder's opus/high). A `BUILD: BLOCKED` is retried once in the same round one step up (the old file
 stays as `round-N/build-blocked-1.md`); at the cap or on a second block the job goes to
 `needs-human` as before. The spawn shows `ESCALATED: +k steps (why)`. Configure it in
 `config.json`:
@@ -172,7 +172,7 @@ stays as `round-N/build-blocked-1.md`); at the cap or on a second block the job 
 ```json
 "routing": {
   "agents": { "factory-builder": { "effort": { "light": "low" } }, "factory-reviewer-ux": { "model": "sonnet" } },
-  "cap": { "model": "opus", "effort": "high" },
+  "cap": { "model": "opus", "effort": "xhigh" },
   "escalate": true,
   "blocked_retries": 1
 }

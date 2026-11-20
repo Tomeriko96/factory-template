@@ -246,6 +246,8 @@ scenario=blocked
 J new "zq blocked" >/dev/null; BL=092-zq-blocked
 echo SPEC > "$(jd $BL)/spec.md"; J next $BL >/dev/null
 mkdir -p "$(jd $BL)/round-1"; printf 'BUILD: BLOCKED needs the staging API key\n\nSummary\n' > "$(jd $BL)/round-1/build.md"
+out="$(J next $BL)"; first "$out" "ACTION: spawn 1 agent"; has "$out" "EFFORT: xhigh"   # one retry one step up
+printf 'BUILD: BLOCKED needs the staging API key\n\nSummary\n' > "$(jd $BL)/round-1/build.md"
 out="$(J next $BL)"; first "$out" "DONE: needs-human: builder blocked in round 1: needs the staging API key"
 lacks "$out" "choose-reviewers"
 
@@ -653,12 +655,26 @@ out="$(J next "$L")"; has "$out" "EFFORT: high"; has "$out" "ESCALATED: +1 step 
 has "$out" "opus/medium -> opus/high"
 build "$L" 2; J next "$L" >/dev/null; J reviewers "$L" code,security >/dev/null
 review "$L" 2 code CHANGES; review "$L" 2 security PASS
-out="$(J next "$L")"; has "$out" "already at the ladder's cap (opus/high)"; has "$out" "EFFORT: high"
-field "$L" "j['escalation']['builder']['steps']" 1
+out="$(J next "$L")"; has "$out" "EFFORT: xhigh"; has "$out" "ESCALATED: +2 steps"; has "$out" "opus/high -> opus/xhigh"
+field "$L" "j['escalation']['builder']['steps']" 2
 python3 -c "import json; rows=[json.loads(l) for l in open('$R/.factory/metrics.jsonl')]; \
 r=[x for x in rows if x['job']=='$L' and x['event']=='spawn' and x['agent']=='factory-builder']; \
-assert [(x['effort'], x['escalation']) for x in r]==[('medium',0),('high',1),('high',1)], r" && ok || bad "ladder metrics"
+assert [(x['effort'], x['escalation']) for x in r]==[('medium',0),('high',1),('xhigh',2)], r" && ok || bad "ladder metrics"
 park "$L"
+# A full builder (base opus/high) escalates once to xhigh (the default cap), then stays there
+FL="$(newjob "zq ladder full")"; echo SPEC > "$(jd "$FL")/spec.md"
+out="$(J next "$FL")"; has "$out" "MODEL: opus"; has "$out" "EFFORT: high"; lacks "$out" "ESCALATED"
+build "$FL" 1; J next "$FL" >/dev/null; J reviewers "$FL" code,security >/dev/null
+review "$FL" 1 code CHANGES; review "$FL" 1 security PASS
+out="$(J next "$FL")"; has "$out" "EFFORT: xhigh"; has "$out" "ESCALATED: +1 step"; has "$out" "opus/high -> opus/xhigh"
+build "$FL" 2; J next "$FL" >/dev/null; J reviewers "$FL" code,security >/dev/null
+review "$FL" 2 code CHANGES; review "$FL" 2 security PASS
+out="$(J next "$FL")"; has "$out" "already at the ladder's cap (opus/xhigh)"; has "$out" "EFFORT: xhigh"; lacks "$out" "-> opus"
+field "$FL" "j['escalation']['builder']['steps']" 1
+python3 -c "import json; rows=[json.loads(l) for l in open('$R/.factory/metrics.jsonl')]; \
+r=[x for x in rows if x['job']=='$FL' and x['event']=='spawn' and x['agent']=='factory-builder']; \
+assert [(x['effort'], x['escalation']) for x in r]==[('high',0),('xhigh',1),('xhigh',1)], r" && ok || bad "full ladder metrics: one real step, none at the cap"
+park "$FL"
 # BUILD: BLOCKED: one retry one step up, then needs-human as before
 K="$(newjob --mode light "zq blocked")"; echo SPEC > "$(jd "$K")/spec.md"; J next "$K" >/dev/null
 mkdir -p "$(jd "$K")/round-1"; printf 'BUILD: BLOCKED - cannot find the module\n' > "$(jd "$K")/round-1/build.md"
@@ -667,10 +683,16 @@ has "$out" "ESCALATED: +1 step (BUILD: BLOCKED in round 1)"; has "$out" "build-b
 exists "$(jd "$K")/round-1/build-blocked-1.md"; field "$K" "j['round']" 0
 printf 'BUILD: BLOCKED - needs a product decision\n' > "$(jd "$K")/round-1/build.md"
 out="$(J next "$K")"; first "$out" "DONE: needs-human: builder blocked in round 1: needs a product decision"
-# A full builder is at the cap already: blocked goes to needs-human at once
+# A full builder blocked is retried once at xhigh too; at the cap (configured opus/high) it goes to needs-human at once
 F="$(newjob "zq blocked full")"; echo SPEC > "$(jd "$F")/spec.md"; J next "$F" >/dev/null
 mkdir -p "$(jd "$F")/round-1"; printf 'BUILD: BLOCKED - x\n' > "$(jd "$F")/round-1/build.md"
-first "$(J next "$F")" "DONE: needs-human: builder blocked in round 1"
+out="$(J next "$F")"; has "$out" "EFFORT: xhigh"; has "$out" "ESCALATED: +1 step (BUILD: BLOCKED in round 1)"; park "$F"
+cp .factory/config.json "$T/config.cap"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["routing"]={"cap": {"model": "opus", "effort": "high"}}; json.dump(c, open(".factory/config.json","w"))'
+F2="$(newjob "zq blocked capped")"; echo SPEC > "$(jd "$F2")/spec.md"; J next "$F2" >/dev/null
+mkdir -p "$(jd "$F2")/round-1"; printf 'BUILD: BLOCKED - x\n' > "$(jd "$F2")/round-1/build.md"
+first "$(J next "$F2")" "DONE: needs-human: builder blocked in round 1"
+cp "$T/config.cap" .factory/config.json
 # docs builder: sonnet/low; config.routing overrides per agent (and per mode), escalate false switches the ladder off
 cp .factory/config.json "$T/config.rt"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["routing"]={"escalate": False, "agents": {"factory-builder": {"effort": {"light": "low"}}, "factory-reviewer-code": {"model": "opus", "effort": "low"}}}; json.dump(c, open(".factory/config.json","w"))'

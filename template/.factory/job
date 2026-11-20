@@ -144,7 +144,8 @@ def agent_front(agent):
 # over what the script asks for (the approver's model, the docs/sync builder on sonnet, the
 # builder's effort per job mode) over the agent's frontmatter. The builder climbs one step per
 # failed round (blocking reviews, a failed validation, an approver REWORK) or BUILD: BLOCKED:
-# effort first, then the model, up to config.routing.cap (default opus/high).
+# effort first, then the model, up to config.routing.cap (default opus/xhigh: one rung above the
+# full builder's base opus/high, so the ladder does something for every mode).
 
 def routing():
     r = config().get("routing")
@@ -154,7 +155,7 @@ def routing():
 def ladder_cap():
     c = routing().get("cap") if isinstance(routing().get("cap"), dict) else {}
     return (c.get("model") if c.get("model") in MODELS else "opus",
-            c.get("effort") if c.get("effort") in EFFORTS else "high")
+            c.get("effort") if c.get("effort") in EFFORTS else "xhigh")
 
 
 def step_up(model, effort):

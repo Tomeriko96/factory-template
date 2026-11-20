@@ -91,17 +91,16 @@ has to exist on the forge (creating them is their call, it changes the forge).
 `close_on_merge` is `true` by default: the factory closes the issue after its PR/MR is merged
 (tell the user; `false` leaves that to a human).
 
-**Delivery** (ask the user once, recommend `pr`): `local` (merge into the base branch
+**Delivery** (default `pr` with `draft: false`, a ready-for-review PR/MR; do not ask, only say
+it in the report; ask only when `pr` cannot work): `local` (merge into the base branch
 locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge `none`
 → `local`. Check `push`/`pr`
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
 For `pr`, run `.factory/forgecheck --forge <forge>` (it reads the CI config and asks the forge;
-add `--offline` if `gh`/`glab` is not logged in) and show the user its three answers:
-- `CI-ON-DRAFT: no` (CI skips drafts) → `draft: false`: a draft would give no CI signal.
-  `yes` → `draft: true` is fine and still gets CI; `draft: false` only if the user wants
-  ready-for-review PRs or auto-merge. `unknown` → say so, and suggest opening one test draft.
-- Ask whether the factory should switch on auto-merge (`auto_merge`, default `false`; it needs
+add `--offline` if `gh`/`glab` is not logged in) and report its three answers:
+- `draft` stays `false` whatever `CI-ON-DRAFT` says; set `true` only when the user asks for drafts.
+- Only when `REQUIRED-CHECKS: yes`: ask whether the factory should switch on auto-merge (`auto_merge`, default `false`; it needs
   `draft: false`, and only on the user's explicit yes). Explain what it does: the forge merges
   once its own checks pass, but `.factory/job` only lets a job through that was approved with
   a clean precheck, touches no CI config, dependencies, containers, schema/migrations or auth,
@@ -166,7 +165,7 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "port_base": 5100,
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true },
-  "delivery": { "mode": "pr", "remote": "origin", "draft": true, "auto_merge": false },
+  "delivery": { "mode": "pr", "remote": "origin", "draft": false, "auto_merge": false },
   "limits": { "active_jobs": 3, "open_prs": 5 }
 }
 ```
@@ -221,7 +220,7 @@ Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>
 - Any `uv run` you or the agents use for factory tooling (not the app) needs
   `--no-project --python 3`, so it neither syncs the repo's project nor follows its
   `.python-version` pin.
-- **Smoke test** (default; skip only if the user declines): `git switch -c
+- **Smoke test** (always; do not ask first, skip only if the user said so beforehand): `git switch -c
   factory-smoketest`, run `/factory --light --local <trivial change, e.g. a README typo>`
   (`--local`: delivered by a local merge into the smoke-test branch, never pushed, whatever
   `delivery.mode` says), check that spec → build → review → decision → delivery complete. Then clean up: `git switch -`,

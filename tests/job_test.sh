@@ -449,6 +449,12 @@ json.dump([gh(41, "Controle one"), gh(42, "Controle two"), gh(43, "Controle thre
            gh(44, "Controle four", ["factory:full"]), gh(45, "Controle five"), gh(46, "Controle six"),
            gh(47, "Controle seven")], open(".factory/run/triage/bu.json", "w"))
 PY
+# limits.full_bundle_max raises the full cap, never above bundle_max
+cp .factory/config.json "$T/config.bu"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["limits"]=dict(c.get("limits") or {}, bundle_max=5, full_bundle_max=9); json.dump(c, open(".factory/config.json","w"))'
+J triage prepare .factory/run/triage/bu.json --no-agent >/dev/null
+python3 -c 'import json; d=json.load(open(".factory/run/triage/issues.json")); assert (d["bundle_max"], d["full_bundle_max"]) == (5, 5), d' && ok || bad "full_bundle_max capped by bundle_max"
+cp "$T/config.bu" .factory/config.json
 out="$(J triage prepare .factory/run/triage/bu.json --no-agent)"; first "$out" "OK: 7 candidate issues: #41, #42"; lacks "$out" "AGENT"
 first "$(J triage bundle light 41 99)" "ERROR: not startable"; first "$(J triage bundle light 41 43)" "ERROR: #43 has factory:solo"
 first "$(J triage bundle huge 41)" "ERROR: usage"; first "$(J triage bundle light 41 41)" "ERROR: an issue is named twice"

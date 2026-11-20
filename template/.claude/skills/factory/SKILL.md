@@ -48,7 +48,7 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `factory:ready`; leave it out to take all). Labels that steer a single issue:
   `factory:docs|light|full` (the effort, wins over the triage), `factory:solo` (never
   bundled). `limits.bundle_max` (default 4) is the most issues in one `docs`/`light` job
-  (a `full` job takes at most 2). `issues.link` is the keyword that
+  (a `full` job takes at most `limits.full_bundle_max`, default 2). `issues.link` is the keyword that
   references the issue in PR/MR bodies: `Closes` (closes it on merge) or `Refs` (link
   only; required when merge commits are mirrored to another forge, where `Closes #N`
   would close an unrelated issue with the same number). Missing → `Closes`.
@@ -366,7 +366,7 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
 `/factory next` does not take issues one by one. `.factory/job triage prepare` removes what must not
 start, the **factory-triage** agent (pinned on sonnet, no Bash, reads only the issue file and the repo)
 decides per issue its effort and which small related issues share one job, and `triage plan`
-checks that plan: at most `bundle_max` issues per `docs`/`light` job and 2 per `full` job, labels
+checks that plan: at most `bundle_max` issues per `docs`/`light` job and `full_bundle_max` (default 2) per `full` job, labels
 `factory:docs|light|full` over the agent, `factory:solo` alone, issues the agent forgot become their own
 `full` job. Judgement sits in the agent and the rules in the script, so the result does not depend on
 the model or effort of this session. A `light` job that turns out to touch CI, dependencies,

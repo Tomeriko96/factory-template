@@ -222,7 +222,7 @@ needed (an old config that still has `issues.label` keeps requiring it; remove t
    everything else), issues it should skip (questions, epics, unclear), and which small related issues belong in
    one job.
 3. `.factory/job triage plan` validates that plan: at most `limits.bundle_max` (default 4) issues in a
-   `docs`/`light` job, 2 in a `full` job, `factory:docs|light|full` labels beat the agent, `factory:solo` is never
+   `docs`/`light` job, `limits.full_bundle_max` (default 2, at most `bundle_max`) in a `full` job, `factory:docs|light|full` labels beat the agent, `factory:solo` is never
    bundled, issues the agent forgot become their own `full` job. You see the groups and agree (or `--yes`).
 4. `triage start <k>` starts each group. A bundle is one job with `"issues": [..]`: one spec with criteria
    per issue, one PR with `Closes #a, Closes #b`, and all issues are closed after the merge.

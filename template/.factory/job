@@ -1090,13 +1090,14 @@ def triage_prepare(args):
     cands = cands[:MAX_CANDIDATES]
     lim = config().get("limits") or {}
     cap = max(1, int(lim.get("bundle_max") or BUNDLE_MAX))
+    full_cap = max(1, min(cap, int(lim.get("full_bundle_max") or FULL_BUNDLE_MAX)))
     for name in ("plan.json", "groups.json"):
         try:
             os.remove(os.path.join(TRIAGE, name))
         except OSError:
             pass
     tri_write("issues.json", {"candidates": cands, "skipped": skipped, "bundle_max": cap,
-                              "full_bundle_max": min(cap, FULL_BUNDLE_MAX), "at": now()})
+                              "full_bundle_max": full_cap, "at": now()})
     out = Out()
     out.notes += [f"SKIPPED: #{s['issue']}: {s['reason']}" for s in skipped]
     if unlabelled:
@@ -1114,7 +1115,7 @@ def triage_prepare(args):
     out.main += [f"ACTION: spawn 1 agent  ({len(cands)} candidate issue{'s' if len(cands) != 1 else ''})",
                  "---", "AGENT: factory-triage", "MODEL: default", f"WRITES: {plan}", "PROMPT:",
                  f"Repo: {REPO}\nIssues: {os.path.join(TRIAGE, 'issues.json')}\nPlan: {plan}\n"
-                 f"Bundle max: {cap} issues (full: {min(cap, FULL_BUNDLE_MAX)}).",
+                 f"Bundle max: {cap} issues (full: {full_cap}).",
                  "---", "THEN: when the agent has returned: .factory/job triage plan"]
     return out
 
@@ -1265,7 +1266,7 @@ def triage_bundle(args):
     mode = max([args[0]] + [issue_override(cands[n]) or args[0] for n in nrs], key=MODE_RANK.get)
     size = int(data.get("full_bundle_max") or FULL_BUNDLE_MAX) if mode == "full" else int(data.get("bundle_max") or BUNDLE_MAX)
     if len(nrs) > size:
-        raise Fail(f"a {mode} job takes at most {size} issues (limits.bundle_max); split it")
+        raise Fail(f"a {mode} job takes at most {size} issues (limits.bundle_max / full_bundle_max); split it")
     solo = [n for n in nrs if SOLO_LABEL in [l.lower() for l in cands[n]["labels"]]]
     if solo and len(nrs) > 1:
         raise Fail(", ".join(f"#{n}" for n in solo) + f" has {SOLO_LABEL}: it is never bundled")

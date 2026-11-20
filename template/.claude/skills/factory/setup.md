@@ -94,7 +94,8 @@ add other authors unless the user asks. Forge `none`, or the user does not want 
 mode → `"issues": null` (then `next` uses `backlog.md`). Set `"link": "Refs"` when the
 repo is mirrored to another forge (a second remote on another host, or docs that say
 commits are mirrored): `Closes #N` would close an unrelated issue there. Tell the user which labels steer
-it: `blocked` (skipped), `factory:solo` (never bundled), `factory:docs|light|full` (effort); none of them
+it: `blocked` (skipped), `factory:solo` (never bundled), `factory:docs|light|full` (effort), `factory:bundle`
+(a bundle issue: it and the issues in its `- [ ] #123` checklist, sub-issues or issue links are one job); none of them
 has to exist on the forge (creating them is their call, it changes the forge).
 `close_on_merge` is `true` by default: the factory closes the issue after its PR/MR is merged
 (tell the user; `false` leaves that to a human).

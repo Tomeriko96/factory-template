@@ -23,7 +23,8 @@ the judgement sits in pinned agents):
 /factory --docs <feature>       documentation only: one carry-out step, no reviewers
 /factory … --local <feature>    this job merges locally whatever delivery.mode says
 /factory issue <nr> [<nr>…]    from one issue (trusted authors only); several = one bundle job;
-                                label factory:docs|light|full sets the effort
+                                label factory:docs|light|full sets the effort; a bundle issue
+                                (label factory:bundle) = one job for it and all its members
 /factory next [--yes]           triage ALL open, non-blocked issues of trusted authors: bundles small related
                                 ones into one job, picks docs/light/full per job, shows the plan, then starts
                                 (without config.issues: the first item of .factory/backlog.md)
@@ -321,6 +322,33 @@ needed (an old config that still has `issues.label` keeps requiring it; remove t
    bundled, issues the agent forgot become their own `full` job. You see the groups and agree (or `--yes`).
 4. `triage start <k>` starts each group. A bundle is one job with `"issues": [..]`: one spec with criteria
    per issue, one PR with `Closes #a, Closes #b`, and all issues are closed after the merge.
+
+### Bundle issues: your own grouping
+
+To decide the grouping yourself, open a **bundle issue**: label it `factory:bundle` and list its members in its
+description as a checklist, one per line, from the same project:
+
+```markdown
+Small export fixes, one job.
+
+- [ ] #123
+- [ ] #124
+- [x] #125
+```
+
+Members also come from the forge where it has a native relation: **GitHub sub-issues** and **GitLab issue
+links** (any link type, e.g. "relates to"; GitLab has no issue-under-issue children). `triage prepare` reads
+them with `gh api`/`glab api`. Rules:
+
+- Only a bundle issue by an `allowed_authors` login counts, and every member passes the same filter as any
+  issue (open, allowed author, skip labels, no existing job/PR/commit). Closed members, members by other
+  authors, issues of another project, nested bundles and `factory:solo` members are left out with a note.
+- Members are not candidates on their own (`SKIPPED: #124: in bundle #120`); the bundle is **one job** with
+  `"issues": [120, 123, 124]`, never split or mixed with other issues. The effort is the highest of the triage
+  and the labels on the bundle and its members (the floor still applies); `bundle_max` only warns.
+- `/factory issue 120` starts the bundle the same way (`triage bundle <mode> 120`).
+- The spec has a section with acceptance criteria per member; the PR/MR body has `Closes #120`, `Closes #123`,
+  `Closes #124` (your `issues.link` keyword), and `close_on_merge` closes the bundle and all members.
 
 The effort has a **floor**: a `light` job whose diff touches CI/pipeline config, dependencies, containers,
 schema/migrations or auth (or `delivery.auto_merge_never`) becomes `full` automatically; a `docs` job that touches

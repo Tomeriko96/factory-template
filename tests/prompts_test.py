@@ -178,6 +178,21 @@ check("mock" in (tq["reviewer-code"] or "") and "production" in (tq["reviewer-co
 check(section(texts.get("reviewer-audit", ""), "Red-green evidence and debugging"), "reviewer-audit: no red-green section")
 dr = {g: section(texts.get(g, ""), "Design reference") for g in ("reviewer-ui", "reviewer-ux")}
 check(all(dr.values()) and len(set(dr.values())) == 1, "'## Design reference' missing or differs between ui and ux")
+# Light ui/ux reviews: the job's UI review line, the agents' two forms, shoot's axe check
+SHOOT = open(os.path.join(T, ".factory", "shoot")).read()
+check("UI review: light ({why})" in JOB and "UI review: full ({why})" in JOB, "job: no UI review: light|full line")
+for g in ("reviewer-ui", "reviewer-ux"):
+    t = texts.get(g, "")
+    check(section(t, "Light review (`UI review: light`)") and section(t, "Full review (`UI review: full`)")
+          and "`UI review: light (…)`" in t, f"{g}: light/full review sections missing")
+    light = section(t, "Light review (`UI review: light`)") or ""
+    check("--axe" in light and "heavy --priority low" in light and "--widths 1280,375" in light,
+          f"{g}: the light review lacks --axe, heavy --priority low or the two widths")
+check(section(texts.get("reviewer-ui", ""), "Light or full: your prompt says which")
+      == section(texts.get("reviewer-ux", ""), "Light or full: your prompt says which"), "ui/ux: 'Light or full' differs")
+check('"--axe"' in SHOOT and "axe.min.js" in SHOOT, "shoot: no --axe check")
+check("`UI review: full`" in texts.get("spec-writer", "") and "UI_REVIEW_SPEC_RE" in JOB, "spec-writer: UI review: full line not described")
+check("ui_review" in SKILL and "ui_page_globs" in SKILL, "SKILL.md: ui_review / ui_page_globs not documented")
 check('"House style: ' in JOB or "House style: load" in JOB, "job: no House style: line")
 check("house_style" in SKILL and "house_style" in SETUP, "house_style not documented in SKILL.md and setup.md")
 check("check-style" in texts.get("reviewer-code", "") and "`gate`" in texts.get("builder", "") and "write-issue" in SKILL,

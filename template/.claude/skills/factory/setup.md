@@ -76,7 +76,8 @@ SKILL.md). Set `reviewer_paths` in config.json only where the defaults miss this
 `privacy` → the personal-data paths the data scan found (else it falls back to
 `delivery.auto_merge_never`, else any code change), `llm-safety` → where prompts and agent
 code live if they are not named `*prompt*`/`*agent*`/`*llm*`. ux/ui use the "UI paths"
-line of repo.md.
+line of repo.md, in the light form (screenshots + axe per changed page) unless a `full` job adds
+a new page/route; leave `ui_review` out (auto) unless the user asks.
 
 Models live in the agent frontmatter (builder, security, privacy, llm-safety and audit on
 opus; approver and the rest on sonnet; the orchestrator raises the approver to opus when

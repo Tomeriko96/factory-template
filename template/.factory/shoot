@@ -1,17 +1,19 @@
 #!/usr/bin/env -S uv run --quiet --python 3 --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["playwright==1.63.0"]
+# dependencies = ["playwright==1.63.0", "axe-playwright-python==0.1.8"]
 # ///
 """Headless screenshots + basic checks of a running app, for the ui/ux reviewers.
 
   .factory/shoot <base-url> --out <dir> [--path /] [--path /x] [--widths 375,1280]
-                 [--scheme light|dark|both] [--wait 1500]
+                 [--scheme light|dark|both] [--wait 1500] [--axe]
 
 Per path × width (× colour scheme): <dir>/<slug>-<width>[-dark].png (full page).
 <dir>/shoot.json holds per shot: status, title, console errors, page errors, failed
 requests, horizontal overflow and a11y counts (img without alt, form fields without a
-label, buttons/links without a name).
+label, buttons/links without a name). `--axe` also runs axe-core (WCAG 2.x A/AA rules, bundled with
+axe-playwright-python, no network) per shot: `axe` in shoot.json lists each violated rule with its
+impact, help text and the number of nodes (and the first selectors).
 Refuses more than --max-shots (default 12, never more than 24) shots per call. A page that
 never goes network-idle (long polling, websockets) is shot after "load" instead of failing;
 full-page shots stop at 8000 px height (shoot.json says when a page was cut).
@@ -45,7 +47,26 @@ HARD_MAX_SHOTS = 24
 def slug(path):
     return re.sub(r"[^a-z0-9]+", "-", path.lower()).strip("-") or "root"
 
-def shoot(page, url, out, name, wait):
+def axe_source():
+    import axe_playwright_python
+    with open(os.path.join(os.path.dirname(axe_playwright_python.__file__), "axe.min.js")) as f:
+        return f.read()
+
+AXE_RUN = """async () => {
+  const r = await axe.run(document, {runOnly: {type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa']},
+                                     resultTypes: ['violations']});
+  return r.violations.map(v => ({id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
+                                 targets: v.nodes.slice(0, 3).map(n => n.target.join(' '))}));
+}"""
+
+def run_axe(page, src):
+    try:
+        page.add_script_tag(content=src)
+        return page.evaluate(AXE_RUN)
+    except Exception as e:  # a strict CSP can refuse the injected script
+        return {"error": str(e).splitlines()[0][:300]}
+
+def shoot(page, url, out, name, wait, axe=None):
     rec = {"url": url, "shot": None, "status": None, "console_errors": [],
            "page_errors": [], "failed_requests": []}
     page.on("console", lambda m: m.type == "error" and rec["console_errors"].append(m.text[:300]))
@@ -65,6 +86,8 @@ def shoot(page, url, out, name, wait):
     rec["status"] = resp.status if resp else None
     rec["title"] = page.title()
     rec.update(page.evaluate(CHECKS))
+    if axe:
+        rec["axe"] = run_axe(page, axe)
     rec["shot"] = os.path.join(out, name + ".png")
     height = page.evaluate("() => document.documentElement.scrollHeight")
     if height > MAX_HEIGHT:
@@ -84,6 +107,7 @@ def main():
     ap.add_argument("--scheme", choices=["light", "dark", "both"], default="light")
     ap.add_argument("--wait", type=int, default=1500, help="ms after networkidle (e.g. Streamlit)")
     ap.add_argument("--max-shots", type=int, default=12, help="refuse more shots than this per call")
+    ap.add_argument("--axe", action="store_true", help="run axe-core (WCAG A/AA) per shot, into shoot.json")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     widths = [int(w) for w in a.widths.split(",")]
@@ -93,6 +117,7 @@ def main():
         sys.exit(f"shoot: {n} shots requested, limit is {min(a.max_shots, HARD_MAX_SHOTS)} (--max-shots, at most {HARD_MAX_SHOTS}). Photograph only the "
                  f"pages the diff changes: fewer paths, widths or colour schemes.")
     results = []
+    axe = axe_source() if a.axe else None
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         for scheme in schemes:
@@ -101,7 +126,7 @@ def main():
                 for path in a.path or ["/"]:
                     name = f"{slug(path)}-{w}" + ("-dark" if scheme == "dark" else "")
                     page = ctx.new_page()
-                    rec = shoot(page, a.base.rstrip("/") + path, a.out, name, a.wait)
+                    rec = shoot(page, a.base.rstrip("/") + path, a.out, name, a.wait, axe)
                     rec.update(width=w, scheme=scheme)
                     results.append(rec)
                     page.close()
@@ -116,6 +141,11 @@ def main():
         flags = [k for k in ("console_errors", "page_errors", "failed_requests") if r[k]]
         flags += [k for k in ("overflow_x",) if r.get(k)]
         flags += [f"{k}={r[k]}" for k in ("img_no_alt", "field_no_label", "control_no_name") if r.get(k)]
+        if isinstance(r.get("axe"), list) and r["axe"]:
+            flags.append("axe=" + ",".join(f"{v['id']}({v['impact']})" for v in r["axe"][:5])
+                         + (f"+{len(r['axe']) - 5}" if len(r["axe"]) > 5 else ""))
+        elif isinstance(r.get("axe"), dict):
+            flags.append("axe-error")
         print(f"{'ok ' if ok else 'ERR'} {r['status'] or '-':>3} {r['width']:>5} {r['scheme']:<5} "
               f"{r['url']}  {r.get('error') or ' '.join(flags) or 'clean'}")
     print(f"→ {os.path.join(a.out, 'shoot.json')}")

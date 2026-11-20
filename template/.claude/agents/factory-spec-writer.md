@@ -55,6 +55,10 @@ the rest.
 - **Approach**: files/modules involved, no full implementation.
 - **Risks**: security, privacy, migrations, breaking changes.
 - **Test strategy**: which tests to add/run.
+- **UI review**: only when the feature is a new multi-step user flow that a reviewer must
+  click through (several pages, forms, invalid input), add the line `UI review: full`; the
+  ux/ui reviewers then walk it exploratively. Otherwise leave it out: they take one screenshot
+  per changed page with an axe check (a new page/route in the diff gets the full review anyway).
 - **Open questions**: only if truly blocking; otherwise pick a reasonable default and
   note it.
 

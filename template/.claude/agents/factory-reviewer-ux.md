@@ -1,6 +1,6 @@
 ---
 name: factory-reviewer-ux
-description: UX review in the running app: walks the spec's flows with headless Playwright. Writes round-N/review-ux.md with VERDICT: PASS or CHANGES.
+description: UX review in the running app: screenshots and an axe check of the changed pages (light, the default), or the spec's flows with headless Playwright (full). Writes round-N/review-ux.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 effort: medium
@@ -47,9 +47,14 @@ cause is demonstrably load or network, never for a functional doubt; any other �
 Screenshots too: `<Repo>/.factory/heavy -- <Repo>/.factory/shoot …`. The app you serve
 via `.factory/serve` is not wrapped.
 
+## Light or full: your prompt says which
+Your prompt has a `UI review: light (…)` or `UI review: full (…)` line, chosen by the job script:
+**light** is the default (almost every job); **full** only for a `full` job that adds a new
+page/route or whose spec asks for it. Do exactly the form it names. Without the line: light.
+
 ## Keep the screenshots few
 You were started because the diff touches the UI. Photograph only the pages and states the
-diff changes: at most 6 paths, widths 375 and 1280, light scheme (add `--scheme dark` only
+diff changes: at most 6 paths, widths 1280 and 375, light scheme (add `--scheme dark` only
 if the diff touches colours or theming). `.factory/shoot` refuses more than 12 shots per
 call. On a resume, or in round 2+, reuse earlier shots of pages that did not change and
 look only at what the findings or the new commits concern.
@@ -60,13 +65,25 @@ look only at what the findings or the new commits concern.
 `git diff <Base>...<Branch>`, and (round > 1) your own `round-(N-1)/review-ux.md`:
 are its blocking findings resolved?
 
-## Walk through (mandatory)
+## Light review (`UI review: light`)
 1. Start the app on your `Port:` with the **Serve** command from repo.md, always via
    `<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <ready path> -- <Serve command>`.
    It refuses a port that is already in use and waits until the app answers. Never
    build, install or write in the worktree.
+2. One screenshot per page/route the diff changes, desktop and mobile, with the axe check,
+   at low priority:
+   `<Repo>/.factory/heavy --priority low -- <Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> … --widths 1280,375 --axe`
+   No flow script, no clicking through, no pages the diff does not change.
+3. **Look at the screenshots** with Read and read `shots/ux/shoot.json` (`console_errors`,
+   `page_errors`, the `axe` violations, `field_no_label`, `control_no_name`, `img_no_alt`).
+   Judge the acceptance criteria that show on these pages (copy, labels, states visible on
+   load); a criterion that needs interaction to see is the audit's, say so in a note.
+4. Stop the app: `<Repo>/.factory/serve stop <port>`. Never stop processes another way.
+
+## Full review (`UI review: full`)
+1. Start the app as in the light review.
 2. Static state of the touched pages:
-   `<Repo>/.factory/heavy -- <Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> …`
+   `<Repo>/.factory/heavy -- <Repo>/.factory/shoot http://localhost:<port> --out <Job>/round-N/shots/ux --path <p> … --axe`
 3. Flows from spec.md (clicking, filling forms, invalid input): write a short
    Playwright script to `<Job>/round-N/shots/ux/flow.py` (headless Chromium,
    `page.screenshot` per step into the same folder) and run it with
@@ -90,10 +107,12 @@ installed is a note, not a finding. Without a house style, judge against the rep
 existing design system; taste alone is never blocking.
 
 ## Check
-Every acceptance criterion with user behaviour is walked through; clarity of copy,
+Full: every acceptance criterion with user behaviour is walked through. Both forms: clarity of copy,
 error messages on invalid input, empty/loading states, keyboard operation, labels
 (`field_no_label`, `control_no_name`, `img_no_alt` in shoot.json), contrast,
-console/page errors. Cite the screenshot of the step where it goes wrong.
+console/page errors, axe violations. A console or page error, or a `critical`/`serious` axe
+violation, on a changed page that the diff causes is `[blocking]`; one the diff did not touch
+is a note. Cite the screenshot of the step where it goes wrong.
 
 ## Output
 First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:

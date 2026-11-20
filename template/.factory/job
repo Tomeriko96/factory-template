@@ -43,7 +43,8 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job fail <id> "<reason>"            -> needs-human
   job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
-  job set <id> pr_url|pr_state|issue_closed|issues <json or text>   (issues: a JSON list, for a bundle made by hand)
+  job set <id> pr_url|pr_state|issue_closed|issues|ui_review <json or text>   (issues: a JSON list, for a bundle
+                                      made by hand; ui_review: light|full|auto, the ux/ui review form of this job)
   job show <id> [--json]              read-only: stage, round and the pending action (--json: job.json)
   job list | capacity
   job report [--json]                 from metrics.jsonl: per role runs, first-pass yield, median
@@ -79,6 +80,11 @@ SIDE_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/|(\
                      r"|\.(md|mdx|rst|adoc|snap)$|(^|/)LICENSE[^/]*$", re.I)
 TESTDOC_DIR_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/", re.I)
 UI_GLOBS = ["*.tsx", "*.jsx", "*.vue", "*.svelte", "*.css", "*.scss", "*.html", "templates/", "static/", "frontend/src/**"]
+# A new file here is a new page/route: the ux/ui reviewers then do the full exploratory review
+# (in a `full` job; config.ui_page_globs overrides). Everything else gets the light form.
+PAGE_GLOBS = ["*/pages/*", "*/routes/*", "*/views/*", "*/app/**/page.*", "*/templates/*.html",
+              "*/templates/**/*.html", "*/screens/*"]
+UI_REVIEW_SPEC_RE = re.compile(r"^[ \t>*-]*UI review:\s*full\b|\bfull (exploratory )?UI review\b", re.I | re.M)
 LLM_GLOBS = ["*prompt*", "*agent*", "*llm*", "*/prompts/*", "*/agents/*", "*/agent/*", "*/llm/*"]
 # Routing: model and effort per spawn (see route) and the builder's escalation ladder
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -205,6 +211,9 @@ def route(job, agent, model, key):
     effort = None
     if agent == "factory-builder":
         effort = "medium" if key.startswith("sync-") else BUILDER_EFFORT.get(mode)
+    elif agent in ("factory-reviewer-ux", "factory-reviewer-ui") and \
+            (job.get("ui_reviews") or {}).get(str(key_round(key, job))) == "light":
+        effort = "medium"
     model, effort = model or front.get("model"), effort or front.get("effort")
     own = (routing().get("agents") or {}).get(agent)
     own = own if isinstance(own, dict) else {}
@@ -570,16 +579,55 @@ def acceptance_ready(job):
     return (first_line(os.path.join(jdir(job["id"]), "acceptance.md")) or "").startswith("ACCEPTANCE: WRITTEN")
 
 
+def ui_review(job):
+    """(light|full, why) for the ux/ui reviewers. `job set <id> ui_review light|full` wins, then
+    config.ui_review (light|full; `auto` or missing = choose); auto: `full` only in a `full` job whose
+    diff adds a new page/route (config.ui_page_globs, else PAGE_GLOBS) or whose spec.md asks for it
+    (a `UI review: full` line); otherwise `light`."""
+    own = job.get("ui_review")
+    if own in ("light", "full"):
+        return own, "set for this job"
+    cfg = config().get("ui_review")
+    if cfg in ("light", "full"):
+        return cfg, f"config.ui_review is {cfg}"
+    if job.get("mode") != "full":
+        return "light", f"a {job.get('mode')} job"
+    wt, base = job.get("worktree"), job.get("base")
+    added = git("diff", "--name-only", "--no-renames", "--diff-filter=A", f"{base}...HEAD", cwd=wt) \
+        if wt and base and os.path.isdir(wt) else None
+    globs = [g for g in (config().get("ui_page_globs") or []) if isinstance(g, str)] or PAGE_GLOBS
+    new = [x for x in (added or "").split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, globs)]
+    if new:
+        return "full", f"the diff adds a page/route: {new[0]}" + (f" (+{len(new) - 1})" if len(new) > 1 else "")
+    try:
+        if UI_REVIEW_SPEC_RE.search(open(os.path.join(jdir(job["id"]), "spec.md"), errors="replace").read()):
+            return "full", "spec.md asks for a full UI review"
+    except OSError:
+        pass
+    return "light", "no new page/route and the spec does not ask for a full review"
+
+
+UI_LIGHT = ("\nUI review: light ({why}). Do the **light review** of your instructions: one screenshot per changed "
+            "page/route at 1280 and 375 (`shoot --axe`, run as `heavy --priority low`), the console errors and the axe "
+            "violations in shoot.json; no Playwright flow, no pages the diff does not change.")
+UI_FULL = "\nUI review: full ({why}). Do the **full review** of your instructions (exploratory, flows from spec.md)."
+
+
 def reviewer_block(job, n, name):
     p = (paths(job) + f"Review round {n}. Port: {job['port'] + OFFSET.get(name, 0)}.\n"
          f"You must write round-{n}/review-{name}.md (first line VERDICT: PASS|CHANGES); "
          f"it is required and part of your task.")
+    model = None
     if name in ("ux", "ui"):
         p += house_style()
+        level, why = ui_review(job)
+        job.setdefault("ui_reviews", {})[str(n)] = level
+        p += (UI_FULL if level == "full" else UI_LIGHT).format(why=why)
+        model = "sonnet" if level == "light" else None
     if name == "audit" and acceptance_ready(job):
         p += (f"\nHidden acceptance tests: {os.path.join(jdir(job['id']), 'acceptance.md')} (the builder has not "
               "seen them): copy, run and remove them as your instructions say, and report per criterion.")
-    return (f"factory-reviewer-{name}", None, p, f"round-{n}/review-{name}.md")
+    return (f"factory-reviewer-{name}", model, p, f"round-{n}/review-{name}.md")
 
 
 def spawn(job, out, key, blocks):
@@ -617,8 +665,10 @@ def spawn(job, out, key, blocks):
         model, effort, steps, why = route(job, agent, model, key)
         job["pending"]["models"][agent] = model
         job["pending"]["efforts"][agent] = effort
+        extra = {"ui_review": (job.get("ui_reviews") or {}).get(str(key_round(key, job)))} \
+            if agent in ("factory-reviewer-ux", "factory-reviewer-ui") else {}
         metric("spawn", job, agent=agent, key=key, round=key_round(key, job), model=model, effort=effort,
-               resume=count - 1, escalation=steps, escalation_why=why)
+               resume=count - 1, escalation=steps, escalation_why=why, **extra)
         out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}", f"EFFORT: {effort or 'default'}"]
         if steps:
             out.main.append(f"ESCALATED: +{steps} step{'s' if steps > 1 else ''} ({'; '.join(why)})")
@@ -1490,8 +1540,10 @@ def cmd_drop(args):
 
 
 def cmd_set(args):
-    if len(args) < 3 or args[1] not in ("pr_url", "pr_state", "issue_closed", "issues"):
-        raise Fail("usage: job set <id> pr_url|pr_state|issue_closed|issues <json or text>")
+    if len(args) < 3 or args[1] not in ("pr_url", "pr_state", "issue_closed", "issues", "ui_review"):
+        raise Fail("usage: job set <id> pr_url|pr_state|issue_closed|issues|ui_review <json or text>")
+    if args[1] == "ui_review" and args[2] not in ("light", "full", "auto"):
+        raise Fail("ui_review must be light, full or auto")
     try:
         value = json.loads(args[2])
     except ValueError:
@@ -1502,6 +1554,8 @@ def cmd_set(args):
 
     def fn(job, out):
         job[args[1]] = value
+        if args[1] == "ui_review" and value == "auto":
+            job.pop("ui_review")
         if args[1] == "issues":   # .issue stays the first one, as `job new` writes it
             job["issue"] = value[0]
         out.main.append(f"DONE: {job.get('stage')} ({args[1]} set)")

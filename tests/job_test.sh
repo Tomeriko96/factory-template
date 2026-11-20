@@ -756,6 +756,40 @@ out="$(J reviewers "$P7" security)"; has "$out" "nothing left after the path sel
 sed -i '/UI paths/d' .factory/repo.md
 cp "$T/config.bak" .factory/config.json
 
+# ---------- ui/ux reviews: light by default, full only for a new page/route or when the spec asks ----------
+scenario=ui-review
+cp .factory/config.json "$T/config.uir"
+tobuilt() { echo "${3:-SPEC}" > "$(jd "$1")/spec.md"; J next "$1" >/dev/null; buildnew "$1" "$2"; J next "$1" >/dev/null; }
+# blk <output> <agent>: that agent's spawn block
+blk() { python3 -c 'import sys; print(next((b for b in sys.argv[1].split("\n---\n") if "AGENT: "+sys.argv[2]+"\n" in b), ""))' "$1" "$2"; }
+UR1="$(newjob "zq uir light")"; tobuilt "$UR1" frontend/src/Banner.tsx
+out="$(J reviewers "$UR1" code,ux,ui)"; b="$(blk "$out" factory-reviewer-ux)"
+has "$b" "UI review: light (no new page/route and the spec does not ask for a full review)"
+has "$b" "heavy --priority low"; has "$b" "MODEL: sonnet"; has "$b" "EFFORT: medium"; has "$b" "--axe"
+has "$(blk "$out" factory-reviewer-ui)" "UI review: light"; lacks "$(blk "$out" factory-reviewer-code)" "UI review:"
+field "$UR1" "j['ui_reviews']" "{'1': 'light'}"
+python3 -c "import json; rows=[json.loads(l) for l in open('$R/.factory/metrics.jsonl')]; \
+assert [r.get('ui_review') for r in rows if r['job']=='$UR1' and r['event']=='spawn' and r['agent']=='factory-reviewer-ui']==['light']" \
+  && ok || bad "metrics: ui_review not recorded"
+park "$UR1"
+UR2="$(newjob "zq uir page")"; tobuilt "$UR2" frontend/src/pages/Report.tsx
+out="$(J reviewers "$UR2" code,ux,ui)"; b="$(blk "$out" factory-reviewer-ux)"
+has "$b" "UI review: full (the diff adds a page/route: frontend/src/pages/Report.tsx)"; lacks "$b" "priority low"
+has "$b" "EFFORT: medium"; park "$UR2"                       # the frontmatter's level
+UR3="$(newjob --mode light "zq uir light page")"; tobuilt "$UR3" frontend/src/pages/Other.tsx
+has "$(J reviewers "$UR3" code,ux)" "UI review: light (a light job)"; park "$UR3"
+UR4="$(newjob "zq uir spec")"; tobuilt "$UR4" web/form.html $'SPEC\n- UI review: full'
+has "$(J reviewers "$UR4" code,ui)" "UI review: full (spec.md asks for a full UI review)"; park "$UR4"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["ui_review"]="full"; c["routing"]={"agents": {"factory-reviewer-ui": {"model": "opus"}}}; json.dump(c, open(".factory/config.json","w"))'
+UR5="$(newjob --mode light "zq uir cfg")"; tobuilt "$UR5" web/x.css
+out="$(J reviewers "$UR5" ui)"; has "$out" "UI review: full (config.ui_review is full)"; has "$out" "MODEL: opus"; park "$UR5"
+first "$(J set "$UR5" ui_review bogus)" "ERROR: ui_review must be light, full or auto"
+J set "$UR5" ui_review light >/dev/null; field "$UR5" "j['ui_review']" light
+rm "$(jd "$UR5")"/round-1/review-* 2>/dev/null; out="$(J rework "$UR5" "again")"
+buildnew "$UR5" web/y.css; mkdir -p "$(jd "$UR5")/round-2"; cp "$(jd "$UR5")/round-1/build.md" "$(jd "$UR5")/round-2/build.md"
+J next "$UR5" >/dev/null; out="$(J reviewers "$UR5" ui)"; has "$out" "UI review: light (set for this job)"; park "$UR5"
+cp "$T/config.uir" .factory/config.json
+
 # ---------- heavy: a waiter takes a free slot only when no higher-priority waiter is queued ----------
 scenario=heavy-priority
 H="$R/.factory/heavy"

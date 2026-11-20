@@ -95,6 +95,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   the forge, without a heavy slot; a job delivered `local`/`push` still validates locally. Optional
   `poll_s` (30), `no_pipeline_min` (10: no pipeline for the pushed commit by then = `VALIDATE: ERROR`),
   `timeout_min` (180).
+- `ui_review` (optional, default `auto`) and `ui_page_globs`: the form of the ux/ui reviews, see
+  **Reviewers**.
 - `adopt_conflicting` (optional, default `false`): `true` lets `.factory/job adoptable` adopt every
   open PR/MR by an allowed author in this repo that has a merge conflict and no job (see
   `/factory adopt`); `false` only lists them as adoptable.
@@ -264,7 +266,14 @@ worktree) concerns, and prints why each was chosen or skipped (`NOTE: reviewer p
 - `ux`/`ui`: only when a file matches the "UI paths" line of repo.md (default:
   `*.tsx *.jsx *.vue *.svelte *.css *.scss *.html`, `templates/`, `static/`,
   `frontend/src/**`); round > 1 only when UI files changed since the last round, or they
-  gave `CHANGES` before.
+  gave `CHANGES` before. Their prompt carries `UI review: light|full (why)`: **light** by
+  default (one screenshot per changed page/route at 1280 and 375 with `shoot --axe`, console
+  errors and axe violations, no Playwright flow, `heavy --priority low`, sonnet at medium);
+  **full** (the exploratory review) only in a `full` job whose diff adds a new page/route
+  (`config.ui_page_globs`, default `*/pages/*`, `*/routes/*`, `*/views/*`, `*/app/**/page.*`,
+  `*/templates/*.html`, `*/screens/*`) or whose spec.md has a `UI review: full` line.
+  `config.ui_review: "light"|"full"` forces one form for every job; `.factory/job set <id>
+  ui_review light|full|auto` for one job.
 - `llm-safety`: only when prompt, agent or LLM code changes (default globs `*prompt*`,
   `*agent*`, `*llm*`, `*/prompts/*`, `*/agents/*`, `*/llm/*`; a prompt in `.md` outside
   `docs/` counts as code).

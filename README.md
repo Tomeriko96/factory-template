@@ -157,6 +157,15 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
   agents to run tests.
 - **Few screenshots:** ux/ui take at most 6 paths at 2 widths, light only unless colours
   changed; `shoot` refuses more than 12 shots per call.
+- **Light ui/ux reviews by default:** on a 4-thread laptop the ui review took a median 90 min and
+  ux 51 min, and they passed 4 of 4 times. They still run only when the diff touches UI paths,
+  and then in a light form: one screenshot per changed page/route at 1280 and 375, console
+  errors and an axe-core check (`shoot --axe`, WCAG A/AA, bundled, no network), no exploratory
+  browsing, through `heavy --priority low`, on sonnet at medium effort. The full exploratory
+  review (flows from the spec, keyboard walk-through) only in a `full` job that adds a new
+  page/route (`ui_page_globs`) or whose spec.md has a `UI review: full` line. The prompt says
+  `UI review: light|full (why)`; `"ui_review": "light"|"full"` in config.json forces one form,
+  `.factory/job set <id> ui_review light|full|auto` sets it for one job.
 - **No size limits as acceptance criteria:** "diff under N lines" is guidance, never blocking.
 
 ## Routing and metrics
@@ -405,7 +414,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 572 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 591 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 61 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |

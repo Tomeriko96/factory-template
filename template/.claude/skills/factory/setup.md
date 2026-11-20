@@ -191,7 +191,13 @@ reviewers serve the same worktree at the same time, each on its own port, so def
 - Forge / CI: <GitHub Actions | GitLab CI | none> — <which checks>
 - Setup fresh checkout: <commands, run in the worktree>
 - Validate (one exact command per line, run as `heavy --cache -- <command>`; runner workers capped via `$FACTORY_CPUS`):
-  <test> · <lint> · <build> (match what CI runs, incl. install extras)
+  - `<test>`
+  - `<lint>`
+  - `<build>`
+  (match what CI runs, incl. install extras, but **without coverage flags**: coverage is left
+  to CI. `.factory/precheck --validate` runs these once per round, after the reviews, and
+  reads the first backticked command of each `- ` line; builders and reviewers run only
+  targeted tests.)
 - Validate (docs-only): <which paths count as docs, e.g. *.md, docs/> → <quick checks, e.g. mkdocs build --strict, or "none">
 - Worktree setup (builder, once): <commands; prefer cache-friendly forms: `uv sync --frozen`, `npm ci --prefer-offline`>
 - Prepare (builder, end of every round): <commands, e.g. frontend build>

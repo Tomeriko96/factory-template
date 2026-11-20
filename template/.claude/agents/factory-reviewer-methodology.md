@@ -24,11 +24,13 @@ The machine is shared by parallel jobs and reviewers. Run every test, build, lin
 install command through `<Repo>/.factory/heavy`, from the worktree root:
 `cd <Worktree> && <Repo>/.factory/heavy -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`) (waiting
 is normal: do not run the command another way), runs at low priority and sets
-`FACTORY_CPUS` for worker counts. To see that the suite passes, run the **Validate**
-command from repo.md verbatim (a compound command as `bash -c '…'`) with `--cache`: after the builder it answers "CACHE HIT"
-at once, which is a valid result for that exact tree; do not run the full suite yourself
-more than that. Everything else: only the tests of the files you are checking, and a
-suspect test at most twice (alone, not as a loop of full-suite runs). A failure or a
+`FACTORY_CPUS` for worker counts. Never run the full suite (the **Validate** commands of
+repo.md): it runs once per round, in the precheck step after the reviews, through `heavy`.
+Run only the tests related to the change: the test files of the modules in the diff (the
+builder's targeted commands from build.md, verbatim with `--cache`, are an instant
+"CACHE HIT" on the same tree), narrowed with a path or `-k`, never with coverage (add
+`--no-cov` / `-p no:cov` when the repo's config turns it on; coverage is left to CI); a
+suspect test at most twice (alone, never in a loop). A failure or a
 timeout while the load is high is not a finding by itself: check `heavy status`, rerun
 that one file alone, and report what you measured.
 

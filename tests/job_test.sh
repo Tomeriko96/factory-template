@@ -478,6 +478,36 @@ first "$(J set "$BO" issues '"x"')" "ERROR: issues must be a JSON list"; first "
 park "$BO"
 cp "$T/config.bak" .factory/config.json
 
+# ---------- the full validation: once per round, after the reviews, through heavy ----------
+scenario=validate
+export FACTORY_LOCK_DIR="$T/locks" FACTORY_CPU_MAX=100
+cat >> .factory/repo.md <<'EOF'
+- Validate (one exact command per line, run as `heavy --cache -- <command>`):
+  - `true`
+  - `bash -c 'test -f ok.txt'`  (needs ok.txt)
+- Validate (docs-only): `*.md` → none
+EOF
+V1="$(newjob "zq validate")"; drive "$V1" src/v.py   # drive runs the validation (JV)
+first "$(cat "$(jd "$V1")/round-1/validate.md")" "VALIDATE: FAIL"
+has "$(cat "$(jd "$V1")/round-1/validate.md")" "❌ \`bash -c 'test -f ok.txt'\`: exit 1"
+has "$(cat "$(jd "$V1")/round-1/validate.md")" "✅ \`true\`: exit 0"
+field "$V1" "j['stage'], j.get('round')" "build 1"
+out="$(J next "$V1")"; has "$out" "Build round 2."; has "$out" "read round-1/validate.md"
+mkdir -p "$(jd "$V1")/round-2"; echo ok > "$(wt "$V1")/ok.txt"; git -C "$(wt "$V1")" add -A; git -C "$(wt "$V1")" commit -qm ok
+printf 'Built\n' > "$(jd "$V1")/round-2/build.md"; J next "$V1" >/dev/null; J reviewers "$V1" security,code,audit >/dev/null
+for r in security code audit; do review "$V1" 2 $r PASS; done
+out="$(J next "$V1")"; first "$out" "ACTION: validate"; has "$out" "--validate $V1 2"
+out="$("$R/.factory/precheck" --validate "$V1" 2)"; first "$out" "VALIDATE: PASS"; lacks "$out" "cache hit"
+rm "$(jd "$V1")/round-2/validate.json"   # a fresh run on the same tree: answered by heavy's record
+out="$("$R/.factory/precheck" --validate "$V1" 2)"; first "$out" "VALIDATE: PASS"; has "$out" "(cache hit)"
+out="$(J next "$V1")"; has "$out" "AGENT: factory-approver"; has "$out" "precheck CLEAN"
+park "$V1"
+rm .factory/repo.md
+V2="$(newjob "zq validate none")"; drive "$V2" src/w.py
+first "$(cat "$(jd "$V2")/round-1/validate.md")" "VALIDATE: NONE"; has "$(cat "$(jd "$V2")/precheck.md")" "full validation not run"
+park "$V2"
+unset FACTORY_LOCK_DIR FACTORY_CPU_MAX
+
 # ---------- reviewers by path: only the reviewers whose paths the diff touches ----------
 scenario=reviewer-paths
 cp .factory/config.json "$T/config.bak"

@@ -32,6 +32,10 @@ install command through `<Repo>/.factory/heavy`, from the worktree root:
 (waiting is normal: never run the command another way), runs at low priority and sets
 `FACTORY_CPUS` for worker counts. A command that may outlast your tool timeout: use
 `heavy --background -- <command>` and `heavy wait <ticket>` (exit 124 = call it again).
+Never run the full suite (the **Validate** commands of repo.md): it runs once per round,
+in the precheck step after the reviews. Only the tests related to the change, never with
+coverage (add `--no-cov` / `-p no:cov` when the repo's config turns it on; coverage is left
+to CI).
 
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),
@@ -41,13 +45,15 @@ install command through `<Repo>/.factory/heavy`, from the worktree root:
 ## Do
 1. **Collect claims:** every statement in build.md (tests passed, counts, behaviour,
    "no breaking changes", resolved findings) and every acceptance criterion in spec.md.
-2. **Measure each claim yourself** with a command in the worktree. Repeat the exact
-   validation from build.md **verbatim with `heavy --cache`** (a compound command as
-   `bash -c '…'`). On the same tree this is a
+2. **Measure each claim yourself** with a command in the worktree. Repeat the builder's
+   targeted test commands from build.md **verbatim with `heavy --cache`** (a compound
+   command as `bash -c '…'`). On the same tree this is a
    cache hit: the result was recorded by `heavy` itself (tree hash, time, full log), not
    by the builder's words, so it is a valid measurement; put "cache hit, tree <12 chars>,
-   <time>" under Measured and do not run the suite a second time. If the builder's tree
-   differs from the branch head, or there is no hit, it runs for real. Then add an
+   <time>" under Measured and do not run it a second time. If the builder's tree
+   differs from the branch head, or there is no hit, it runs for real. A claim that the
+   whole suite passes is not yours to measure: the precheck step runs it once after the
+   reviews (leave such a claim out of the table; a ⏭️ row would block). Then add an
    independent check where you can (other input, an edge case). Keep these bounded:
    - **Mutation checks** (remove the fix, see the new test fail): at most 3, only for
      acceptance criteria that add or change behaviour (none for docs, config, copy, or a
@@ -86,7 +92,7 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
 
   | # | Claim (source) | Command | Measured | |
   |---|---|---|---|---|
-  | 1 | "437 tests passed" (build.md) | `uv run pytest -q` | 437 passed | ✅ |
+  | 1 | "42 tests passed" (build.md) | `uv run pytest -q tests/test_upload.py` | 42 passed | ✅ |
   | 2 | AC3: empty upload shows a message (spec.md) | `…` | exit 0, no message | ❌ |
 
   ✅ = confirmed exactly · ⚠️ = confirmed with a deviation (explain) · ❌ = not

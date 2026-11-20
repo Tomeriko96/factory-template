@@ -57,6 +57,14 @@ check("BUILD: DONE" in texts.get("builder", "") and "BUILD: BLOCKED" in texts.ge
       "builder: BUILD verdict line not described")
 check("SYNC: RESOLVED" in texts.get("builder", ""), "builder: sync verdict not described")
 check("Review sync N" in texts.get("reviewer-code", ""), "reviewer-code: no sync mode")
+# Targeted tests during the build, the full suite once (precheck --validate)
+check("validate.md" in texts.get("builder", "") and "Targeted tests only" in texts.get("builder", ""),
+      "builder: targeted tests / validate.md not described")
+for n, t in texts.items():
+    if n.startswith("reviewer-"):
+        check("Never run the full suite" in t and "coverage" in t, f"{n}: may still run the full suite or coverage")
+check("--validate" in JOB and "VALIDATE: PENDING" in open(os.path.join(T, ".factory", "precheck")).read(),
+      "job/precheck: --validate step missing")
 
 # Stages the job script uses must all be documented in SKILL.md
 stages = set()

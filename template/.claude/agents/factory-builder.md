@@ -30,11 +30,18 @@ not cap them (`vitest run --maxWorkers=$FACTORY_CPUS`). A command that may outla
 tool timeout (waiting for capacity counts): `heavy --background [--cache] -- <command>`
 returns a ticket at once; then `heavy wait <ticket>` prints the result and the exit code
 (exit 124 = still running: call it again; do other work in between if you have any).
-- While developing, run only the tests of what you touch.
-- The **full validation** from repo.md runs once per commit, verbatim, with `--cache`, on
-  the committed tree (a compound command goes in as `bash -c '…'`, the same string every
-  time, so the others hit the same record) (a dirty tree is never cached). That record is what the reviewers,
-  audit and approver reuse; running it again on the same commit only burns CPU.
+- **Targeted tests only.** Run the tests related to your change: the test files of the
+  modules you touched (and the ones you added), narrowed with a path or `-k` where the
+  suite is big, plus the linters/type checks on the files you touched. Never with coverage
+  (add `--no-cov` / `-p no:cov`, or leave `--coverage` off, when the repo's config turns it
+  on): coverage is left to CI.
+- **The full suite is not yours.** The Validate commands of repo.md run once per round, in
+  the precheck step after the reviews (`.factory/precheck --validate`, through `heavy`).
+  Do not run them yourself, except in Sync mode. If that run fails, the next round starts
+  with `round-(N-1)/validate.md` as a blocking finding.
+- Run your final targeted tests on the committed tree with `--cache`, verbatim as you write
+  them in build.md (a compound command as `bash -c '…'`), so the audit replays them as an
+  instant cache hit (a dirty tree is never cached).
 - A timeout or failure while the load is high is not proof of a bug and never a reason
   to raise a test timeout: check `heavy status`, rerun that file alone, then decide.
 - Prepare output (build directories) must be git-ignored; if it is not, say so in build.md.
@@ -43,7 +50,10 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 2. `<Job>/spec.md`.
 3. Round > 1: every `<Job>/round-(N-1)/review-*.md`, plus `<Job>/rework.md` if it exists,
    plus `<Job>/round-(N-1)/decision.md` if its first line is `DECISION: REWORK` (the
-   approver's list of what must change; treat each item as a `[blocking]` finding).
+   approver's list of what must change; treat each item as a `[blocking]` finding), plus
+   `<Job>/round-(N-1)/validate.md` if its first line is `VALIDATE: FAIL` (the full suite
+   failed after the reviews: a `[blocking]` finding; reproduce it with just the failing
+   test files, not the whole suite).
    Fix **every** `[blocking]` finding. You may leave a `[non-blocking]` one with a
    one-line reason in build.md.
 
@@ -57,8 +67,9 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
    several issues: one commit per issue where practical, each with its own `Refs #<nr>`). Text you
    change inside an existing file stays in that file's language. Never commit anything
    under `.factory/` or `.claude/`.
-4. Run the validation from repo.md on the committed tree with `heavy --cache`, until it
-   passes; every fix is a new commit and a new run. `Mode: light` and your diff touches
+4. Run the targeted tests and checks (see Heavy commands) on the committed tree with
+   `heavy --cache`, until they pass; every fix is a new commit and a new run. The full
+   Validate runs later, once, in the precheck step. `Mode: light` and your diff touches
    only docs (as defined by "Validate (docs-only)" in repo.md)? Run only those quick
    checks and say so in build.md. Need the app running? Only on your
    `Port:`, via `<Repo>/.factory/serve start <port> --cwd <Worktree> --ready <path> -- <Serve command>`,
@@ -93,8 +104,10 @@ do not build anything new. Work in the worktree and write `<Job>/sync-<n>/build.
    force). Resolve each conflict by reading **both** sides and the commit messages of the
    base side: keep the behaviour of both. Never pick a side wholesale, never delete the
    other side's tests to make yours pass.
-3. Commit the merge, then run the validation from repo.md with `heavy --cache` until it
-   passes (Prepare too, through `heavy`). Never push; the orchestrator does.
+3. Commit the merge, then run the full validation from repo.md once with `heavy --cache`
+   (a sync has no precheck step, so here it is yours; no coverage flags beyond what
+   Validate says) until it passes (Prepare too, through `heavy`). Never push; the
+   orchestrator does.
 4. First line of `sync-<n>/build.md` is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`. Then:
    conflicting files and how each was resolved, validation results (real output), and
    anything you changed that is not a pure merge.
@@ -112,8 +125,10 @@ the code, a missing secret or service): the orchestrator then stops the job for 
 instead of sending an unfinished change to review. Then:
 - **Summary**: what was built.
 - **Changes**: one line per file.
-- **Validation**: commands + results (real output, no assumptions). Every claim here
-  is re-measured by `factory-reviewer-audit`; write only what you have seen.
+- **Validation**: the targeted commands + results (real output, no assumptions), and
+  which test files you chose and why. Every claim here is re-measured by
+  `factory-reviewer-audit`; write only what you have seen. Do not claim the full suite
+  passes: the precheck step measures that.
 - **repo.md corrections**: anything in repo.md that turned out wrong or missing (e.g. a
   setup flag CI uses), so the orchestrator can fix it. `None.` if nothing.
 - **Deviations from the spec**: and why. Flag **breaking changes** explicitly.

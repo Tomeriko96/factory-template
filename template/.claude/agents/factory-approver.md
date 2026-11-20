@@ -39,9 +39,10 @@ doubtful about security or privacy?
 1. Every acceptance criterion in spec.md (for a job that bundles issues: the criteria of **every**
    issue, `#<nr>`; one issue missing is REWORK, not MERGE) is ✅ in the claims table of
    `review-audit.md`. Re-measure whatever is ⚠️, ⏭️ or missing there, and nothing else:
-   the audit and the builder already ran the suite, and the same validation on the same
-   tree is an instant `heavy --cache` hit, so do not re-run the suite to "be sure". No
-   `review-audit.md` (`Mode: light`)? Run the validation for every criterion yourself.
+   the full suite already ran once in the precheck step (`round-N/validate.md`, also
+   summarised in precheck.md), so never re-run it to "be sure". No `review-audit.md`
+   (`Mode: light`)? Run the targeted tests for every criterion yourself (only the test files
+   concerned, never with coverage).
 2. No secrets, `.env`, data files or personal data in the diff.
 3. No unresolved `[blocking]` findings in the reviews, no scope creep beyond the spec.
    `[non-blocking]` findings do not block.

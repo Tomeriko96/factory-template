@@ -116,6 +116,13 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
   `delivery.auto_merge_never`); a tests/docs-only diff gets `code` + `audit`. Override the
   globs per reviewer with `reviewer_paths` in `config.json`, e.g.
   `{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"]}`.
+- **Targeted tests during the build, the full suite once:** builders and reviewers ran whole
+  suites (with coverage) again and again. Now they run only the tests related to the change
+  (the test files of the touched modules, a path or `-k`), never with coverage; repo.md's
+  Validate commands run once per round, after the reviews, in the precheck step
+  (`.factory/precheck --validate`, through `heavy --cache`, result in `round-N/validate.md`).
+  A failing full run sends the job into the next build round with that file as a blocking
+  finding. Coverage is left to CI, so keep coverage flags out of Validate.
 - **Cheaper approver:** it was MERGE 37 times out of 37. `precheck` does the mechanical part
   (all PASS, audit table has no ❌/⏭️, no secrets or factory files, diff size); the approver
   now runs on sonnet to judge and write the PR body, and gets opus only when the precheck

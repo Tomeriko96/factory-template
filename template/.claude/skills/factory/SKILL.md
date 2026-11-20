@@ -122,6 +122,7 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
     round-N/decision.md                  (an approver's REWORK, moved here by the script)
+    round-N/validate.md, validate.json   (.factory/precheck --validate: the round's one full-suite run)
     precheck.md                          (.factory/precheck, before the approver)
     decision.md                          (approver: the current decision)
     sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
@@ -150,6 +151,14 @@ line of its output, act, and call `.factory/job next <id>` again:
 - `ACTION: choose-reviewers` → pick the round's candidates (see **Reviewers**), then
   `.factory/job reviewers <id> <a,b,c>`. From round 2 on it narrows them with
   `.factory/rereview` and keeps in every reviewer whose latest verdict is not PASS.
+- `ACTION: validate` → all reviews passed: run the printed `RUN:` line
+  (`.factory/precheck --validate <id> <n>`, Bash timeout 600000) and repeat it while it
+  prints `VALIDATE: PENDING` (exit 124), then `job next`. This is the **one full-suite run**
+  of the round: repo.md's Validate commands through `.factory/heavy --cache` in the job
+  worktree, written to `round-N/validate.md`. Builders and reviewers run only targeted
+  tests, never with coverage (coverage is left to CI). `VALIDATE: FAIL` → the script builds
+  round N+1 with validate.md as a blocking finding; it is a factory script, not you running
+  tests, so the rule below does not forbid it.
 - `ACTION: deliver` → see **Delivery**, then `job delivered` (or `job fail`).
 - `ACTION: push` → only in a sync: see `/factory sync`.
 - `WAIT: …` / `DONE: …` → report it in one line (with `NEXT:` if given) and stop.
@@ -214,7 +223,8 @@ Every subagent prompt starts with the paths block (Repo, Worktree, Job, Base, Br
 
 What the script does along the way: spec-writer → `SPEC: ALREADY-DONE` ends as
 `superseded`; builder round N → reviewers → any blocking verdict builds N+1 while the
-budget lasts; all PASS → precheck → approver (opus when the precheck says `ISSUES` or
+budget lasts; all PASS → the full validation (`ACTION: validate`, once; fails → N+1) →
+precheck → approver (opus when the precheck says `ISSUES` or
 N > 1) → `MERGE` delivers, `REWORK` builds N+1 with the approver's list, `ESCALATE` →
 `needs-human`.
 
@@ -564,9 +574,13 @@ hook, `.factory/guard`, that refuses a test, build, install or type-check comman
 not run through `heavy` and tells the agent what to do instead (Claude Code runs it for
 subagents in trusted workspaces, also in bypass mode; `limits.guard: false` turns it off).
 
-`--cache` makes validation run once per commit instead of once per agent: the builder's
-passing run is recorded for the exact tree, and the reviewers, audit and approver get an
-instant "CACHE HIT" for the same command on the same tree. A new commit, a dirty tree or a
+**Targeted tests during the build, the full suite once.** Builders and reviewers run only
+the tests related to the change (the test files of the touched modules, a path or `-k`),
+never with coverage; repo.md's Validate commands run once per round, in the precheck step
+(`ACTION: validate`), through `heavy`. Coverage is left to CI. `--cache` makes each
+command run once per commit instead of once per agent: a passing run is recorded for the
+exact tree, and the other agents get an instant "CACHE HIT" for the same command on the
+same tree. A new commit, a dirty tree or a
 different command runs for real. The agents' prompts say how to use it; you only need to
 make sure each agent prompt keeps the paths block (the worktree path is part of the key).
 

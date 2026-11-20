@@ -110,7 +110,10 @@ do not build anything new. Work in the worktree and write `<Job>/sync-<n>/build.
    (a sync has no precheck step, so here it is yours; no coverage flags beyond what
    Validate says) until it passes (Prepare too, through `heavy`). Never push; the
    orchestrator does.
-4. First line of `sync-<n>/build.md` is `SYNC: RESOLVED` or `SYNC: NEEDS-HUMAN`. Then:
+4. First line of `sync-<n>/build.md` is `SYNC: CLEAN` (git merged the base without any
+   conflict and the validation passes), `SYNC: RESOLVED` (you resolved conflicts and the
+   validation passes) or `SYNC: NEEDS-HUMAN`. Be exact: a clean sync may keep auto-merge on,
+   a resolved one never does, and the script checks the merge commit with `git merge-tree`. Then:
    conflicting files and how each was resolved, validation results (real output), and
    anything you changed that is not a pure merge.
 

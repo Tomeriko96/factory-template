@@ -429,9 +429,26 @@ def auto_merge_gate(job):
         why.append("no precheck result for this round")
     elif not pre.startswith("AUTO-MERGE: yes"):
         why.append(pre[len("AUTO-MERGE:"):].strip().removeprefix("no:").strip() or "precheck")
-    if int((job.get("sync") or {}).get("count") or 0) > 0:
-        why.append("base was merged into the branch by an agent (sync); a human merges")
+    if sync_conflicts(job) > 0:
+        why.append("an agent resolved merge conflicts with the base (sync); a human merges")
     return (not why), why
+
+
+def sync_conflicts(job):
+    """Syncs in which an agent resolved conflicts (a clean base merge does not count). A job.json
+    from before this was recorded counts every sync as one with conflicts."""
+    sync = job.get("sync") or {}
+    n = int(sync["conflicts"]) if "conflicts" in sync else int(sync.get("count") or 0)
+    return n + (1 if (job.get("syncing") or {}).get("conflicts") else 0)
+
+
+def merge_had_conflicts(wt):
+    """True/False when HEAD is a merge commit whose parents conflict (git merge-tree), else None."""
+    parents = (git("rev-list", "--parents", "-n", "1", "HEAD", cwd=wt) or "").split()[1:]
+    if len(parents) != 2:
+        return None
+    r = run(["git", "merge-tree", "--write-tree", "--name-only", *parents], cwd=wt)
+    return {0: False, 1: True}.get(r.returncode)
 
 
 def hold_files(job):
@@ -654,11 +671,19 @@ def sync_step(job, out, start):
         prompt = paths(job) + f"Sync {n}. Port: {job['port']}. Mode: {job.get('mode')}."
         return spawn(job, out, f"sync-{n}", [("factory-builder", "sonnet", prompt, f"sync-{n}/build.md")])
     fl = first_line(b) or ""
-    if not fl.startswith("SYNC: RESOLVED"):
+    if not fl.startswith(("SYNC: RESOLVED", "SYNC: CLEAN")):
         job.pop("syncing", None)
         why = ("the merge needs a decision" if fl.startswith("SYNC: NEEDS-HUMAN") else f"build.md starts with {fl[:40]!r}")
         set_stage(job, "needs-human", f"sync {n}: {why} (see sync-{n}/build.md); the PR/MR is untouched")
         return step(job, out, start)
+    if "conflicts" not in job["syncing"]:
+        # The builder's word, checked against git: a merge whose parents conflict had conflicts,
+        # whatever build.md says; no merge commit to check (fast-forward) is clean only if it says so.
+        had = merge_had_conflicts(job["worktree"])
+        claimed = fl.startswith("SYNC: RESOLVED")
+        job["syncing"]["conflicts"] = bool(claimed or had)
+        if had and not claimed:
+            out.notes.append(f"NOTE: sync {n}: build.md says CLEAN but the merge had conflicts (git merge-tree); counted as resolved")
     r = os.path.join(jd, f"sync-{n}", "review-code.md")
     if not os.path.exists(r):
         prompt = (paths(job) + f"Review sync {n}. Port: {job['port']}.\nYou must write sync-{n}/review-code.md "
@@ -669,9 +694,16 @@ def sync_step(job, out, start):
         job.pop("syncing", None)
         set_stage(job, "needs-human", f"sync {n}: the code review of the merge has blocking findings (see sync-{n}/review-code.md)")
         return step(job, out, start)
-    out.main += ["ACTION: push",
-                 f"PUSH: git -C {job['worktree']} push {remote()} {job['branch']}   (never --force)",
-                 "CHECK: the PR/MR is mergeable again; with delivery.auto_merge, auto-merge is still on",
+    gate = auto_merge_gate(job)
+    if gate is not None:
+        job["auto_merge"] = {"allowed": gate[0], "reasons": gate[1]}
+    out.main += ["ACTION: push", f"SYNC: {'conflicts resolved by an agent' if job['syncing']['conflicts'] else 'clean (no conflicts)'}"]
+    if gate is not None:
+        out.main.append("AUTO-MERGE: yes: after the push switch auto-merge on again (the forge may drop it on a new "
+                        "push) and verify it" if gate[0] else
+                        "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): switch auto-merge off before the push")
+    out.main += [f"PUSH: git -C {job['worktree']} push {remote()} {job['branch']}   (never --force)",
+                 "CHECK: the PR/MR is mergeable again",
                  f"THEN: .factory/job sync-done {job['id']}   (push rejected: .factory/job fail {job['id']} \"<error>\")"]
 
 
@@ -708,7 +740,7 @@ def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delive
                "worktree": os.path.join(os.path.dirname(REPO), os.path.basename(REPO) + "-worktrees", jid),
                "resumes": 0, "reviews": {}, "started": now(), "updated": now(),
                "history": [{"stage": "queued", "at": now()}], "round_heads": {}, "pr_url": None,
-               "issue_closed": None, "sync": {"count": 0, "last": None}}
+               "issue_closed": None, "sync": {"count": 0, "conflicts": 0, "last": None}}
         if issues:
             job.update(issue=issues[0], issue_url=(urls[0] if urls else None), untrusted=True)
             if len(issues) > 1:   # a bundle: .issue is the first, .issues all of them
@@ -987,7 +1019,7 @@ def cmd_sync(args):
         if job.get("stage") != "pr-open":
             raise Fail(f"{job['id']} is at {job.get('stage')}: sync is for pr-open jobs")
         if not job.get("syncing"):
-            sync = job.setdefault("sync", {"count": 0, "last": None})
+            sync = job.setdefault("sync", {"count": 0, "conflicts": 0, "last": None})
             if int(sync.get("count") or 0) >= MAX_SYNCS:
                 set_stage(job, "needs-human", f"sync limit reached ({MAX_SYNCS}); base keeps conflicting")
                 return step(job, out, "pr-open")
@@ -1009,10 +1041,16 @@ def cmd_sync_done(args):
     def fn(job, out):
         if not job.get("syncing"):
             raise Fail(f"{job['id']} has no sync running")
-        n = job.pop("syncing")["n"]
+        syncing = job.pop("syncing")
+        n, conflicts = syncing["n"], bool(syncing.get("conflicts", True))
         job.pop("pending", None)
-        job.setdefault("sync", {})["last"] = now()
-        job.setdefault("history", []).append({"stage": "pr-open", "at": now(), "event": f"sync {n} pushed"})
+        sync = job.setdefault("sync", {})
+        if "conflicts" not in sync:   # older job.json: every earlier sync counts as one with conflicts
+            sync["conflicts"] = max(0, int(sync.get("count") or 0) - 1)
+        sync["conflicts"] = int(sync["conflicts"]) + (1 if conflicts else 0)
+        sync["last"] = now()
+        job.setdefault("history", []).append({"stage": "pr-open", "at": now(),
+                                              "event": f"sync {n} pushed ({'conflicts resolved' if conflicts else 'clean'})"})
         cleanup(job, out, remove_worktree=True)
         out.main.append(f"DONE: pr-open (sync {n} pushed)")
     return with_job(args[0], fn)

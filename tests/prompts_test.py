@@ -56,6 +56,8 @@ for group in SAME_HEAVY:
 check("BUILD: DONE" in texts.get("builder", "") and "BUILD: BLOCKED" in texts.get("builder", ""),
       "builder: BUILD verdict line not described")
 check("SYNC: RESOLVED" in texts.get("builder", ""), "builder: sync verdict not described")
+check("SYNC: CLEAN" in texts.get("builder", "") and '"SYNC: CLEAN"' in JOB and "SYNC: CLEAN" in SKILL,
+      "SYNC: CLEAN (a sync without conflicts) not in builder, job and SKILL.md")
 check("Review sync N" in texts.get("reviewer-code", ""), "reviewer-code: no sync mode")
 # Targeted tests during the build, the full suite once (precheck --validate)
 check("validate.md" in texts.get("builder", "") and "Targeted tests only" in texts.get("builder", ""),

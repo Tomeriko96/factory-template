@@ -273,9 +273,9 @@ merge_decision "$M3"
 out="$(J next "$M3")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: yes"
 python3 - "$(jd "$M3")/job.json" <<'PY'
 import json, sys
-j = json.load(open(sys.argv[1])); j["sync"]["count"] = 1; json.dump(j, open(sys.argv[1], "w"))
+j = json.load(open(sys.argv[1])); j["sync"]["count"] = 1; j["sync"].pop("conflicts", None); json.dump(j, open(sys.argv[1], "w"))
 PY
-out="$(J next "$M3")"; has "$out" "AUTO-MERGE: no (base was merged into the branch by an agent (sync)"
+out="$(J next "$M3")"; has "$out" "AUTO-MERGE: no (an agent resolved merge conflicts with the base (sync)"   # an old job.json: count only
 rm "$(jd "$M3")/decision.md"; park "$M3"
 out="$(J approve "$M3")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: no (approved by hand"
 field "$M3" "j['auto_merge']['allowed']" False
@@ -312,6 +312,35 @@ M10="$(newjob "zq am env bare")"; drive_audit "$M10" src/bare.py "3.4 s | ⚠️
 out="$(J next "$M10")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; has "$(cat "$(jd "$M10")/precheck.md")" "without a measured load"; park "$M10"
 M11="$(newjob "zq am env mixed")"; drive_audit "$M11" src/mixed.py "⚠️ wrong total | ⚠️ ENV: load 9 on 4 cores"
 out="$(J next "$M11")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M11"
+
+# sync: a clean base merge keeps auto-merge (switched on again after the push); resolved conflicts do not
+M12="$(newjob "zq am sync")"; drive "$M12" src/sync_me.py; merge_decision "$M12"
+out="$(J next "$M12")"; has "$out" "AUTO-MERGE: yes"
+git -C "$(wt "$M12")" push -q origin "factory/$M12"; J delivered "$M12" pr-open --pr-url https://example.test/pr/12 >/dev/null
+git push -q origin main; git clone -q -b main "$T/origin.git" "$T/base12"; echo "base side" > "$T/base12/other.txt"
+git -C "$T/base12" add -A; git -C "$T/base12" commit -qm "base moves"; git -C "$T/base12" push -q origin main
+J sync "$M12" >/dev/null
+git -C "$(wt "$M12")" fetch -q origin; git -C "$(wt "$M12")" merge -q --no-edit origin/main
+mkdir -p "$(jd "$M12")/sync-1"; echo 'SYNC: CLEAN' > "$(jd "$M12")/sync-1/build.md"; J next "$M12" >/dev/null
+echo 'VERDICT: PASS' > "$(jd "$M12")/sync-1/review-code.md"
+out="$(J next "$M12")"; first "$out" "ACTION: push"; has "$out" "SYNC: clean (no conflicts)"; has "$out" "AUTO-MERGE: yes: after the push switch auto-merge on again"
+git -C "$(wt "$M12")" push -q origin "factory/$M12"; J sync-done "$M12" >/dev/null
+field "$M12" "j['sync']['count'], j['sync']['conflicts']" "1 0"
+# second sync: the base changes the same line; the builder resolves it but claims CLEAN: git says otherwise
+mkdir -p "$T/base12/src"; echo "base line" > "$T/base12/src/sync_me.py"
+git -C "$T/base12" add -A; git -C "$T/base12" commit -qm "base edits the same file"; git -C "$T/base12" push -q origin main
+J sync "$M12" >/dev/null
+git -C "$(wt "$M12")" fetch -q origin; git -C "$(wt "$M12")" merge -q --no-edit origin/main >/dev/null 2>&1
+echo "both" > "$(wt "$M12")/src/sync_me.py"; git -C "$(wt "$M12")" add -A; git -C "$(wt "$M12")" commit -qm "merge base"
+mkdir -p "$(jd "$M12")/sync-2"; echo 'SYNC: CLEAN' > "$(jd "$M12")/sync-2/build.md"
+out="$(J next "$M12")"; has "$out" "says CLEAN but the merge had conflicts"
+echo 'VERDICT: PASS' > "$(jd "$M12")/sync-2/review-code.md"
+out="$(J next "$M12")"; has "$out" "SYNC: conflicts resolved by an agent"
+has "$out" "AUTO-MERGE: no (an agent resolved merge conflicts with the base (sync); a human merges): switch auto-merge off"
+git -C "$(wt "$M12")" push -q origin "factory/$M12"; J sync-done "$M12" >/dev/null
+field "$M12" "j['sync']['count'], j['sync']['conflicts']" "2 1"
+J rework "$M12" "x" >/dev/null; park "$M12"
+git pull -q --ff-only origin main   # the main checkout follows the base the test moved
 
 # switched off, or not pr mode: no AUTO-MERGE line at all
 sed -i 's/"auto_merge": true/"auto_merge": false/' .factory/config.json

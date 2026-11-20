@@ -332,22 +332,28 @@ it. No conflict → nothing to do. Conflict → `.factory/job sync <id>` and dri
    worktree and takes commits others pushed to the branch (diverged → `needs-human`).
 2. It spawns a sonnet `factory-builder` with `Sync <n>`: it merges `<remote>/<base>` into
    the job branch (a merge commit: never rebase, never force-push), resolves the
-   conflicts, runs the validation and writes `sync-<n>/build.md` (`SYNC: RESOLVED` or
+   conflicts, runs the validation and writes `sync-<n>/build.md` (`SYNC: CLEAN` when git
+   merged without conflicts, `SYNC: RESOLVED` when it resolved conflicts, or
    `SYNC: NEEDS-HUMAN`). A conflict sonnet cannot settle ends as `NEEDS-HUMAN`, not as a
-   guess.
+   guess. The script checks the merge commit with `git merge-tree` and records per sync
+   whether it had conflicts (`job.json` `sync.conflicts`).
 3. `SYNC: NEEDS-HUMAN` → `needs-human`; the PR/MR stays open and untouched. This is the
    right outcome when `base` already fixes the same thing in a different way (the job is
    then probably superseded: say so and suggest closing the PR/MR), when both sides change
    the same behaviour, or when validation fails after the merge. Never resolve such a
    conflict by picking a side.
-4. `SYNC: RESOLVED` → it spawns `factory-reviewer-code` with `Review sync <n>` (checks that
-   nothing of either side was lost). `CHANGES` → `needs-human`. `PASS` → `ACTION: push`:
-   with `delivery.auto_merge`, first switch auto-merge **off** (see Delivery for the command:
-   a sync merge was resolved by an agent and checked by one reviewer, so a human merges it;
-   never set it again for this job, `.factory/job` now keeps it off at every delivery). Then
-   run the printed push (never `--force`), check the PR/MR is mergeable again, then
+4. `SYNC: CLEAN` or `SYNC: RESOLVED` → it spawns `factory-reviewer-code` with `Review sync <n>`
+   (checks that nothing of either side was lost). `CHANGES` → `needs-human`. `PASS` →
+   `ACTION: push`, with (when `delivery.auto_merge` is on) an `AUTO-MERGE:` line:
+   - `AUTO-MERGE: no (<reasons>)`: switch auto-merge **off** before the push (see Delivery
+     for the command). A sync where an agent resolved conflicts always gives this: a human
+     merges it, and `.factory/job` keeps it off at every later delivery.
+   - `AUTO-MERGE: yes`: a clean sync (no conflicts, validation passes) of a job whose gate
+     allows it: after the push switch auto-merge **on again** and verify it (some forges
+     drop it on a new push), as in Delivery.
+   Then run the printed push (never `--force`), check the PR/MR is mergeable again, then
    `.factory/job sync-done <id>` (push rejected → `.factory/job fail <id> "<error>"`). Report
-   one line per job: id, MR, result, and "auto-merge off, needs a human merge".
+   one line per job: id, MR, clean/resolved, and whether auto-merge is on.
 
 Runs automatically, check **and** fix: at the end of every delivery, on every `status`,
 and whenever you notice that a PR/MR got merged (every merge can make the other open
@@ -504,7 +510,8 @@ got here through an approver `MERGE` (or a clean `--docs` precheck), whose prech
 `AUTO-MERGE: yes` (no issues, no audit deviation — an `⚠️ ENV: <cause, measured load>` row,
 caused only by load or network, is not one — no file in CI/pipeline config, dependencies,
 containers, schema/migrations, auth or `auto_merge_never`), without an approver `HOLD:` line,
-and whose branch has no agent-resolved sync merge. On `AUTO-MERGE: no (<reasons>)` open the
+and whose branch has no sync in which an agent resolved conflicts (a clean sync does not
+count). On `AUTO-MERGE: no (<reasons>)` open the
 PR/MR ready for review **without** auto-merge, and if this PR/MR already has it on (after a
 rework) switch it off: `gh pr merge <nr> --disable-auto`, or
 `glab api -X POST "projects/:id/merge_requests/<iid>/cancel_merge_when_pipeline_succeeds"`.

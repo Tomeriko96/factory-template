@@ -174,8 +174,9 @@ because of the environment, e.g. a timing check that was slow at load 10 on 4 co
 alone: that does not block, any other ⚠️ does); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
 schema/migrations or auth, nor in `delivery.auto_merge_never` (your globs, e.g. personal-data
 paths); no `HOLD: <reason>` line from the approver (breaking change, public API, user-visible
-behaviour); and no sync merge on the branch (an agent resolved a conflict, one reviewer checked
-it: a human merges that). `/factory setup` runs `.factory/forgecheck`: does CI run on a draft
+behaviour); and no sync in which an agent resolved conflicts (one reviewer checked it: a human merges that;
+a sync that merged the base cleanly and passes the validation does not block, and the factory
+switches auto-merge back on after its push). `/factory setup` runs `.factory/forgecheck`: does CI run on a draft
 PR/MR (if not, use `draft: false`), and does the forge require checks before a merge (if not,
 auto-merge has nothing to wait for and is not switched on).
 
@@ -188,7 +189,9 @@ so the PR/MR updates.
 `/factory sync [<id>]` keeps open PRs/MRs mergeable: it asks the forge whether each still
 merges into the base branch (also at the end of delivery, on every `status` and whenever a
 merge is noticed, since each merge can make the other open PRs conflict), and on a
-conflict has a sonnet builder merge the base into the job branch (a merge commit, never a
+conflict has a sonnet builder merge the base into the job branch (`SYNC: CLEAN` when git
+merged without conflicts, `SYNC: RESOLVED` when it resolved them; recorded per sync and
+checked with `git merge-tree`) (a merge commit, never a
 rebase or force-push), runs the validation, lets the code reviewer check the merge and
 pushes. A conflict that needs a decision (the base already fixes the same thing, both
 sides change the same behaviour, validation fails) is never resolved by picking a side:
@@ -262,7 +265,7 @@ Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I t
 `.factory/ci` with a fake `gh`: a merged or closed PR is reported as such)
 (prompt copies and the contracts between prompts and scripts stay in step).
 
-`job` is tested by `bash tests/job_test.sh` (120 checks, among them the auto-merge gate; a throwaway repo with a bare remote, the agents played by writing their files): the full
+`job` is tested by `bash tests/job_test.sh` (274 checks, among them the auto-merge gate, reviewer selection by path, the full validation step, heavy priorities and clean vs resolved syncs; a throwaway repo with a bare remote, the agents played by writing their files): the full
 loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
 under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
 rework after someone pushed to the branch, sync (resolved and needs-human), job.json files from

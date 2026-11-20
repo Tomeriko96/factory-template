@@ -40,7 +40,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 }
 ```
 
-- `reviewers` is the full-review set. Name `x` is agent `factory-reviewer-x`.
+- `reviewers` is the full-review set. Name `x` is agent `factory-reviewer-x`. Each round
+  `.factory/job` keeps only those whose paths the diff touches (see **Reviewers**);
+  `reviewer_paths` (optional) sets those paths per reviewer.
 - `issues` is `null` when issue mode is off. Which issues `/factory next` considers: every
   open issue whose author is in `allowed_authors`, except those with a label in
   `issues.skip_labels` (default `blocked`, `wontfix`, `factory:in-progress`). `issues.label`
@@ -160,14 +162,33 @@ line of its output, act, and call `.factory/job next <id>` again:
 
 On `ACTION: choose-reviewers` (round N, mode as printed):
 
-- `full`: `config.reviewers`, except that `ux` and `ui` run only when the job touches
-  the UI: some file in `git diff --name-only <base>...<branch>` matches the "UI paths"
-  line of repo.md (default: `*.tsx *.jsx *.vue *.svelte *.css *.scss *.html`,
-  `templates/`, `static/`, `frontend/src/`). Round > 1: only if they ran before and gave
-  `CHANGES`, or UI files changed since. Say in one line when they are skipped.
+- `full`: `config.reviewers` as is.
 - `light`: `code`, plus `security` if the changed files touch auth, secrets, input
   parsing or dependencies, plus `privacy` if it is in `config.reviewers` and the files
   touch personal-data paths. No `audit`: the approver measures the acceptance criteria.
+
+`.factory/job reviewers` then keeps only the reviewers the diff (`<base>...HEAD` of the
+worktree) concerns, and prints why each was chosen or skipped (`NOTE: reviewer paths: …`):
+
+- `code` and `audit`: always.
+- A diff that only touches tests or docs: only `code` and `audit`.
+- `security`: any code change outside tests/docs, and always for CI, dependencies,
+  containers, schema or auth (the auto-merge hold classes).
+- `ux`/`ui`: only when a file matches the "UI paths" line of repo.md (default:
+  `*.tsx *.jsx *.vue *.svelte *.css *.scss *.html`, `templates/`, `static/`,
+  `frontend/src/**`); round > 1 only when UI files changed since the last round, or they
+  gave `CHANGES` before.
+- `llm-safety`: only when prompt, agent or LLM code changes (default globs `*prompt*`,
+  `*agent*`, `*llm*`, `*/prompts/*`, `*/agents/*`, `*/llm/*`; a prompt in `.md` outside
+  `docs/` counts as code).
+- `privacy`: only when a path in `reviewer_paths.privacy` changes, else the
+  `delivery.auto_merge_never` globs; with neither set, on any code change.
+- Any other reviewer: on any code change, unless `reviewer_paths` names its globs.
+
+`config.reviewer_paths` (optional) overrides the globs per reviewer, e.g.
+`{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"], "ui": ["web/**"]}`.
+A glob with a `/` matches the whole path (`x/` = that directory anywhere), one without
+the file name. Reviewers whose latest verdict is not PASS always run again.
 
 ## Paths block
 

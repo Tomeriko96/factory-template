@@ -471,6 +471,45 @@ first "$(J set "$BO" issues '"x"')" "ERROR: issues must be a JSON list"; first "
 park "$BO"
 cp "$T/config.bak" .factory/config.json
 
+# ---------- reviewers by path: only the reviewers whose paths the diff touches ----------
+scenario=reviewer-paths
+cp .factory/config.json "$T/config.bak"
+ALL=security,code,ux,ui,audit,llm-safety,privacy
+# tobuilt <id> <path>: spec, a new file, up to choose-reviewers
+tobuilt() { echo SPEC > "$(jd "$1")/spec.md"; J next "$1" >/dev/null; buildnew "$1" "$2"; J next "$1" >/dev/null; }
+P1="$(newjob "zq rp tests")"; tobuilt "$P1" tests/test_thing.py
+out="$(J reviewers "$P1" $ALL)"; has "$out" "NOTE: reviewers round 1: code, audit ("
+has "$out" "security: skipped (only tests/docs changed)"; has "$out" "code: always"; lacks "$out" "factory-reviewer-security"
+field "$P1" "j['review_sets']['1']" "['code', 'audit']"; park "$P1"
+P2="$(newjob "zq rp backend")"; tobuilt "$P2" src/api.py
+out="$(J reviewers "$P2" $ALL)"; has "$out" "reviewers round 1: security, code, audit, privacy ("
+has "$out" "security: src/api.py"; has "$out" "ux: skipped (no UI path changed)"; has "$out" "llm-safety: skipped (no matching path changed)"
+has "$out" "privacy: src/api.py"; park "$P2"          # no privacy paths and no auto_merge_never: any code change
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["reviewer_paths"]={"privacy": ["data/**"]}; json.dump(c, open(".factory/config.json","w"))'
+P3="$(newjob "zq rp prompt")"; tobuilt "$P3" src/prompts/system.md
+out="$(J reviewers "$P3" $ALL)"; has "$out" "reviewers round 1: security, code, audit, llm-safety ("
+has "$out" "llm-safety: src/prompts/system.md"; has "$out" "privacy: skipped (no matching path changed)"; park "$P3"
+P4="$(newjob "zq rp front")"; tobuilt "$P4" frontend/src/App.tsx
+out="$(J reviewers "$P4" $ALL)"; has "$out" "ux: frontend/src/App.tsx"; has "$out" "ui: frontend/src/App.tsx"
+field "$P4" "j['review_sets']['1']" "['security', 'code', 'ux', 'ui', 'audit']"
+# round 2 changes only the backend: ux/ui sat it out (they passed), unless they objected
+for r in security code ux audit; do review "$P4" 1 $r PASS; done; review "$P4" 1 ui CHANGES
+J next "$P4" >/dev/null; mkdir -p "$(jd "$P4")/round-2"; echo y > "$(wt "$P4")/src_api.py"
+git -C "$(wt "$P4")" add -A; git -C "$(wt "$P4")" commit -qm r2; printf 'Built\n' > "$(jd "$P4")/round-2/build.md"; J next "$P4" >/dev/null
+out="$(J reviewers "$P4" $ALL)"; has "$out" "ux: skipped (no UI path changed since round 1)"
+has "$out" "kept in because their latest verdict is not PASS: ui"; park "$P4"
+# repo.md's "UI paths" line replaces the default UI globs
+printf -- '- UI paths (ux/ui reviewers run only when the diff touches one): `web/**`, `*.jinja`\n' >> .factory/repo.md
+P5="$(newjob "zq rp web")"; tobuilt "$P5" web/page.py
+out="$(J reviewers "$P5" code,ux,audit)"; has "$out" "ux: web/page.py"; park "$P5"
+P6="$(newjob "zq rp auth")"; tobuilt "$P6" src/auth/login.py
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["reviewer_paths"]={"security": ["*/crypto/*"]}; json.dump(c, open(".factory/config.json","w"))'
+out="$(J reviewers "$P6" security,code)"; has "$out" "security: src/auth/login.py"; park "$P6"   # auth always gets security
+P7="$(newjob "zq rp docs only cand")"; tobuilt "$P7" docs/x.md
+out="$(J reviewers "$P7" security)"; has "$out" "nothing left after the path selection"; has "$out" "factory-reviewer-security"; park "$P7"
+sed -i '/UI paths/d' .factory/repo.md
+cp "$T/config.bak" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

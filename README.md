@@ -106,9 +106,16 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
   makes the change and writes the PR text; `.factory/precheck` checks mechanically that the
   diff only touches documentation (`limits.docs_globs`), has no secrets and is small. If it
   touches anything else the job continues as `--light`.
-- **ux/ui only for UI diffs:** they start a server and a browser per round, and gave
-  `CHANGES` in 0 of 65 reviews. They now run only when the diff matches the repo's "UI paths"
-  (and in round 2+ only if they objected or UI files changed).
+- **Reviewers only for what the diff touches:** `.factory/job reviewers` keeps from
+  `config.reviewers` only those whose paths changed and prints why each was chosen or
+  skipped. `code` and `audit` always; `security` for any code change outside tests/docs
+  (and always for CI, dependencies, containers, schema, auth); `ux`/`ui` only when the diff
+  matches the repo's "UI paths" (they start a server and a browser per round, and gave
+  `CHANGES` in 0 of 65 reviews; in round 2+ only if they objected or UI files changed);
+  `llm-safety` only for prompt/agent/LLM paths; `privacy` only for its paths (fallback:
+  `delivery.auto_merge_never`); a tests/docs-only diff gets `code` + `audit`. Override the
+  globs per reviewer with `reviewer_paths` in `config.json`, e.g.
+  `{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"]}`.
 - **Cheaper approver:** it was MERGE 37 times out of 37. `precheck` does the mechanical part
   (all PASS, audit table has no ❌/⏭️, no secrets or factory files, diff size); the approver
   now runs on sonnet to judge and write the PR body, and gets opus only when the precheck

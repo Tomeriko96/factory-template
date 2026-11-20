@@ -22,8 +22,9 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job triage plan                     validate the triage plan, print the groups (jobs to start)
   job triage start <k>                start group k of the plan as a job
   job next <id>                       apply what is due, print the next action
-  job reviewers <id> <a,b,c>          record round N's reviewer candidates (round > 1:
-                                      narrowed by .factory/rereview), then as `next`
+  job reviewers <id> <a,b,c>          record round N's reviewer candidates: kept only when the diff
+                                      touches their paths (config.reviewer_paths; code and audit always),
+                                      round > 1 narrowed by .factory/rereview; then as `next`
   job delivered <id> merged|pushed|pr-open [--pr-url URL]
   job pr-merged <id>                  the forge confirmed the PR/MR is merged
   job approve <id>                    a human approves a needs-human job: deliver it
@@ -36,7 +37,7 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job set <id> pr_url|pr_state|issue_closed|issues <json or text>   (issues: a JSON list, for a bundle made by hand)
   job list | show <id> | capacity
 """
-import fcntl, glob, json, os, re, shutil, subprocess, sys, time, unicodedata
+import fcntl, fnmatch, glob, json, os, re, shutil, subprocess, sys, time, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 REPO = os.path.dirname(HERE)
@@ -54,6 +55,13 @@ NEEDS_WORKTREE = ("spec", "build", "review", "approve", "deliver")
 ID_RE = re.compile(r"^\d{3}-[a-z0-9]+(-[a-z0-9]+)*$")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 OFFSET = {"ux": 1, "ui": 2, "audit": 3}
+# Reviewer selection by path (config.reviewer_paths overrides per name; see select_reviewers)
+ALWAYS_REVIEW = ("code", "audit")
+SIDE_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/|(\.|_)(test|spec)\.|(^|/)test_[^/]*$"
+                     r"|\.(md|mdx|rst|adoc|snap)$|(^|/)LICENSE[^/]*$", re.I)
+TESTDOC_DIR_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/", re.I)
+UI_GLOBS = ["*.tsx", "*.jsx", "*.vue", "*.svelte", "*.css", "*.scss", "*.html", "templates/", "static/", "frontend/src/**"]
+LLM_GLOBS = ["*prompt*", "*agent*", "*llm*", "*/prompts/*", "*/agents/*", "*/agent/*", "*/llm/*"]
 RESUME_NOTE = ("This is a resume: your previous run ended without writing its output file. "
                "Writing it is part of your task and required. Reuse your earlier screenshots in "
                "round-N/shots/<name>/ instead of redoing the walk-through.")
@@ -537,8 +545,9 @@ def step(job, out, start=None):
             if not names:
                 out.main += ["ACTION: choose-reviewers", f"ROUND: {n}", f"MODE: {job.get('mode')}",
                              f"THEN: .factory/job reviewers {job['id']} <a,b,c>   (this round's candidates: "
-                             "config.reviewers, or the light set, after the UI gating; from round 2 on the "
-                             "script narrows them with .factory/rereview)"]
+                             "config.reviewers as is, or the light set; the script keeps only the reviewers "
+                             "whose paths the diff touches (config.reviewer_paths) and from round 2 on narrows "
+                             "them with .factory/rereview)"]
                 return
             missing = [x for x in names if not os.path.exists(os.path.join(jd, f"round-{n}", f"review-{x}.md"))]
             if missing:
@@ -732,6 +741,105 @@ def cmd_next(args):
     return with_job(args[0], step)
 
 
+def glob_hit(name, globs):
+    """Does path `name` match one of `globs`? A glob with a "/" is matched against the whole path
+    (also with a leading "/", so "*/auth/*" matches a top-level auth/; "x/**" and "x/" are a
+    directory, "x/" anywhere in the path); one without against the file name."""
+    path = "/" + name
+    for g in globs:
+        if g.endswith("/") and "*" not in g:
+            if ("/" + g.strip("/") + "/") in path:
+                return True
+        elif "/" in g:
+            if fnmatch.fnmatch(path, g) or fnmatch.fnmatch(name, g) or \
+                    (g.endswith("/**") and name.startswith(g[:-2].lstrip("*/"))):
+                return True
+        elif fnmatch.fnmatch(os.path.basename(name), g):
+            return True
+    return False
+
+
+def ui_paths():
+    """The "UI paths" line of repo.md (backticked globs, or the words after the colon)."""
+    try:
+        text = open(os.path.join(HERE, "repo.md"), errors="replace").read()
+    except OSError:
+        return None
+    m = re.search(r"^\s*-\s*UI paths[^:]*:(.*)$", text, re.M)
+    if not m:
+        return None
+    globs = re.findall(r"`([^`]+)`", m.group(1)) or [g for g in re.split(r"[\s,]+", m.group(1)) if g]
+    return [g for g in globs if not g.startswith("<")] or None
+
+
+def reviewer_globs():
+    """name -> path globs that make that reviewer run; a name without an entry runs on any code change."""
+    cfg = config()
+    own = {k: [g for g in v if isinstance(g, str)] for k, v in (cfg.get("reviewer_paths") or {}).items()
+           if isinstance(v, list)}
+    ui = ui_paths() or UI_GLOBS
+    globs = {"ux": ui, "ui": ui, "llm-safety": LLM_GLOBS}
+    never = [g for g in ((cfg.get("delivery") or {}).get("auto_merge_never") or []) if isinstance(g, str)]
+    if never:
+        globs["privacy"] = never
+    globs.update(own)
+    return globs
+
+
+def select_reviewers(job, n, cand):
+    """Drop the candidates whose paths the diff does not touch. Returns (chosen, reasons)."""
+    wt, base = job.get("worktree"), job.get("base")
+    names = git("diff", "--name-only", "--no-renames", f"{base}...HEAD", cwd=wt) if wt and os.path.isdir(wt) else None
+    if names is None:
+        return cand, ["cannot diff the job branch: running all candidates"]
+    files = [x for x in names.split("\n") if x]
+    head = (job.get("round_heads") or {}).get(str(n - 1)) if n > 1 else None
+    since = git("diff", "--name-only", "--no-renames", head, "HEAD", cwd=wt) if head else None
+    recent = [x for x in since.split("\n") if x] if since is not None else files
+    globs = reviewer_globs()
+    # A prompt template in .md is not documentation: outside tests/ and docs/ the reviewers' own globs win
+    named = [g for k, gl in globs.items() if k not in ("ux", "ui") for g in gl]
+    code = [x for x in files if not SIDE_RE.search(x) or (not TESTDOC_DIR_RE.search(x) and glob_hit(x, named))]
+    held = [l.split(": ", 1)[1] for l in hold_files(job)] if code else []
+    chosen, why = [], []
+
+    def hit(paths, gl):
+        found = [x for x in paths if glob_hit(x, gl)]
+        return found and (found[0] + (f" (+{len(found) - 1})" if len(found) > 1 else ""))
+
+    for x in cand:
+        if x in ALWAYS_REVIEW:
+            chosen.append(x)
+            why.append(f"{x}: always")
+            continue
+        if not code:
+            why.append(f"{x}: skipped (only tests/docs changed)")
+            continue
+        gl = globs.get(x)
+        if x in ("ux", "ui"):
+            # round 2+: only when UI files changed since the last round (a reviewer that objected is kept in anyway)
+            f = hit([y for y in recent if not SIDE_RE.search(y)], gl)
+            reason = f or ("no UI path changed" + (f" since round {n - 1}" if head else ""))
+        elif x == "security":
+            # CI, dependencies, containers, schema, auth always; else any code change (or the configured paths)
+            f = (held and held[0]) or (hit(code, gl) if gl else code[0])
+            reason = f or "no matching path changed"
+        elif gl:
+            f = hit(code, gl)
+            reason = f or "no matching path changed"
+        else:
+            f = code[0]
+            reason = f
+        if f:
+            chosen.append(x)
+            why.append(f"{x}: {reason}")
+        else:
+            why.append(f"{x}: skipped ({reason})")
+    if not chosen:
+        return cand, why + ["nothing left after the path selection: running all candidates"]
+    return chosen, why
+
+
 def cmd_reviewers(args):
     jid, names = args[0], [x.strip() for x in args[1].split(",") if x.strip()]
 
@@ -746,8 +854,9 @@ def cmd_reviewers(args):
         if not names:
             raise Fail("empty reviewer set")
         # A reviewer whose latest verdict is not PASS always runs again, or nothing could clear it
-        stuck = [x for x, (_, fl) in latest_verdicts(job, n - 1).items() if fl != "VERDICT: PASS" and x not in names]
-        cand = names + stuck
+        sel, paths_why = select_reviewers(job, n, names)
+        stuck = [x for x, (_, fl) in latest_verdicts(job, n - 1).items() if fl != "VERDICT: PASS" and x not in sel]
+        cand = sel + stuck
         chosen, why = cand, "round 1: everyone"
         if n > 1:
             r = run([os.path.join(HERE, "rereview"), jid, str(n), "--set", ",".join(cand)])
@@ -762,6 +871,7 @@ def cmd_reviewers(args):
         step(job, out)
         out.notes.append(f"NOTE: reviewers round {n}: {', '.join(chosen)} ({why})"
                          + (f"; kept in because their latest verdict is not PASS: {', '.join(stuck)}" if stuck else ""))
+        out.notes.append("NOTE: reviewer paths: " + "; ".join(paths_why))
     return with_job(jid, fn)
 
 

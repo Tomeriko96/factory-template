@@ -70,6 +70,14 @@ Reviewer set (`config.reviewers`):
 onderwijsnummer, row-level uploads, pseudonymisation), add `privacy`, also for A, C, D
 and E. When in doubt: add it and tell the user.
 
+`config.reviewers` is the set a full job may get; per round `.factory/job` keeps only the
+reviewers whose paths the diff touches (`code` and `audit` always; see **Reviewers** in
+SKILL.md). Set `reviewer_paths` in config.json only where the defaults miss this repo:
+`privacy` → the personal-data paths the data scan found (else it falls back to
+`delivery.auto_merge_never`, else any code change), `llm-safety` → where prompts and agent
+code live if they are not named `*prompt*`/`*agent*`/`*llm*`. ux/ui use the "UI paths"
+line of repo.md.
+
 Models live in the agent frontmatter (builder, security, privacy, llm-safety and audit on
 opus; approver and the rest on sonnet; the orchestrator raises the approver to opus when
 the precheck finds issues). Do not change them. Advise the user to run the
@@ -166,11 +174,12 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "reviewers": ["security", "code", "ux", "ui", "audit"],
   "issues": { "allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": false, "auto_merge": false },
-  "limits": { "active_jobs": 3, "open_prs": 5 }
+  "limits": { "active_jobs": 3, "open_prs": 5 },
+  "reviewer_paths": { "privacy": ["<personal-data globs>"] }
 }
 ```
 
-Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>.md`.
+(`reviewer_paths` only when needed; leave it out otherwise.) Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>.md`.
 
 `.factory/repo.md` (short, factual; agents read it every round):
 

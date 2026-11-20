@@ -115,6 +115,22 @@ try:
     out = watch("--once", "--no-ci")
     check("lint" not in out and "other CI" not in out, "--no-ci still shows CI")
 
+    # Adoptable PRs/MRs (merge conflict, no job), as `.factory/job adoptable` cached them; an adopted one drops off
+    json.dump({"prs": [{"nr": 700, "branch": "feat/700-x", "title": "x"}, {"nr": 701, "branch": "feat/701-y", "title": "y"}]},
+              open(os.path.join(fd, "cache", "adoptable.json"), "w"))
+    aj = job("012-adopted", "pr-open", mode="adopted", adopted=True, pr_number=701, round=0,
+             pr_url="https://github.com/o/r/pull/701", branch="feat/701-y")
+    os.makedirs(os.path.join(fd, "jobs", aj["id"]))
+    json.dump(aj, open(os.path.join(fd, "jobs", aj["id"], "job.json"), "w"))
+    out = watch("--once", "--no-ci")
+    check("adoptable (merge conflict, no job)" in out and "#700 feat/700-x → /factory adopt 700" in out,
+          "adoptable PR not on the board")
+    check("adopt 701" not in out, "an adopted PR is still listed as adoptable")
+    nxt = {d["id"]: d["next"] for d in json.loads(watch("--json", "--no-ci"))}
+    check(nxt.get("012-adopted") is None, f"an adopted PR without a conflict offers {nxt.get('012-adopted')}")
+    shutil.rmtree(os.path.join(fd, "jobs", aj["id"]))
+    os.remove(os.path.join(fd, "cache", "adoptable.json"))
+
     # A GitLab MR that is no longer open (merged or closed) while the job still says pr-open
     json.dump({"pipeline": "success", "merge": "not_open", "jobs": [{"name": "t", "status": "success"}]},
               open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))

@@ -160,6 +160,13 @@ class Repo:
         c = read_json(os.path.join(self.fd, "cache", f"ci-{re.sub(r'[^A-Za-z0-9_.-]', '_', jid)}.json"))
         return c if isinstance(c, dict) else None
 
+    def adoptable(self):
+        """Conflicting PRs/MRs without a job, as `.factory/job adoptable` last saw them."""
+        d = read_json(os.path.join(self.fd, "cache", "adoptable.json"), {})
+        p = d.get("prs") if isinstance(d, dict) else None
+        have = {j.get("pr_number") for j in self.jobs if j.get("adopted")}
+        return [x for x in p if isinstance(x, dict) and x.get("nr") not in have] if isinstance(p, list) else []
+
     def others(self):
         d = read_json(os.path.join(self.fd, "cache", "ci-others.json"), {})
         p = d.get("pipelines") if isinstance(d, dict) else None
@@ -425,6 +432,8 @@ def next_command(j):
     """What the user would type next for this job, or None."""
     jid, sec = j["id"], section_of(j)
     if sec == "needs":
+        if j.get("adopted"):   # an adopted PR/MR: the factory only patches its conflicts
+            return f"/factory sync {jid}"
         if j.get("pr_url"):
             return f'/factory rework {jid} "<note>"'
         # never built (round 0): there is nothing to approve, only to resume or drop
@@ -433,6 +442,8 @@ def next_command(j):
         return f"/factory resume {jid}"
     if sec == "prs":
         m, _ = merge_state(j, j["_repo"].ci(jid))
+        if j.get("adopted"):
+            return f"/factory sync {jid}" if m.startswith(("conflict", "no longer open")) else None
         return f"/factory sync {jid}" if m.startswith(("conflict", "no longer open")) else f'/factory rework {jid} "<review comments>"'
     if j.get("stage") == "pushed":
         return f"/factory deliver {jid} pr"
@@ -569,6 +580,15 @@ def others_line(repos):
     return [("other CI  ", "dim")] + cells[:4] if cells else None
 
 
+def adoptable_line(repos):
+    cells = []
+    for r in repos:
+        for p in r.adoptable():
+            label = (f"{r.name}:" if len(repos) > 1 else "") + f"#{p.get('nr')} " + fit(str(p.get("branch") or "?"), 28)
+            cells.append((f"{label} → /factory adopt {p.get('nr')}  ", "yellow"))
+    return [("adoptable (merge conflict, no job)  ", "dim")] + cells[:4] if cells else None
+
+
 def board_lines(repos, width, show_done=False, compact=False, no_ci=False, query=""):
     """The whole board as lines, plus the job each line belongs to (for selection)."""
     head, slots = header(repos, width)
@@ -597,6 +617,10 @@ def board_lines(repos, width, show_done=False, compact=False, no_ci=False, query
         owners.append(None)
     elif query and not shown:
         lines.append([(f"no job matches {query!r}", "yellow")])
+        owners.append(None)
+    a = adoptable_line(repos)
+    if a:
+        lines.append(a)
         owners.append(None)
     if not no_ci:
         o = others_line(repos)

@@ -67,10 +67,14 @@ and re-run `factory-init` in each repo.
 
 ```text
 .claude/skills/factory/      SKILL.md (orchestrator) + setup.md (/factory setup)
-.claude/agents/factory-*.md  triage, spec-writer, builder, approver, reviewer-{security,code,ux,ui,audit,
-                             privacy,methodology,llm-safety,data-quality}
+.claude/skills/frontend-design/  vendored from anthropics/skills (Apache-2.0, see NOTICE); every skill
+                             directory under template/.claude/skills/ gets its own exclude line, and one
+                             the repo tracks itself is left alone
+.claude/agents/factory-*.md  triage, spec-writer, acceptance-writer, builder, approver,
+                             reviewer-{security,code,ux,ui,audit,privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, job, shoot, serve,
-                             heavy, guard, precheck, rereview, watch, ci, forgecheck, VERSION, jobs/, run/, cache/
+                             heavy, guard, precheck, rereview, watch, ci, forgecheck, VERSION, jobs/, run/,
+                             cache/, metrics.jsonl
 .claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
 
@@ -148,6 +152,73 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
 - **Few screenshots:** ux/ui take at most 6 paths at 2 widths, light only unless colours
   changed; `shoot` refuses more than 12 shots per call.
 - **No size limits as acceptance criteria:** "diff under N lines" is guidance, never blocking.
+
+## Routing and metrics
+
+Every spawn block that `.factory/job` prints carries `MODEL:` and `EFFORT:`; the orchestrator
+passes them as the Agent tool's `model` and `effort`. Defaults sit in the agents'
+frontmatter: spec-writer, acceptance-writer, approver and most reviewers at medium, the
+audit and security reviewers at high; the builder at high in `full`, medium in `light` and
+low in `docs` jobs. The approver stays on sonnet unless the precheck found issues or it is
+round 2+ (then opus).
+
+**Escalation ladder.** A round with blocking reviews, a failed full validation or an
+approver REWORK raises the next builder one step: effort first, then sonnet → opus, up to
+opus/high. A `BUILD: BLOCKED` is retried once in the same round one step up (the old file
+stays as `round-N/build-blocked-1.md`); at the cap or on a second block the job goes to
+`needs-human` as before. The spawn shows `ESCALATED: +k steps (why)`. Configure it in
+`config.json`:
+
+```json
+"routing": {
+  "agents": { "factory-builder": { "effort": { "light": "low" } }, "factory-reviewer-ux": { "model": "sonnet" } },
+  "cap": { "model": "opus", "effort": "high" },
+  "escalate": true,
+  "blocked_retries": 1
+}
+```
+
+If a session's Agent tool has no `effort` parameter, only the frontmatter effort applies;
+the model step of the ladder works either way.
+
+**Metrics.** `.factory/job` appends one JSON line to `.factory/metrics.jsonl` per agent spawn
+(job, mode, round, agent, model, effort, escalation, resume) and per verdict it reads
+(verdict, seconds from the first spawn to the file, resumes, first-round pass), plus one
+line per finished review wave. `.factory/job report` (or `/factory status report`) prints
+per role the runs, first-pass yield (the builder's: round 1 passed every review), median
+duration and verdict mix, and per job mode the agent runs per job; `--json` for the
+numbers.
+
+## Hidden acceptance tests
+
+`factory-acceptance-writer` (sonnet) runs after the spec and before round 1 and writes tests
+from spec.md's numbered acceptance criteria only, through public surfaces, into the job
+folder (`acceptance/` and `acceptance.md` with a `Run:` command), never the worktree. The
+builder is not told about them and is instructed not to look. Every round the audit
+reviewer copies them into the worktree, runs them through `heavy`, removes them in the
+same call and reports one row per criterion: a behaviour failure is blocking, a test that
+only guessed an interface wrong is a non-blocking note. `acceptance_tests` in config.json:
+missing = `full` jobs only, `true` = `full` and `light`, `false` = off.
+
+## Skills and engineering discipline
+
+- **frontend-design** (anthropics/skills, vendored unchanged) is preloaded into the builder
+  (`skills:` frontmatter) for new UI, below the repo's own design system. spec.md is the
+  brief; the builder never asks the user for design input.
+- **House style** (optional, no default): `"house_style": {"skills": ["<skill>"]}` in
+  config.json, set by whoever runs the factory. The builder and the ux/ui reviewers then
+  get a `House style:` line and load those skills; they win over frontend-design.
+- **Distilled from obra/superpowers** (MIT), in our own words: the builder writes a
+  regression test it saw fail on the unfixed code (through `heavy`), claims nothing without
+  fresh command output, finds the root cause before fixing, questions the approach after 3
+  failed fixes, replaces sleeps by condition-based waiting, and in rework rounds checks each
+  finding against the code and disputes wrong ones with evidence. The audit checks the
+  red-green evidence; the code and audit reviewers check test quality (no tests of mock
+  behaviour, no test-only code in production).
+- **Optional skills**, used only when the session has them: `gate` (a red SonarCloud/CodeQL
+  gate), `check-style` (code reviewer), `write-issue` (issues the orchestrator opens).
+
+`NOTICE` lists the sources with their licences and URLs.
 
 ## Delivery
 
@@ -253,28 +324,21 @@ code continues as `light`.
 
 ## Status
 
-Install/update/remove, the git-exclusion and the loading of the skill and agents by
-Claude Code are tested. `shoot` and `watch` are tested. The `/factory` loop has run for
-about 40 jobs in two repos (onderwijsdata-chat, prompt-library); feed findings back here
-and tag stable versions (`git tag v0.x.y`), because `install` records
-`git describe` in `.factory/VERSION`.
+The factory is in daily use: the `/factory` loop has run 40+ jobs in several repos (among
+them onderwijsdata-chat and prompt-library), from single features to triaged issue bundles,
+with PR delivery, syncs and auto-merge. Feed findings back here and tag stable versions
+(`git tag v0.x.y`), because `install` records `git describe` in `.factory/VERSION`.
 
-Tests: `bash tests/job_test.sh`, `python3 -I tests/guard_test.py`, `python3 -I tests/prompts_test.py`,
-`python3 -I tests/forgecheck_test.py` (CI on drafts, required checks, with a fake `gh`/`glab`),
-`python3 -I tests/watch_test.py` (the board, two repos, and every key through a pseudo-terminal;
-`.factory/ci` with a fake `gh`: a merged or closed PR is reported as such)
-(prompt copies and the contracts between prompts and scripts stay in step).
+Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml`). Locally:
 
-`job` is tested by `bash tests/job_test.sh` (274 checks, among them the auto-merge gate, reviewer selection by path, the full validation step, heavy priorities and clean vs resolved syncs; a throwaway repo with a bare remote, the agents played by writing their files): the full
-loop with a CHANGES round, REWORK and MERGE; budget exhaustion; resume limits; the queue
-under six concurrent `new` calls; docs CLEAN and NOT-DOCS; superseded; `pr` delivery,
-rework after someone pushed to the branch, sync (resolved and needs-human), job.json files from
-before `job`, input checks. The
-orchestrator driving it has not run in a real `/factory` session yet.
+| Suite | Checks | What |
+|---|---|---|
+| `bash tests/job_test.sh` | 347 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step; heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; hidden acceptance tests; old job.json files; input checks |
+| `python3 -I tests/guard_test.py` | 167 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
+| `python3 -I tests/watch_test.py` | 56 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
+| `python3 -I tests/forgecheck_test.py` | 21 | CI on drafts and required checks, with a fake `gh`/`glab` |
+| `python3 -I tests/install_test.py` | 19 | install, exclusion of every template skill, re-install, remove, a repo that tracks its own copy of a skill |
+| `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE) |
 
-`heavy` (slots, cache, gate, signals, exit codes), `guard` (166 allow/deny cases in `tests/guard_cases.txt`, run with `python3 -I tests/guard_test.py`, and a
-real subagent run in a trusted project: `pytest` refused, `echo` allowed, also in bypass
-mode), `precheck` and `watch` are tested on their own. The agent prompts that use them, the
-queue, `--docs`, the already-done check and the closing of issues have not run in a real
-`/factory` session yet: watch the first run with `.factory/heavy
-status` and `.factory/watch`, and feed findings back here.
+The guard was also checked in a real subagent run in a trusted project (`pytest` refused,
+`echo` allowed, also in bypass mode).

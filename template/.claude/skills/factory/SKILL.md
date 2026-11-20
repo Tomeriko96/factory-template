@@ -78,6 +78,12 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` set the machine-wide limits of
   `.factory/heavy` (defaults: at most max(2, cores/2) commands at once, together at most
   75% of the cores, CPU not above 90%, load average ignored). See **Resources**.
+- `routing` (optional): model and effort per spawn, and the builder's escalation ladder.
+  `routing.agents.<agent>.model|effort` (a value, or one per job mode such as
+  `{"light": "low"}`) wins over the script's choice and the agent's frontmatter;
+  `routing.escalate: false` switches the ladder off; `routing.cap` (default
+  `{"model": "opus", "effort": "high"}`) is its top; `routing.blocked_retries` (default 1)
+  is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 
@@ -107,6 +113,22 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
   new jobs wait. More are `queued`. The machine-wide guard is `.factory/heavy` (Resources).
 - Ports for job `NNN-…`: builder `port_base + 10·NNN`; ux `+1`, ui `+2`, audit `+3`.
 
+## Routing
+
+Every spawn block carries `MODEL:` and `EFFORT:` (see **Job state**). The defaults are in the
+agents' frontmatter (`model:`, `effort:`): spec-writer, approver and most reviewers medium,
+audit and security high; the builder runs at high in `full`, medium in `light` and low in
+`docs` jobs (the script sets that per mode). **Escalation ladder:** after a round with blocking
+reviews, a failed full validation or an approver REWORK, the next builder goes one step up:
+effort first, then the model (sonnet → opus), up to `routing.cap` (opus/high). A
+`BUILD: BLOCKED` is retried once in the same round one step up (`round-N/build-blocked-K.md`
+keeps the old file); at the cap, or on the second block, the job goes to `needs-human` as
+before. The block then shows `ESCALATED: +k steps (why)`. If the Agent tool in this session
+has no `effort` parameter, only the frontmatter effort applies and the ladder raises effort
+in name only (the metrics still record it); the model step works either way.
+`.factory/metrics.jsonl` records every spawn (model, effort, escalation) and verdict;
+`.factory/job report` sums it up.
+
 ## Layout
 
 ```text
@@ -120,6 +142,7 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
     job.json                             (written only by .factory/job)
     spec.md
     round-N/build.md
+    round-N/build-blocked-K.md            (a BUILD: BLOCKED that was retried one step up)
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
     round-N/decision.md                  (an approver's REWORK, moved here by the script)
@@ -144,8 +167,9 @@ The driving loop, for every command that moves a job: run the command, read the 
 line of its output, act, and call `.factory/job next <id>` again:
 
 - `ACTION: spawn N agent(s)` → run `.factory/heavy gate` (Bash timeout 600000), then
-  spawn every `AGENT:` block **in one message** with its `MODEL:` (`default` = the
-  agent's own) and its `PROMPT:` **verbatim** (it holds the paths block, the port, the
+  spawn every `AGENT:` block **in one message** with its `MODEL:` as the Agent tool's
+  `model` and its `EFFORT:` as the tool's `effort` (this skill explicitly asks for it; `default`
+  = leave the parameter out, the agent's own), and its `PROMPT:` **verbatim** (it holds the paths block, the port, the
   untrusted marks and the resume note). Wait until all have returned, then `job next`.
   Never write an agent's file yourself, also not when it gave its verdict only in its
   reply: `job next` respawns it.

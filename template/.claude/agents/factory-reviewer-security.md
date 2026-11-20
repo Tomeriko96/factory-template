@@ -3,6 +3,7 @@ name: factory-reviewer-security
 description: Security review of the job diff. Writes round-N/review-security.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+effort: high
 hooks:
   PreToolUse:
     - matcher: "Bash"

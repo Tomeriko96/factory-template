@@ -3,6 +3,7 @@ name: factory-reviewer-audit
 description: Independent audit. Re-measures every claim in build.md and every acceptance criterion, claim against measurement. Writes round-N/review-audit.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+effort: high
 hooks:
   PreToolUse:
     - matcher: "Bash"

@@ -3,6 +3,7 @@ name: factory-approver
 description: Final gate. Reads spec, build and all reviews and decides MERGE, REWORK or ESCALATE in decision.md.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

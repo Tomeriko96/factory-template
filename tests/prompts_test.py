@@ -111,6 +111,20 @@ check("factory:ready" not in SETUP.split("**Issues:**", 1)[1].split("**Delivery*
 check('"groups"' in texts.get("triage", "") and '"skipped"' in texts.get("triage", "")
       and 'plan.get("groups")' in JOB and 'plan.get("skipped")' in JOB, "triage plan.json shape: agent and job disagree")
 
+# Routing: every agent pins model and effort; the script prints EFFORT: and SKILL.md says how to pass it
+LEVELS = ("low", "medium", "high", "xhigh", "max")
+for n, t in texts.items():
+    front = t.split("---", 2)[1] if t.startswith("---") else ""
+    m = re.search(r"^effort: (\S+)$", front, re.M)
+    check(m and m.group(1) in LEVELS, f"{n}: no valid effort: in the frontmatter")
+    check(re.search(r"^model: (sonnet|opus|haiku)$", front, re.M), f"{n}: no model: in the frontmatter")
+    want = "high" if n in ("builder", "reviewer-audit", "reviewer-security") else "medium"
+    check(not m or m.group(1) == want, f"{n}: effort {m and m.group(1)}, want {want}")
+check('f"EFFORT: ' in JOB and "ESCALATED: +" in JOB, "job: does not print EFFORT:/ESCALATED: lines")
+check("`EFFORT:`" in SKILL and "`effort`" in SKILL and "## Routing" in SKILL, "SKILL.md: how to pass EFFORT: not described")
+check("routing" in SKILL and "blocked_retries" in SKILL, "SKILL.md: config.routing not documented")
+check("job report" in JOB.split('"""', 2)[1] and "job report" in SKILL, "job report: not in the usage text and SKILL.md")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

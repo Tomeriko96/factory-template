@@ -65,6 +65,11 @@ SIDE_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/|(\
 TESTDOC_DIR_RE = re.compile(r"(^|/)(tests?|__tests__|spec|fixtures|snapshots?|docs)/", re.I)
 UI_GLOBS = ["*.tsx", "*.jsx", "*.vue", "*.svelte", "*.css", "*.scss", "*.html", "templates/", "static/", "frontend/src/**"]
 LLM_GLOBS = ["*prompt*", "*agent*", "*llm*", "*/prompts/*", "*/agents/*", "*/agent/*", "*/llm/*"]
+# Routing: model and effort per spawn (see route) and the builder's escalation ladder
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MODELS = ("haiku", "sonnet", "opus")
+BUILDER_EFFORT = {"full": "high", "light": "medium", "docs": "low"}
+BLOCKED_RETRIES = 1
 RESUME_NOTE = ("This is a resume: your previous run ended without writing its output file. "
                "Writing it is part of your task and required. Reuse your earlier screenshots in "
                "round-N/shots/<name>/ instead of redoing the walk-through.")
@@ -132,6 +137,79 @@ def agent_front(agent):
         return {}
     m = re.match(r"---\n(.*?)\n---", text, re.S)
     return dict(re.findall(r"^(model|effort):\s*(\S+)\s*$", m.group(1), re.M)) if m else {}
+
+
+# ---------- routing: model, effort and the escalation ladder ----------
+# Base level per spawn: config.routing.agents.<agent>.model|effort (a string, or {mode: value})
+# over what the script asks for (the approver's model, the docs/sync builder on sonnet, the
+# builder's effort per job mode) over the agent's frontmatter. The builder climbs one step per
+# failed round (blocking reviews, a failed validation, an approver REWORK) or BUILD: BLOCKED:
+# effort first, then the model, up to config.routing.cap (default opus/high).
+
+def routing():
+    r = config().get("routing")
+    return r if isinstance(r, dict) else {}
+
+
+def ladder_cap():
+    c = routing().get("cap") if isinstance(routing().get("cap"), dict) else {}
+    return (c.get("model") if c.get("model") in MODELS else "opus",
+            c.get("effort") if c.get("effort") in EFFORTS else "high")
+
+
+def step_up(model, effort):
+    """One rung up: effort first, then the model; None at the cap (or for an unknown model/effort)."""
+    cm, ce = ladder_cap()
+    if effort in EFFORTS and EFFORTS.index(effort) < EFFORTS.index(ce):
+        return model, EFFORTS[EFFORTS.index(effort) + 1]
+    if model in MODELS and MODELS.index(model) < MODELS.index(cm):
+        return MODELS[MODELS.index(model) + 1], effort
+    return None
+
+
+def route(job, agent, model, key):
+    """(model, effort, steps taken, reasons) for one spawn."""
+    front, mode = agent_front(agent), job.get("mode") or "full"
+    effort = None
+    if agent == "factory-builder":
+        effort = "medium" if key.startswith("sync-") else BUILDER_EFFORT.get(mode)
+    model, effort = model or front.get("model"), effort or front.get("effort")
+    own = (routing().get("agents") or {}).get(agent)
+    own = own if isinstance(own, dict) else {}
+    pick = lambda v: v.get(mode) if isinstance(v, dict) else v
+    model, effort = pick(own.get("model")) or model, pick(own.get("effort")) or effort
+    taken, why = 0, []
+    if agent == "factory-builder" and key.startswith("build-"):
+        esc = (job.get("escalation") or {}).get("builder") or {}
+        for _ in range(int(esc.get("steps") or 0)):
+            up = step_up(model, effort)
+            if not up:
+                break
+            model, effort, taken = up[0], up[1], taken + 1
+        why = (esc.get("why") or [])[:taken]
+    return model, effort, taken, why
+
+
+def builder_level(job, n):
+    model = "sonnet" if job.get("mode") == "docs" else None
+    m, e, _, _ = route(job, "factory-builder", model, f"build-{n}")
+    return m, e
+
+
+def escalate(job, out, n, why):
+    """Raise the builder one step for its next round (or retry); False at the cap or when off."""
+    if routing().get("escalate") is False:
+        return False
+    m, e = builder_level(job, n + 1)
+    up = step_up(m, e)
+    if not up:
+        out.notes.append(f"NOTE: builder already at the ladder's cap ({m}/{e}); not raised")
+        return False
+    esc = job.setdefault("escalation", {}).setdefault("builder", {"steps": 0, "why": []})
+    esc["steps"] = int(esc.get("steps") or 0) + 1
+    esc.setdefault("why", []).append(why)
+    out.notes.append(f"NOTE: escalation: the next builder runs one step up, {m}/{e} -> {up[0]}/{up[1]} ({why})")
+    return True
 
 
 # ---------- metrics ----------
@@ -392,6 +470,11 @@ def builder_block(job, n):
     if n > 1 and (first_line(os.path.join(jdir(job["id"]), f"round-{n - 1}", "validate.md")) or "").startswith("VALIDATE: FAIL"):
         p += (f"\nThe full validation of round {n - 1} failed: read round-{n - 1}/validate.md and fix it "
               "(a blocking finding).")
+    blocked = sorted(glob.glob(os.path.join(jdir(job["id"]), f"round-{n}", "build-blocked-*.md")))
+    if blocked:
+        p += (f"\nAn earlier builder of this round wrote BUILD: BLOCKED (round-{n}/{os.path.basename(blocked[-1])}); "
+              "you run one step higher: try again. Write BUILD: BLOCKED yourself only when the block is a "
+              "decision a human must take (not a technical difficulty).")
     if job.get("rework_round") == n:
         p += "\nAlso read rework.md."
         if job.get("rework_untrusted"):
@@ -425,15 +508,15 @@ def spawn(job, out, key, blocks):
     for agent, model, prompt, writes in blocks:
         if count > 1:
             prompt += "\n" + RESUME_NOTE
-        front = agent_front(agent)
-        model = model or front.get("model")
-        effort = front.get("effort")
+        model, effort, steps, why = route(job, agent, model, key)
         job["pending"]["models"][agent] = model
         job["pending"]["efforts"][agent] = effort
         metric("spawn", job, agent=agent, key=key, round=key_round(key, job), model=model, effort=effort,
-               resume=count - 1)
-        out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}",
-                     f"WRITES: {os.path.join(jdir(job['id']), writes)}", "PROMPT:", prompt]
+               resume=count - 1, escalation=steps, escalation_why=why)
+        out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}", f"EFFORT: {effort or 'default'}"]
+        if steps:
+            out.main.append(f"ESCALATED: +{steps} step{'s' if steps > 1 else ''} ({'; '.join(why)})")
+        out.main += [f"WRITES: {os.path.join(jdir(job['id']), writes)}", "PROMPT:", prompt]
     out.main += ["---", f"THEN: when the agent{'s have' if many else ' has'} returned: "
                  f".factory/job next {job['id']}"]
 
@@ -592,6 +675,15 @@ def step(job, out, start=None):
             fl = first_line(bp) or ""
             verdict_metric(job, "factory-builder", f"build-{n}", bp, "BLOCKED" if fl.startswith("BUILD: BLOCKED") else "DONE")
             job.pop("pending", None)
+            if fl.startswith("BUILD: BLOCKED"):
+                tries = len(glob.glob(os.path.join(jd, f"round-{n}", "build-blocked-*.md")))
+                limit = routing().get("blocked_retries", BLOCKED_RETRIES)
+                if tries < (limit if isinstance(limit, int) else BLOCKED_RETRIES) and \
+                        escalate(job, out, n - 1, f"BUILD: BLOCKED in round {n}"):
+                    os.replace(bp, os.path.join(jd, f"round-{n}", f"build-blocked-{tries + 1}.md"))
+                    out.notes.append(f"NOTE: builder blocked in round {n}: {fl[14:].strip(' :-') or 'see build.md'}; "
+                                     "trying again one step up")
+                    continue
             job["round"] = n
             job.setdefault("round_heads", {})[str(n)] = git("rev-parse", "HEAD", cwd=job["worktree"])
             if fl.startswith("BUILD: BLOCKED"):  # no line at all (older builders) counts as done
@@ -650,6 +742,7 @@ def step(job, out, start=None):
             if blocking:
                 if n < budget(job):
                     out.notes.append(f"NOTE: round {n}: blocking reviews from {', '.join(blocking)}; building round {n + 1}")
+                    escalate(job, out, n, f"round {n}: CHANGES from {', '.join(blocking)}")
                     set_stage(job, "build")
                 else:
                     set_stage(job, "needs-human", f"round {n} is the last of the budget; still blocking: {', '.join(blocking)}")
@@ -669,6 +762,7 @@ def step(job, out, start=None):
             if vfl.startswith("VALIDATE: FAIL"):
                 if n < budget(job):
                     out.notes.append(f"NOTE: round {n}: the full validation fails (round-{n}/validate.md); building round {n + 1}")
+                    escalate(job, out, n, f"round {n}: the full validation failed")
                     set_stage(job, "build")
                 else:
                     set_stage(job, "needs-human", f"round {n} is the last of the budget; the full validation fails "
@@ -701,6 +795,7 @@ def step(job, out, start=None):
                 os.replace(p, os.path.join(jd, f"round-{n}", "decision.md"))
                 if n < budget(job):
                     out.notes.append(f"NOTE: approver asked for REWORK; building round {n + 1}")
+                    escalate(job, out, n, f"round {n}: approver REWORK")
                     set_stage(job, "build")
                 else:
                     set_stage(job, "needs-human", f"approver asked for REWORK after round {n}, the last of the budget")

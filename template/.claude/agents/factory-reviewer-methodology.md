@@ -3,6 +3,7 @@ name: factory-reviewer-methodology
 description: Methodology review for funding (bekostiging) and indicator definitions. Writes round-N/review-methodology.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

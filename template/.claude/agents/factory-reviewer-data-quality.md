@@ -3,6 +3,7 @@ name: factory-reviewer-data-quality
 description: Data-quality review for pipelines and data packages. Writes round-N/review-data-quality.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

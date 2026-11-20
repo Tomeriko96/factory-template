@@ -3,6 +3,7 @@ name: factory-reviewer-code
 description: Code quality, correctness and tests. Writes round-N/review-code.md (or sync-N/review-code.md for a base merge) with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

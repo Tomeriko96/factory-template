@@ -3,6 +3,7 @@ name: factory-reviewer-llm-safety
 description: LLM safety review for chat and tool-calling apps. Writes round-N/review-llm-safety.md with VERDICT: PASS or CHANGES.
 tools: Read, Grep, Glob, Bash, Write
 model: opus
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

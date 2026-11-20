@@ -3,6 +3,7 @@ name: factory-spec-writer
 description: Writes .factory/jobs/<id>/spec.md from a feature description. Writes only that one file.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
+effort: medium
 hooks:
   PreToolUse:
     - matcher: "Bash"

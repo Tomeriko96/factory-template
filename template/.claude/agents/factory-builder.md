@@ -3,6 +3,7 @@ name: factory-builder
 description: Implements the spec in the job worktree, runs the validation and writes round-N/build.md. Commits locally on the job branch.
 tools: Read, Write, Edit, Grep, Glob, Bash
 model: opus
+effort: high
 hooks:
   PreToolUse:
     - matcher: "Bash"
@@ -126,7 +127,8 @@ fails after a merge you cannot fix without changing the job's intent.
 ## Write `round-N/build.md`
 First line exactly `BUILD: DONE`, or `BUILD: BLOCKED <one-line reason>` when you cannot
 deliver the spec in this round (validation you cannot get green, a spec that contradicts
-the code, a missing secret or service): the orchestrator then stops the job for a human
+the code, a missing secret or service): the orchestrator then retries the round once with a
+stronger builder (when there is a step left on the ladder) or stops the job for a human,
 instead of sending an unfinished change to review. Then:
 - **Summary**: what was built.
 - **Changes**: one line per file.

@@ -563,6 +563,28 @@ def step(job, out, start=None):
                 else:
                     set_stage(job, "needs-human", f"round {n} is the last of the budget; still blocking: {', '.join(blocking)}")
                 continue
+            # The full suite runs once per round, here, after the reviews (they ran only targeted tests)
+            v = os.path.join(jd, f"round-{n}", "validate.md")
+            vfl = first_line(v) or ""
+            head = git("rev-parse", "HEAD", cwd=job["worktree"])
+            if not vfl.startswith(("VALIDATE: PASS", "VALIDATE: FAIL", "VALIDATE: NONE")) or \
+                    (first_lines(v, 2) + ["", ""])[1] != f"Head: {head}":
+                out.main += ["ACTION: validate",
+                             f"RUN: {os.path.join(HERE, 'precheck')} --validate {job['id']} {n}   (Bash timeout 600000; "
+                             "it runs repo.md's Validate commands through heavy once; `VALIDATE: PENDING` "
+                             "(exit 124) = run it again)",
+                             f"THEN: .factory/job next {job['id']}"]
+                return
+            if vfl.startswith("VALIDATE: FAIL"):
+                if n < budget(job):
+                    out.notes.append(f"NOTE: round {n}: the full validation fails (round-{n}/validate.md); building round {n + 1}")
+                    set_stage(job, "build")
+                else:
+                    set_stage(job, "needs-human", f"round {n} is the last of the budget; the full validation fails "
+                                                  f"(see round-{n}/validate.md)")
+                continue
+            if vfl.startswith("VALIDATE: NONE"):
+                out.notes.append("NOTE: no Validate commands in repo.md: the full suite was not run")
             verdict, issues = run_precheck(job, n)
             job["precheck"] = verdict
             out.notes.append(f"NOTE: precheck {verdict}" + (f": {'; '.join(issues[:3])}" if issues else ""))

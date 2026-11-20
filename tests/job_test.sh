@@ -58,6 +58,12 @@ build() {
   git -C "$(wt "$1")" commit -qam "round $2"
   printf 'Built round %s\n\n## PR\nChange\n' "$2" > "$(jd "$1")/round-$2/build.md"
 }
+# JV <id>: `job next`, running the precheck's full validation when it asks for it
+JV() {
+  local o; o="$(J next "$1")"
+  if [[ "$o" == "ACTION: validate"* ]]; then "$R/.factory/precheck" --validate "$1" >/dev/null; o="$(J next "$1")"; fi
+  printf '%s\n' "$o"
+}
 review() { echo "VERDICT: $4" > "$(jd "$1")/round-$2/review-$3.md"; }
 park()   { J fail "$1" "parked by test" >/dev/null; }
 
@@ -82,13 +88,14 @@ review $A 2 code PASS; review $A 2 audit PASS          # security never writes i
 out="$(J next $A)"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-reviewer-security"
 has "$out" "This is a resume"
 review $A 2 security PASS
-out="$(J next $A)"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: opus"; has "$out" "precheck CLEAN"
+out="$(J next $A)"; first "$out" "ACTION: validate"; has "$out" "precheck --validate $A 2"
+out="$(JV $A)"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: opus"; has "$out" "precheck CLEAN"
 printf 'DECISION: REWORK\n\n1. rename\n' > "$(jd $A)/decision.md"
 out="$(J next $A)"; has "$out" "Build round 3."; has "$out" "approver asked for REWORK"
 exists "$(jd $A)/round-2/decision.md"; missing "$(jd $A)/decision.md"
 build $A 3; J next $A >/dev/null; J reviewers $A security,code,audit >/dev/null
 for r in security code audit; do review $A 3 $r PASS; done
-J next $A >/dev/null
+JV $A >/dev/null
 printf 'DECISION: MERGE\n\n## PR\nGreeting\n' > "$(jd $A)/decision.md"
 out="$(J next $A)"; first "$out" "ACTION: deliver"; has "$out" "MODE: local"; has "$out" "decision.md (its ## PR section)"
 mkdir -p "/tmp/factory-app-$A-base"; mkdir -p "/tmp/factory-other-$A-base"   # an agent's temp worktree; another repo's
@@ -133,7 +140,7 @@ scenario=decision
 J new "zq escalate" >/dev/null; E=004-zq-escalate
 echo SPEC > "$(jd $E)/spec.md"; J next $E >/dev/null; build $E 1; J next $E >/dev/null
 J reviewers $E code >/dev/null; review $E 1 code PASS
-out="$(J next $E)"; has "$out" "MODEL: sonnet"     # round 1, precheck CLEAN: sonnet approver
+out="$(JV $E)"; has "$out" "MODEL: sonnet"     # round 1, precheck CLEAN: sonnet approver
 printf 'DECISION: ESCALATE\n\nneeds a product call\n' > "$(jd $E)/decision.md"
 first "$(J next $E)" "DONE: needs-human: approver escalated"
 out="$(J approve $E)"; first "$out" "ACTION: deliver"; has "$out" "PR-TEXT: none"
@@ -248,7 +255,7 @@ drive() {
   buildnew "$1" "$2"; J next "$1" >/dev/null
   J reviewers "$1" security,code,audit >/dev/null
   for r in security code audit; do review "$1" 1 $r PASS; done
-  J next "$1" >/dev/null
+  JV "$1" >/dev/null
 }
 merge_decision() { printf 'DECISION: MERGE\n\n%s## PR\nTitle\n' "${2:-}" > "$(jd "$1")/decision.md"; }
 

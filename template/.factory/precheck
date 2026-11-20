@@ -2,6 +2,12 @@
 """Mechanical checks before the approver, so it only has to judge.
 
   .factory/precheck <job-id> [<round>]
+  .factory/precheck --validate <job-id> [<round>]
+                                        the full validation, once per round: every Validate command
+                                        of repo.md through `heavy --cache --background` in the job
+                                        worktree; writes round-N/validate.md (first line
+                                        `VALIDATE: PASS|FAIL|NONE`); still running after ~9 minutes:
+                                        prints `VALIDATE: PENDING` and exits 124 (run it again)
   .factory/precheck --hold <job-id>     only list the files of the job's diff that sit in a class
                                         CI alone does not vouch for (`<class>: <file>` per line);
                                         .factory/job uses it to lift a `light` job to `full`
@@ -16,6 +22,7 @@ config.json, default below); if that is the only problem the first line is
 
 Checks (each failing one is listed under Issues):
   - round-N/build.md exists, and spec.md too (not in docs mode: there the feature text is the spec)
+  - round-N/validate.md (written by --validate) does not say `VALIDATE: FAIL`
   - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
   - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue)
   - the diff touches nothing under .factory/ or .claude/
@@ -31,7 +38,7 @@ lockfiles, containers, schema and migrations, auth), plus whatever `delivery.aut
 in config.json lists (globs; put personal-data paths there).
 Also reported: files, lines, commits, [blocking] mentions per review (information only).
 """
-import fnmatch, json, os, re, subprocess, sys
+import fnmatch, json, os, re, shlex, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 SECRET = re.compile(r"(^|/)(\.env(?!\.(example|sample|template|dist)$)(\..*)?|id_(rsa|ed25519|ecdsa)|"
@@ -128,9 +135,130 @@ def hold_main(job_id):
             print(f"{cls}: {name}")
 
 
+def validate_commands():
+    """The commands of the "Validate" block of repo.md: the first backticked command of each
+    `- ` line under the `- Validate (…):` line (or backticked on that line itself)."""
+    try:
+        lines = open(os.path.join(HERE, "repo.md"), errors="replace").read().splitlines()
+    except OSError:
+        return []
+    cmds, inside = [], False
+    for line in lines:
+        head = re.match(r"^\s*-\s*Validate\b(.*)$", line)
+        if head:
+            if "docs-only" in head.group(1):
+                inside = False
+                continue
+            inside = True
+            rest = re.sub(r"\([^)]*\)", "", head.group(1))   # "(… run as `heavy --cache -- <command>` …)"
+            rest = rest.split(":", 1)[1] if ":" in rest else ""
+            cmds += [c for c in re.findall(r"`([^`]+)`", rest) if not c.startswith("<")]
+            continue
+        if inside:
+            sub = re.match(r"^\s+[-*]\s+`([^`]+)`", line)
+            if sub:
+                cmds.append(sub.group(1))
+            elif line.strip() and not line.startswith((" ", "\t")):
+                inside = False
+    return [c for c in cmds if "heavy" not in c.split()[:1]]
+
+
+VALIDATE_BUDGET = 530  # seconds per call, inside a 10-minute tool call
+
+
+def validate_main(job_id, rnd=None):
+    """`--validate <job-id> [<round>]`: the one full-suite run of a round (see the module doc)."""
+    job_dir = os.path.join(HERE, "jobs", job_id)
+    with open(os.path.join(job_dir, "job.json")) as f:
+        job = json.load(f)
+    rnd = int(rnd or job.get("round") or 1)
+    rdir = os.path.join(job_dir, f"round-{rnd}")
+    os.makedirs(rdir, exist_ok=True)
+    wt = job.get("worktree")
+    if not wt or not os.path.isdir(wt):
+        sys.exit(f"no worktree for {job_id}")
+    head = git("rev-parse", "HEAD", cwd=wt)
+    head = head.strip() if head else "?"
+    cmds = validate_commands()
+    out = os.path.join(rdir, "validate.md")
+    if not cmds:
+        text = (f"VALIDATE: NONE no Validate commands in .factory/repo.md\nHead: {head}\n\n"
+                "The full suite was not run; CI is the only full run.\n")
+        open(out, "w").write(text)
+        print(text, end="")
+        return 0
+    state_path = os.path.join(rdir, "validate.json")
+    try:
+        state = json.load(open(state_path))
+    except (OSError, ValueError):
+        state = {}
+    if state.get("head") != head or state.get("cmds") != cmds:
+        state = {"head": head, "cmds": cmds, "tickets": {}, "results": {}}
+    heavy = os.path.join(HERE, "heavy")
+    prio = os.environ.get("FACTORY_VALIDATE_PRIORITY", "high")
+    env = dict(os.environ, FACTORY_HEAVY_PRIORITY=prio)
+    for c in cmds:
+        tid = state["tickets"].get(c)
+        if c in state["results"] or (tid and os.path.exists(os.path.join(HERE, "run", f"heavy-{tid}.json"))):
+            continue
+        try:
+            argv = shlex.split(c)
+        except ValueError as e:
+            state["results"][c] = {"rc": 2, "tail": f"cannot parse the command: {e}"}
+            continue
+        r = subprocess.run([heavy, "--background", "--cache", "--label", f"validate {job_id}: {c}"[:120], "--", *argv],
+                           cwd=wt, capture_output=True, text=True, env=env)
+        m = re.search(r"ticket (h[0-9a-f]+)", r.stdout or "")
+        if not m:
+            state["results"][c] = {"rc": 2, "tail": (r.stderr or r.stdout or "heavy gave no ticket").strip()[-800:]}
+        else:
+            state["tickets"][c] = m.group(1)
+    end = time.time() + VALIDATE_BUDGET
+    for c in cmds:
+        if c in state["results"]:
+            continue
+        left = int(end - time.time())
+        if left <= 0:
+            break
+        r = subprocess.run([heavy, "wait", state["tickets"][c], "--timeout", str(left)],
+                           cwd=wt, capture_output=True, text=True)
+        if r.returncode != 124:
+            state["results"][c] = {"rc": r.returncode, "tail": (r.stdout or "")[-1500:],
+                                   "cached": "CACHE HIT" in (r.stdout or "") + (r.stderr or "")}
+    with open(state_path + ".tmp", "w") as f:
+        json.dump(state, f)
+    os.replace(state_path + ".tmp", state_path)
+    pending = [c for c in cmds if c not in state["results"]]
+    if pending:
+        print(f"VALIDATE: PENDING {len(pending)} of {len(cmds)} command(s) still queued or running: "
+              f"run `.factory/precheck --validate {job_id}` again")
+        return 124
+    failed = [c for c in cmds if state["results"][c]["rc"] != 0]
+    lines = [f"VALIDATE: {'FAIL' if failed else 'PASS'}", f"Head: {head}", "",
+             f"The full validation of round {rnd} (repo.md Validate, through `heavy --cache`), "
+             "run once by the precheck step.", ""]
+    for c in cmds:
+        res = state["results"][c]
+        lines.append(f"- {'✅' if res['rc'] == 0 else '❌'} `{c}`: exit {res['rc']}"
+                     + (" (cache hit)" if res.get("cached") else ""))
+    for c in failed:
+        lines += ["", f"## Failed: `{c}`", "", "```", state["results"][c]["tail"].rstrip()[-1500:], "```"]
+    if failed:
+        lines += ["", "1. [blocking] the full validation fails on this round's head (see above): fix the cause; "
+                  "a failure only under high load (`heavy status`) is no bug, say so in build.md."]
+    text = "\n".join(lines) + "\n"
+    open(out, "w").write(text)
+    print(text, end="")
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "--validate":
+        if len(sys.argv) not in (3, 4):
+            sys.exit(__doc__)
+        sys.exit(validate_main(*sys.argv[2:4]))
     if sys.argv[1] == "--hold":
         if len(sys.argv) != 3:
             sys.exit(__doc__)
@@ -180,6 +308,15 @@ def main():
             issues.append(f"{f} (round {r}): first line is {fl!r}, not 'VERDICT: PASS'")
         text = open(path, errors="replace").read()
         info.append(f"{f[7:-3]} {text.count('[blocking]')}b/{text.count('[non-blocking]')}nb" + (f" (r{r})" if r != rnd else ""))
+
+    if not docs_mode:
+        vfl = first_line(os.path.join(rdir, "validate.md")) or ""
+        if vfl.startswith("VALIDATE: FAIL"):
+            issues.append(f"the full validation fails (round-{rnd}/validate.md)")
+        elif vfl.startswith("VALIDATE: NONE"):
+            notes.append("full validation not run: no Validate commands in repo.md")
+        elif not vfl.startswith("VALIDATE: PASS"):
+            notes.append(f"no full validation for round {rnd} (round-{rnd}/validate.md missing)")
 
     audit = latest.get("review-audit.md", (0, ""))[1]
     if audit and os.path.exists(audit):

@@ -144,6 +144,24 @@ try:
     check("BUILD: DONE" in out and "failed   lint" in out and "passed   1 checks" in out, "detail files/CI wrong")
     check("no job" in watch("999"), "unknown job id not reported")
 
+    # A heavy slot held in a job's worktree: the board shows its weight and priority
+    import fcntl
+    wt2 = os.path.join(tmp, "wt-002")
+    os.makedirs(wt2)
+    jp = os.path.join(fd, "jobs", "002-reviews-running", "job.json")
+    j2 = json.load(open(jp)); j2["worktree"] = wt2; json.dump(j2, open(jp, "w"))
+    os.makedirs(env["FACTORY_LOCK_DIR"], exist_ok=True)
+    slot = open(os.path.join(env["FACTORY_LOCK_DIR"], "slot-0.lock"), "a+")
+    fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    slot.seek(0); slot.truncate()
+    json.dump({"pid": os.getpid(), "cwd": wt2, "cmd": "pytest -q tests/test_a.py", "weight": 1,
+               "priority": "high", "since": time.time() - 30}, slot)
+    slot.flush()
+    out = watch("--once")
+    check("pytest -q tests/test_a.py · 1 cores · high ·" in out, "heavy line without the priority")
+    check("high priority" in watch("002"), "detail heavy line without the priority")
+    slot.close()
+
     # A second repo, both registered: --repos shows them together, with the repo in each card
     fd2 = os.path.join(tmp, "other-repo", ".factory")
     os.makedirs(os.path.join(fd2, "jobs", "001-elsewhere"))

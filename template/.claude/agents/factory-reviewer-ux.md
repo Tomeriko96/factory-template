@@ -34,7 +34,8 @@ Run only the tests related to the change: the test files of the modules in the d
 builder's targeted commands from build.md, verbatim with `--cache`, are an instant
 "CACHE HIT" on the same tree), narrowed with a path or `-k`, never with coverage (add
 `--no-cov` / `-p no:cov` when the repo's config turns it on; coverage is left to CI); a
-suspect test at most twice (alone, never in a loop). A failure or a
+suspect test at most twice (alone, never in a loop). Timing or measurement runs (repeat
+runs, a timing check, a benchmark) go `heavy --priority low`. A failure or a
 timeout while the load is high is not a finding by itself: check `heavy status`, rerun
 that one file alone, and report what you measured.
 Screenshots too: `<Repo>/.factory/heavy -- <Repo>/.factory/shoot …`. The app you serve

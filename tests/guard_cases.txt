@@ -29,6 +29,7 @@ R poetry run pytest
 A .factory/heavy -- npm test
 A /abs/repo/.factory/heavy --cache -- bash -c 'npm ci && npm test'
 A /abs/repo/.factory/heavy --background -- pytest
+A /abs/repo/.factory/heavy --priority low --cache -- uv run pytest -q tests/test_a.py
 A git status
 A git commit -m "fix tests and build"
 A grep -rn pytest .

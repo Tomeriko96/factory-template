@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run heavy commands (tests, builds, installs, lints) without flattening the machine.
 
-  .factory/heavy [--cache] [--weight N] [--label NAME] [--wait-max SECS] -- <command…>
+  .factory/heavy [--cache] [--weight N] [--priority high|normal|low] [--label NAME] [--wait-max SECS] -- <command…>
   .factory/heavy --background [same options] -- <command…>     -> prints a ticket, returns
   .factory/heavy wait <ticket> [--timeout SECS]                  -> waits, prints the result
   .factory/heavy gate [--max PCT] [--wait-max SECS]
@@ -18,6 +18,11 @@ run:    waits until the machine has room, then runs <command> at low priority in
         weight: pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
         Foreground waits at most --wait-max (default 540s, inside a tool call's timeout);
         exit 75 = no room in time: use --background.
+--priority  high, normal (default) or low; env FACTORY_HEAVY_PRIORITY. A waiting command only
+        takes a free slot when no command of a higher priority is waiting for one (waiters are
+        recorded in the lock dir; a waiter whose process is gone is ignored). The factory runs
+        the precheck's full validation and the builder at high, audits and timing or measurement
+        runs at low, everything else at normal.
 --background  returns at once with a ticket; the command waits for room and runs detached
         (up to 3600s of waiting). `heavy wait <ticket>` blocks up to --timeout (default 540s)
         and prints the tail of the output and the command's exit code, or exits 124 saying it
@@ -159,6 +164,55 @@ def read_json(path):
 
 # ---------------------------------------------------------------- admission
 
+PRIORITY = {"low": 0, "normal": 1, "high": 2}
+
+
+def waiter_path(d, pid=None):
+    return os.path.join(d, f"waiter-{pid or os.getpid()}.json")
+
+
+def register_waiter(priority, label):
+    d = lock_dir()
+    p = waiter_path(d)
+    with open(p + ".tmp", "w") as f:
+        json.dump({"pid": os.getpid(), "priority": priority, "cmd": label, "since": time.time()}, f)
+    os.replace(p + ".tmp", p)
+    return p
+
+
+def unregister_waiter():
+    try:
+        os.remove(waiter_path(lock_dir()))
+    except OSError:
+        pass
+
+
+def waiters(d):
+    """Live waiters: [record]. Files of processes that are gone are removed."""
+    out = []
+    for name in os.listdir(d):
+        if not (name.startswith("waiter-") and name.endswith(".json")):
+            continue
+        p = os.path.join(d, name)
+        rec = read_json(p)
+        pid = rec.get("pid")
+        if not isinstance(pid, int) or not alive(pid):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        out.append(rec)
+    return out
+
+
+def outranked(d, priority):
+    """The priority of a live waiter above `priority`, or None."""
+    me = PRIORITY.get(priority, 1)
+    above = [w for w in waiters(d) if w.get("pid") != os.getpid() and PRIORITY.get(w.get("priority"), 1) > me]
+    return max((w.get("priority") for w in above), key=lambda x: PRIORITY.get(x, 1)) if above else None
+
+
 def survey(d, slots):
     """(used weight, [(index, file)]) for the slot files; the free ones come back locked by us."""
     used, free = 0, []
@@ -174,11 +228,14 @@ def survey(d, slots):
     return used, free
 
 
-def try_admit(lim, weight, label):
-    """Take a slot if the weights running host-wide leave room. Returns the locked file or None."""
+def try_admit(lim, weight, label, priority="normal"):
+    """Take a slot if the weights running host-wide leave room and no waiter of a higher
+    priority is queued. Returns the locked file or None."""
     d = lock_dir()
     with open(os.path.join(d, "admit.lock"), "a+") as admit:
         fcntl.flock(admit, fcntl.LOCK_EX)
+        if outranked(d, priority):
+            return None
         used, free = survey(d, lim["slots"])
         w = min(weight, lim["budget"])
         if not free or (used > 0 and used + w > lim["budget"]):
@@ -191,23 +248,30 @@ def try_admit(lim, weight, label):
         f.seek(0)
         f.truncate()
         json.dump({"pid": os.getpid(), "cwd": os.getcwd(), "cmd": label, "weight": w,
-                   "since": time.time()}, f)
+                   "priority": priority, "since": time.time()}, f)
         f.flush()
         return f
 
 
-def take_slot(lim, weight, wait_max, label):
+def take_slot(lim, weight, wait_max, label, priority="normal"):
     end, last = time.time() + wait_max, 0
-    while True:
-        f = try_admit(lim, weight, label)
-        if f:
-            return f
-        if time.time() > end:
-            return None
-        if time.time() - last > 30:
-            say(f"no room yet (needs weight {weight} of {lim['budget']} cores), waiting ({label[:60]})")
-            last = time.time()
-        time.sleep(POLL)
+    register_waiter(priority, label)
+    try:
+        while True:
+            f = try_admit(lim, weight, label, priority)
+            if f:
+                return f
+            if time.time() > end:
+                return None
+            if time.time() - last > 30:
+                above = outranked(lock_dir(), priority)
+                say(f"no room yet (needs weight {weight} of {lim['budget']} cores"
+                    + (f"; a {above}-priority command waits first" if above else "")
+                    + f"), waiting ({label[:60]})")
+                last = time.time()
+            time.sleep(POLL)
+    finally:
+        unregister_waiter()
 
 
 # ---------------------------------------------------------------- tickets
@@ -326,6 +390,9 @@ def cmd_status(argv):
         f.close()
     print(f"CPU {cpu_util(0.5):.0f}% (limit {lim['cpu_max']:.0f}%) · load {load1():.1f} · {CPUS} cores · "
           f"heavy weight in use {used}/{lim['budget']} · up to {lim['slots']} commands · locks in {d}")
+    for w in sorted(waiters(d), key=lambda w: (-PRIORITY.get(w.get("priority"), 1), w.get("since", 0))):
+        print(f"  waiting: {w.get('priority', 'normal')} · pid {w.get('pid')} · "
+              f"{int(time.time() - w.get('since', time.time()))}s · {str(w.get('cmd', '?'))[:80]}")
     for i in range(lim["slots"]):
         p = os.path.join(d, f"slot-{i}.lock")
         if not os.path.exists(p):
@@ -343,7 +410,7 @@ def cmd_status(argv):
             who = holders(p)
             gone = (f" · wrapper gone, held by leftover pid(s) {', '.join(map(str, who))}: stop them to free it"
                     if who else " · wrapper gone")
-        print(f"  slot {i}: weight {h.get('weight', '?')} · pid {h.get('pid', '?')} · {since}s · "
+        print(f"  slot {i}: weight {h.get('weight', '?')} · {h.get('priority', 'normal')} · pid {h.get('pid', '?')} · {since}s · "
               f"{h.get('cwd', '?')} · {h.get('cmd', '?')[:80]}{gone}")
     cache = os.path.join(HERE, "cache")
     n = len([f for f in os.listdir(cache) if f.endswith(".json")]) if os.path.isdir(cache) else 0
@@ -467,6 +534,10 @@ def holders(path):
 def cmd_run(argv):
     lim = limits()
     use_cache, label, wait_max, weight = False, None, None, None
+    priority = os.environ.get("FACTORY_HEAVY_PRIORITY") or "normal"
+    if priority not in PRIORITY:
+        say(f"ignoring FACTORY_HEAVY_PRIORITY={priority!r}: not high, normal or low")
+        priority = "normal"
     while argv and argv[0] != "--":
         a = argv.pop(0)
         if a == "--cache":
@@ -475,6 +546,10 @@ def cmd_run(argv):
             label = argv.pop(0)
         elif a == "--weight":
             weight = max(1, int(argv.pop(0)))
+        elif a == "--priority":
+            priority = argv.pop(0)
+            if priority not in PRIORITY:
+                sys.exit(f"--priority must be high, normal or low, not {priority!r}")
         elif a == "--wait-max":
             wait_max = int(argv.pop(0))
         elif a == "--slots":
@@ -519,7 +594,7 @@ def cmd_run(argv):
     deadline = time.time() + wait_max  # one budget for both waits, not wait_max each
     if not wait_until_calm(lim, wait_max):
         say(f"CPU still above {lim['cpu_max']:.0f}% after {wait_max}s; asking for a slot anyway")
-    lock = take_slot(lim, weight, max(0, deadline - time.time()), shown)
+    lock = take_slot(lim, weight, max(0, deadline - time.time()), shown, priority)
     if lock is None:
         say(f"no room within {wait_max}s; run it with --background and `heavy wait <ticket>`")
         return 75

@@ -547,6 +547,29 @@ out="$(J reviewers "$P7" security)"; has "$out" "nothing left after the path sel
 sed -i '/UI paths/d' .factory/repo.md
 cp "$T/config.bak" .factory/config.json
 
+# ---------- heavy: a waiter takes a free slot only when no higher-priority waiter is queued ----------
+scenario=heavy-priority
+H="$R/.factory/heavy"
+(
+  export FACTORY_LOCK_DIR="$T/hlocks" FACTORY_HEAVY_SLOTS=1 FACTORY_CPU_MAX=100
+  : > "$T/order"
+  "$H" -- sleep 4 2>/dev/null &                       # holds the only slot (normal)
+  for _ in $(seq 50); do "$H" status | grep -q "· normal · pid" && break; sleep 0.1; done
+  "$H" --priority low -- bash -c "echo low >> '$T/order'" 2>/dev/null &
+  for _ in $(seq 50); do "$H" status | grep -q "waiting: low" && break; sleep 0.1; done
+  FACTORY_HEAVY_PRIORITY=high "$H" -- bash -c "echo high >> '$T/order'" 2>/dev/null &
+  for _ in $(seq 50); do "$H" status | grep -q "waiting: high" && break; sleep 0.1; done
+  "$H" status > "$T/hstatus"
+  wait
+)
+[ "$(tr '\n' ' ' < "$T/order")" = "high low " ] && ok || bad "order: $(tr '\n' ' ' < "$T/order"), want high before low"
+has "$(cat "$T/hstatus")" "waiting: high"; has "$(cat "$T/hstatus")" "waiting: low"; has "$(cat "$T/hstatus")" "· normal · pid"
+# a waiter whose process is gone does not hold anyone back
+mkdir -p "$T/hlocks"; echo '{"pid": 999999999, "priority": "high", "cmd": "gone", "since": 0}' > "$T/hlocks/waiter-999999999.json"
+FACTORY_LOCK_DIR="$T/hlocks" FACTORY_CPU_MAX=100 timeout 20 "$H" --priority low --wait-max 5 -- true && ok || bad "a stale high waiter blocked a low command"
+missing "$T/hlocks/waiter-999999999.json"
+FACTORY_LOCK_DIR="$T/hlocks" "$H" --priority urgent -- true 2>/dev/null && bad "--priority urgent accepted" || ok
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

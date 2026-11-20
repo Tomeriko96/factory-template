@@ -493,7 +493,7 @@ def card(j, width, compact, show_repo, no_ci, slots, selected=False):
     hv = heavy_for(j, slots) if sec == "running" else None
     if hv:
         lines.append([("     ⚙ ", "yellow"), (fit(str(hv.get("cmd") or "?"), 60), None),
-                      (f" · {hv.get('weight', '?')} cores · {ago(datetime.fromtimestamp(hv.get('since', time.time()), timezone.utc))}", "dim")])
+                      (f" · {hv.get('weight', '?')} cores · {hv.get('priority') or 'normal'} · {ago(datetime.fromtimestamp(hv.get('since', time.time()), timezone.utc))}", "dim")])
     elif sec == "needs":
         cmd = next_command(j)
         if cmd:
@@ -621,7 +621,7 @@ def detail_lines(j, width, no_ci):
     _, slots = heavy_slots()
     hv = heavy_for(j, slots)
     if hv:
-        out.append([("heavy    ", "dim"), (f"{hv.get('cmd')} · {hv.get('weight')} cores · "
+        out.append([("heavy    ", "dim"), (f"{hv.get('cmd')} · {hv.get('weight')} cores · {hv.get('priority') or 'normal'} priority · "
                                             f"{ago(datetime.fromtimestamp(hv.get('since', time.time()), timezone.utc))}", "yellow")])
     if j.get("pr_url"):
         ci = None if no_ci else j["_repo"].ci(j["id"])

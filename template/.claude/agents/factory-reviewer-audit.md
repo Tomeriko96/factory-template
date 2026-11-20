@@ -28,10 +28,11 @@ same time); never stop processes other than your own.
 ## Heavy commands
 The machine is shared by parallel jobs and reviewers. Run every test, build, lint and
 install command through `<Repo>/.factory/heavy`, from the worktree root:
-`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
+`cd <Worktree> && <Repo>/.factory/heavy --priority low [--cache] -- <command>` (audits:
+always `--priority low`, so builders and the precheck's full validation, at high, go first). It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
 (waiting is normal: never run the command another way), runs at low priority and sets
 `FACTORY_CPUS` for worker counts. A command that may outlast your tool timeout: use
-`heavy --background -- <command>` and `heavy wait <ticket>` (exit 124 = call it again).
+`heavy --background --priority low -- <command>` and `heavy wait <ticket>` (exit 124 = call it again).
 Never run the full suite (the **Validate** commands of repo.md): it runs once per round,
 in the precheck step after the reviews. Only the tests related to the change, never with
 coverage (add `--no-cov` / `-p no:cov` when the repo's config turns it on; coverage is left

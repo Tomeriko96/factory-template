@@ -4,7 +4,7 @@
   .factory/precheck <job-id> [<round>]
   .factory/precheck --validate <job-id> [<round>]
                                         the full validation, once per round: every Validate command
-                                        of repo.md through `heavy --cache --background` in the job
+                                        of repo.md through `heavy --cache --background --priority high` in the job
                                         worktree; writes round-N/validate.md (first line
                                         `VALIDATE: PASS|FAIL|NONE`); still running after ~9 minutes:
                                         prints `VALIDATE: PENDING` and exits 124 (run it again)
@@ -195,8 +195,6 @@ def validate_main(job_id, rnd=None):
     if state.get("head") != head or state.get("cmds") != cmds:
         state = {"head": head, "cmds": cmds, "tickets": {}, "results": {}}
     heavy = os.path.join(HERE, "heavy")
-    prio = os.environ.get("FACTORY_VALIDATE_PRIORITY", "high")
-    env = dict(os.environ, FACTORY_HEAVY_PRIORITY=prio)
     for c in cmds:
         tid = state["tickets"].get(c)
         if c in state["results"] or (tid and os.path.exists(os.path.join(HERE, "run", f"heavy-{tid}.json"))):
@@ -206,8 +204,9 @@ def validate_main(job_id, rnd=None):
         except ValueError as e:
             state["results"][c] = {"rc": 2, "tail": f"cannot parse the command: {e}"}
             continue
-        r = subprocess.run([heavy, "--background", "--cache", "--label", f"validate {job_id}: {c}"[:120], "--", *argv],
-                           cwd=wt, capture_output=True, text=True, env=env)
+        r = subprocess.run([heavy, "--background", "--cache", "--priority", "high",
+                            "--label", f"validate {job_id}: {c}"[:120], "--", *argv],
+                           cwd=wt, capture_output=True, text=True)
         m = re.search(r"ticket (h[0-9a-f]+)", r.stdout or "")
         if not m:
             state["results"][c] = {"rc": 2, "tail": (r.stderr or r.stdout or "heavy gave no ticket").strip()[-800:]}

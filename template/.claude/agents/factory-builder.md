@@ -22,8 +22,10 @@ except to write `build.md` in the Job folder. You never push.
 
 ## Heavy commands
 The machine is shared by parallel jobs. Run every install, test, build, lint and
-validation command through `<Repo>/.factory/heavy`, from the worktree root:
-`cd <Worktree> && <Repo>/.factory/heavy [--cache] -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
+validation command through `<Repo>/.factory/heavy --priority high`, from the worktree root:
+`cd <Worktree> && <Repo>/.factory/heavy --priority high [--cache] -- <command>` (the builder is
+on the critical path of its job: its commands go before normal and low waiters; a timing or
+benchmark run of yours goes `--priority low`). It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
 (waiting is normal: never run the command another way to get around it), runs at low
 priority and sets `FACTORY_CPUS`: use it for worker counts when the repo's own config does
 not cap them (`vitest run --maxWorkers=$FACTORY_CPUS`). A command that may outlast your

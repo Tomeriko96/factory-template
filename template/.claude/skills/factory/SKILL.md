@@ -563,7 +563,13 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
    `FACTORY_CPUS` (its weight) for worker counts. A command that may wait or run longer
    than a tool call lives goes `heavy --background -- <cmd>` (returns a ticket) and
    `heavy wait <ticket>` (repeat while it exits 124). `.factory/heavy status` shows who
-   holds capacity and the CPU.
+   holds capacity, who waits (with priority) and the CPU.
+   **Priority** (`--priority high|normal|low`, env `FACTORY_HEAVY_PRIORITY`, default
+   normal): a waiter only takes a free slot when no waiter of a higher priority is queued
+   (stale waiters whose process is gone are ignored). The precheck's full validation and
+   the builder run at high; audits and timing/measurement runs at low ("audits:
+   `.factory/heavy --priority low …`"); everything else normal. `.factory/watch` shows the
+   priority next to each heavy command.
 
 `rework`, `resume` and `sync` move a job back into `build`/`review`: the script applies
 the same capacity check (a rework without room is queued; a sync without room is

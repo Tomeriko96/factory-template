@@ -58,6 +58,26 @@ Correctness and edge cases, error handling, test coverage of new behaviour (run 
 tests), readability, duplication, the repo's conventions, dead code, deviations from
 spec.md.
 
+Optional, if available in this session (a `.claude/skills/check-style/SKILL.md` in the
+worktree or the repo, or `~/.claude/skills/check-style/`; never required): apply the
+`check-style` skill to the files in the diff; its findings are `[non-blocking]` unless they
+break a rule the repo's own linters enforce.
+
+## Test quality
+Adapted from obra/superpowers (writing-good-tests; MIT, see NOTICE in factory-template).
+For every test the diff adds or changes:
+- It can catch a real break: expected values are derived independently (literals,
+  hand-checked numbers), not computed by the code under test; it does not fail only when
+  someone changes it on purpose.
+- It exercises the real code. An assertion on a mock's own behaviour (it was called, it
+  returned what it was told) proves nothing; mocks belong at the boundaries (network,
+  clock, external services) and carry the shape of the real data.
+- Test-only code stays out of production: a method, flag or branch in production code
+  that only tests use is a finding (it belongs in test helpers or fixtures).
+- No fixed sleeps where a condition can be awaited (flaky under load).
+`[blocking]` when new behaviour is effectively untested because of it (the only test of an
+acceptance criterion tests a mock, or passes without the fix); otherwise `[non-blocking]`.
+
 ## Sync mode (prompt says `Review sync N`)
 The builder merged the base into the job branch (`<Job>/sync-N/build.md`). Write
 `<Job>/sync-N/review-code.md`; never touch a `round-*` file. Review **the merge**, not the

@@ -84,6 +84,11 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `routing.escalate: false` switches the ladder off; `routing.cap` (default
   `{"model": "opus", "effort": "high"}`) is its top; `routing.blocked_retries` (default 1)
   is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
+- `house_style` (optional, no default; set by whoever runs the factory, never by setup):
+  `{"skills": ["<skill>", …]}`. The builder and the ux/ui reviewers get a `House style:`
+  line naming these skills; they load and follow them for UI work, over the vendored
+  `frontend-design` skill (which the builder otherwise uses for new UI, below the repo's
+  own design system). A skill the session does not have is reported, not fatal.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 
@@ -437,6 +442,10 @@ checks that plan: at most `bundle_max` issues per `docs`/`light` job and `full_b
 the model or effort of this session. A `light` job that turns out to touch CI, dependencies,
 containers, schema or auth (or `delivery.auto_merge_never`) is lifted to `full` by the script after the
 build (a NOTE tells you); a `docs` job that touches code continues as `light`.
+
+When you open an issue yourself (for example from discovery or an audit) and the session
+has a `write-issue` skill, follow it; without one, write evidence and numbered acceptance
+criteria.
 
 **Reporting back** is off by default. Only with `"report": true` post a one-line comment
 at: start (job-id), `needs-human` (reason) and delivery (PR/MR url, or branch + commit

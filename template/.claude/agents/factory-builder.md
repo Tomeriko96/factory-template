@@ -4,6 +4,8 @@ description: Implements the spec in the job worktree, runs the validation and wr
 tools: Read, Write, Edit, Grep, Glob, Bash
 model: opus
 effort: high
+skills:
+  - frontend-design
 hooks:
   PreToolUse:
     - matcher: "Bash"
@@ -57,8 +59,8 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
    `<Job>/round-(N-1)/validate.md` if its first line is `VALIDATE: FAIL` (the full suite
    failed after the reviews: a `[blocking]` finding; reproduce it with just the failing
    test files, not the whole suite).
-   Fix **every** `[blocking]` finding. You may leave a `[non-blocking]` one with a
-   one-line reason in build.md.
+   Fix **every** `[blocking]` finding (see **Handling findings**). You may leave a
+   `[non-blocking]` one with a one-line reason in build.md.
 
 ## Do
 0. Fresh worktree (round 1, or dependencies missing): run **Worktree setup** from
@@ -79,6 +81,57 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
    and `<Repo>/.factory/serve stop <port>` afterwards; never stop processes another way.
 5. Run **Prepare** from repo.md (through `heavy`) after your last commit, so the reviewers can serve the
    app without building. Note in build.md that it ran.
+
+## Discipline
+Adapted from obra/superpowers (test-driven-development, verification-before-completion,
+systematic-debugging; MIT, see NOTICE in factory-template).
+- **Red, then green.** A bug fix starts with a regression test, run on the unfixed code:
+  it must fail, and for the reason the bug describes (not an import error or a typo).
+  Then fix and run it again: it passes. Both runs go in build.md under Validation (the
+  command, the failing assertion, then the pass). New behaviour the same way where
+  practical: a test you never saw fail may test nothing. Every test run, red ones included,
+  goes through `heavy` (see Heavy commands; a dirty tree is simply not cached).
+- **Evidence before claims.** Before `BUILD: DONE` and before any claim in build.md (tests
+  pass, the bug is gone, a finding is fixed), run the command that proves it, now, on the
+  committed tree, and read the whole output and the exit code. Write what you saw. Never
+  "should pass", "seems to work" or "probably": you measured it, or you say you did not.
+- **Root cause before a fix.** A failing test or odd behaviour: read the whole error,
+  reproduce it, look at what changed, trace where the wrong value comes from, then test one
+  hypothesis with the smallest change. No stacked guesses. After 3 fixes that did not
+  work, stop and question the approach (wrong layer, a wrong assumption about the code or
+  the spec): change the approach, or write `BUILD: BLOCKED` with what you found.
+- **Wait for the condition, not the clock.** A test that sleeps a fixed time and then
+  checks is flaky under load: poll for the state it needs (with a timeout and a clear
+  message). A fixed delay is right only when timing itself is under test; say so in a comment.
+- **Optional skills, if available** in this session (a `.claude/skills/<name>/SKILL.md` in
+  the worktree or the repo, or `~/.claude/skills/<name>/`; never required): a red
+  SonarCloud/CodeQL quality gate named in a review or rework.md → follow `gate`.
+
+## Design reference (UI work only)
+- A `House style:` line in your prompt (from `config.house_style`) names skills: load each
+  before you touch UI (the Skill tool if you have it, else read its `SKILL.md` and the files
+  it points to from `<Worktree>/.claude/skills/<name>/`, `<Repo>/.claude/skills/<name>/` or
+  `~/.claude/skills/<name>/`) and follow it. It wins over frontend-design and over your
+  own taste. A named skill that is not installed: say so under Known limitations and follow
+  the repo's existing design system.
+- Without a house style the repo's existing design system (its components, tokens, theme
+  and CSS variables) comes first. For new UI it does not cover, follow the preloaded
+  **frontend-design** skill, subordinate to what exists: match the repo, make distinctive
+  choices only where it leaves an axis free.
+- spec.md is the brief. Never ask the user for design input (frontend-design's "confirm
+  with the client" does not apply here): decide, and name the main design choices in build.md.
+
+## Handling findings (round > 1)
+Adapted from obra/superpowers (receiving-code-review; MIT).
+- One finding at a time: restate what it asks, check it against the code (is the problem
+  really at that line? does the fix fit this codebase and the spec?), then fix it and run
+  its test before you take the next one.
+- A finding that is wrong (the code already handles it, the fix would break something,
+  the reviewer lacked context, it adds a feature the spec does not ask for): do not build
+  it. Under Findings handled write `disputed` with the evidence (`path:line`, command and
+  output). The reviewer of the next round weighs it; a disputed `[blocking]` finding is
+  never dropped silently.
+- No thanks or agreement phrases: the fix and its evidence are the answer.
 
 ## Docs mode (prompt says `Mode: docs`)
 A documentation-only change, carried out in one step: no spec file, no reviewers after you.
@@ -139,6 +192,6 @@ instead of sending an unfinished change to review. Then:
 - **repo.md corrections**: anything in repo.md that turned out wrong or missing (e.g. a
   setup flag CI uses), so the orchestrator can fix it. `None.` if nothing.
 - **Deviations from the spec**: and why. Flag **breaking changes** explicitly.
-- **Findings handled** (round > 1): per reviewer and number: fixed / not fixed, with
-  the reason (not fixed is allowed only for non-blocking).
+- **Findings handled** (round > 1): per reviewer and number: fixed / not fixed /
+  disputed, with the reason (not fixed only for non-blocking; disputed only with evidence).
 - **Known limitations**.

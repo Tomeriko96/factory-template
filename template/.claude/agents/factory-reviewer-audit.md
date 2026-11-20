@@ -81,6 +81,33 @@ to CI).
    yours turns out to be an artefact, **withdraw it explicitly** under Withdrawn, with
    the evidence.
 
+## Red-green evidence and debugging
+Adapted from obra/superpowers (test-driven-development, systematic-debugging; MIT).
+- A bug-fix criterion needs red-green evidence in build.md: the regression test failing on
+  the unfixed code for the bug's reason, then passing. Check that it is there and that the
+  red failure is the bug (not an import error). Within your mutation budget, re-measure
+  it: the test on `<Base>` (temporary worktree) fails, on the branch it passes. Missing red
+  evidence is `[non-blocking]`; your measurement showing the test passes on `<Base>` too
+  (it does not test the fix) is `[blocking]`.
+- When your own measurement fails, find the cause before you report it: read the whole
+  error, rerun that one test alone, rule out the environment (see Do, step 4). Report the
+  root cause you found, not the symptom.
+
+## Test quality
+Adapted from obra/superpowers (writing-good-tests; MIT, see NOTICE in factory-template).
+For every test the diff adds or changes:
+- It can catch a real break: expected values are derived independently (literals,
+  hand-checked numbers), not computed by the code under test; it does not fail only when
+  someone changes it on purpose.
+- It exercises the real code. An assertion on a mock's own behaviour (it was called, it
+  returned what it was told) proves nothing; mocks belong at the boundaries (network,
+  clock, external services) and carry the shape of the real data.
+- Test-only code stays out of production: a method, flag or branch in production code
+  that only tests use is a finding (it belongs in test helpers or fixtures).
+- No fixed sleeps where a condition can be awaited (flaky under load).
+`[blocking]` when new behaviour is effectively untested because of it (the only test of an
+acceptance criterion tests a mock, or passes without the fix); otherwise `[non-blocking]`.
+
 ## Budget
 You are the slowest reviewer and every round waits for you (median 11 min, p90 29, the
 others 1-2). Aim for at most ~30 tool calls: claims table first from the cached validation

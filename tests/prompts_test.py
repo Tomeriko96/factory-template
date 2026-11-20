@@ -125,6 +125,34 @@ check("`EFFORT:`" in SKILL and "`effort`" in SKILL and "## Routing" in SKILL, "S
 check("routing" in SKILL and "blocked_retries" in SKILL, "SKILL.md: config.routing not documented")
 check("job report" in JOB.split('"""', 2)[1] and "job report" in SKILL, "job report: not in the usage text and SKILL.md")
 
+# Vendored and distilled skills (see NOTICE)
+NOTICE = open(os.path.join(ROOT, "NOTICE")).read()
+FD = os.path.join(T, ".claude", "skills", "frontend-design")
+check(os.path.exists(os.path.join(FD, "SKILL.md")) and "Apache License" in open(os.path.join(FD, "LICENSE.txt")).read(),
+      "frontend-design: SKILL.md or its Apache LICENSE.txt missing")
+for src in ("github.com/obra/superpowers", "MIT", "github.com/anthropics/skills", "Apache License 2.0"):
+    check(src in NOTICE, f"NOTICE: {src} missing")
+b_front = texts.get("builder", "").split("---", 2)[1]
+check(re.search(r"^skills:\n  - frontend-design$", b_front, re.M), "builder: frontend-design not preloaded via skills:")
+for sec in ("Discipline", "Design reference (UI work only)", "Handling findings (round > 1)"):
+    check(section(texts.get("builder", ""), sec), f"builder: no '## {sec}' section")
+for word in ("obra/superpowers", "fail", "heavy", "should pass", "3 fixes", "poll"):
+    check(word in (section(texts.get("builder", ""), "Discipline") or ""), f"builder Discipline: lacks {word!r}")
+check("disputed" in texts.get("builder", "") and "One finding at a time" in texts.get("builder", ""),
+      "builder: receiving-code-review rules missing")
+tq = {g: section(texts.get(g, ""), "Test quality") for g in ("reviewer-code", "reviewer-audit")}
+check(all(tq.values()) and len(set(tq.values())) == 1, "'## Test quality' missing or differs between reviewer-code and reviewer-audit")
+check("mock" in (tq["reviewer-code"] or "") and "production" in (tq["reviewer-code"] or ""), "Test quality: mock/test-only rules missing")
+check(section(texts.get("reviewer-audit", ""), "Red-green evidence and debugging"), "reviewer-audit: no red-green section")
+dr = {g: section(texts.get(g, ""), "Design reference") for g in ("reviewer-ui", "reviewer-ux")}
+check(all(dr.values()) and len(set(dr.values())) == 1, "'## Design reference' missing or differs between ui and ux")
+check('"House style: ' in JOB or "House style: load" in JOB, "job: no House style: line")
+check("house_style" in SKILL and "house_style" in SETUP, "house_style not documented in SKILL.md and setup.md")
+check("check-style" in texts.get("reviewer-code", "") and "`gate`" in texts.get("builder", "") and "write-issue" in SKILL,
+      "optional skills (check-style, gate, write-issue) not mentioned")
+for n, t in list(texts.items()) + [("SKILL.md", SKILL), ("setup.md", SETUP)]:
+    check(not re.search(r"cedanl|npuls", t, re.I), f"{n}: names an organisation (the template stays generic)")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

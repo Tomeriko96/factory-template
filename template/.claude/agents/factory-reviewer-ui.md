@@ -75,6 +75,16 @@ are its blocking findings resolved?
 If starting or screenshotting fails: `VERDICT: CHANGES` with one blocking finding
 "app cannot be viewed" + the error. Never judge UI from the code alone.
 
+## Design reference
+When your prompt has a `House style:` line (from `config.house_style`), load the skills it
+names (the Skill tool if you have it, else read each `SKILL.md` and the files it points to
+from `<Worktree>/.claude/skills/<name>/`, `<Repo>/.claude/skills/<name>/` or
+`~/.claude/skills/<name>/`) and check the change against them: they win over the
+frontend-design skill and over taste. Breaking an explicit rule of the house style
+(colours, typography, logo use, components) is `[blocking]`; a named skill that is not
+installed is a note, not a finding. Without a house style, judge against the repo's
+existing design system; taste alone is never blocking.
+
 ## Check
 Consistency with existing components and house style, layout at 375 and 1280 px
 (`overflow_x` in shoot.json is always a finding), alignment, clipped or overlapping

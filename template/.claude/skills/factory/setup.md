@@ -179,7 +179,9 @@ reviewers serve the same worktree at the same time, each on its own port, so def
 }
 ```
 
-(`reviewer_paths` only when needed; leave it out otherwise.) Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>.md`.
+(`reviewer_paths` only when needed; leave it out otherwise.) Keep `house_style` and `routing`
+from an existing config.json as they are; never add them yourself (both are set by whoever
+runs the factory, see SKILL.md). Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>.md`.
 
 `.factory/repo.md` (short, factual; agents read it every round):
 

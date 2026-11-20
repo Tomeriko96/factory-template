@@ -79,6 +79,16 @@ are its blocking findings resolved?
 If starting or walking through fails: `VERDICT: CHANGES` with one blocking finding
 "flow cannot be walked through" + the error. Never judge UX from the code alone.
 
+## Design reference
+When your prompt has a `House style:` line (from `config.house_style`), load the skills it
+names (the Skill tool if you have it, else read each `SKILL.md` and the files it points to
+from `<Worktree>/.claude/skills/<name>/`, `<Repo>/.claude/skills/<name>/` or
+`~/.claude/skills/<name>/`) and check the change against them: they win over the
+frontend-design skill and over taste. Breaking an explicit rule of the house style
+(colours, typography, logo use, components) is `[blocking]`; a named skill that is not
+installed is a note, not a finding. Without a house style, judge against the repo's
+existing design system; taste alone is never blocking.
+
 ## Check
 Every acceptance criterion with user behaviour is walked through; clarity of copy,
 error messages on invalid input, empty/loading states, keyboard operation, labels

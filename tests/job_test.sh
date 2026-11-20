@@ -682,6 +682,26 @@ out="$(J reviewers "$L2" code)"; has "$out" "AGENT: factory-reviewer-code"; has 
 review "$L2" 1 code CHANGES; out="$(J next "$L2")"; lacks "$out" "ESCALATED"; has "$out" "EFFORT: low"; park "$L2"
 cp "$T/config.rt" .factory/config.json
 
+# ---------- house style: an optional config key, passed to the builder and the ux/ui reviewers ----------
+scenario=house-style
+H="$(newjob --mode light "zq house")"; echo SPEC > "$(jd "$H")/spec.md"
+out="$(J next "$H")"; lacks "$out" "House style:"
+J fail "$H" x >/dev/null; rm "$(jd "$H")/spec.md"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["house_style"]={"skills": ["brand-kit", "bad name;rm"]}; json.dump(c, open(".factory/config.json","w"))'
+H2="$(newjob --mode light "zq house2")"; echo SPEC > "$(jd "$H2")/spec.md"
+out="$(J next "$H2")"; has "$out" "House style: load and follow the skill brand-kit for any UI work"; lacks "$out" "bad name"
+buildnew "$H2" web/page.html; J next "$H2" >/dev/null
+out="$(J reviewers "$H2" code,ux)"
+python3 - "$out" <<'PY' && ok || bad "house style only in the ux block"
+import sys
+blocks = sys.argv[1].split("---")
+ux = [b for b in blocks if "AGENT: factory-reviewer-ux" in b]
+code = [b for b in blocks if "AGENT: factory-reviewer-code" in b]
+assert ux and "House style: " in ux[0] and code and "House style" not in code[0], blocks
+PY
+park "$H2"; park "$H"
+cp "$T/config.rt" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

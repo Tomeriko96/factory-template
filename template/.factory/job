@@ -458,6 +458,18 @@ def feature_line(job):
     return f"{tag}: {job.get('feature', '')}"
 
 
+def house_style():
+    """`House style: …` for the builder and the ux/ui reviewers, from config.house_style.skills
+    (optional; set by whoever runs the factory), or ""."""
+    hs = config().get("house_style")
+    skills = [x for x in (hs.get("skills") or []) if isinstance(x, str) and re.match(r"^[A-Za-z0-9][\w.:-]*$", x)] \
+        if isinstance(hs, dict) else []
+    if not skills:
+        return ""
+    return ("\nHouse style: load and follow the skill" + ("s " if len(skills) > 1 else " ") + ", ".join(skills)
+            + " for any UI work; it wins over frontend-design.")
+
+
 def builder_block(job, n):
     mode = job.get("mode", "full")
     p = paths(job) + f"Build round {n}. Port: {job['port']}. Mode: {mode}."
@@ -475,6 +487,7 @@ def builder_block(job, n):
         p += (f"\nAn earlier builder of this round wrote BUILD: BLOCKED (round-{n}/{os.path.basename(blocked[-1])}); "
               "you run one step higher: try again. Write BUILD: BLOCKED yourself only when the block is a "
               "decision a human must take (not a technical difficulty).")
+    p += house_style() if mode != "docs" else ""
     if job.get("rework_round") == n:
         p += "\nAlso read rework.md."
         if job.get("rework_untrusted"):
@@ -487,6 +500,8 @@ def reviewer_block(job, n, name):
     p = (paths(job) + f"Review round {n}. Port: {job['port'] + OFFSET.get(name, 0)}.\n"
          f"You must write round-{n}/review-{name}.md (first line VERDICT: PASS|CHANGES); "
          f"it is required and part of your task.")
+    if name in ("ux", "ui"):
+        p += house_style()
     return (f"factory-reviewer-{name}", None, p, f"round-{n}/review-{name}.md")
 
 

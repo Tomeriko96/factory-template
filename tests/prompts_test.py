@@ -153,6 +153,16 @@ check("check-style" in texts.get("reviewer-code", "") and "`gate`" in texts.get(
 for n, t in list(texts.items()) + [("SKILL.md", SKILL), ("setup.md", SETUP)]:
     check(not re.search(r"cedanl|npuls", t, re.I), f"{n}: names an organisation (the template stays generic)")
 
+# Hidden acceptance tests: writer, builder and audit agree with the job script
+AW = texts.get("acceptance-writer", "")
+check("ACCEPTANCE: WRITTEN" in AW and "ACCEPTANCE: NONE" in AW and "Run:" in AW, "acceptance-writer: output contract missing")
+check('"ACCEPTANCE: WRITTEN"' in JOB and '"factory-acceptance-writer"' in JOB, "job: acceptance writer not wired")
+check("Hidden acceptance tests:" in JOB and "`Hidden acceptance tests:`" in texts.get("reviewer-audit", ""),
+      "audit: the Hidden acceptance tests: prompt line is not described")
+check("trap" in (section(texts.get("reviewer-audit", ""), "Hidden acceptance tests") or ""), "audit: acceptance tests not removed in the same call")
+check("Never open" in (section(texts.get("builder", ""), "Hidden acceptance tests") or ""), "builder: may read the hidden tests")
+check("acceptance_tests" in SKILL and "factory-acceptance-writer" in SKILL, "SKILL.md: acceptance tests not documented")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

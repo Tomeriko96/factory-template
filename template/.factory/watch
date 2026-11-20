@@ -34,7 +34,7 @@ ACTIVE = ("spec", "build", "review", "approve", "deliver")
 DONE = ("merged", "pushed", "superseded")
 SECTIONS = [("needs", "NEEDS YOU", "red"), ("running", "RUNNING", "cyan"), ("queued", "QUEUED", "dim"),
             ("prs", "OPEN PRs", "green"), ("other", "UNKNOWN STAGE", "yellow"), ("done", "DONE", "dim")]
-AGENT = [(r"^spec$", "spec-writer"), (r"^build-\d+$", "builder"), (r"^review-\d+$", "reviewers"),
+AGENT = [(r"^spec$", "spec-writer"), (r"^acceptance$", "acceptance-writer"), (r"^build-\d+$", "builder"), (r"^review-\d+$", "reviewers"),
          (r"^approve-\d+$", "approver"), (r"^sync-review-\d+$", "sync review"), (r"^sync-\d+$", "sync builder")]
 BAD = {"failed": 0, "running": 1, "pending": 1, "unknown": 1, "manual": 2, "canceled": 3, "success": 4, "skipped": 5}
 SGR = {"red": "1;31", "green": "32", "yellow": "33", "dim": "2", "bold": "1", "cyan": "36", "rev": "7"}

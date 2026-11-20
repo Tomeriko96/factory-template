@@ -496,12 +496,27 @@ def builder_block(job, n):
     return ("factory-builder", "sonnet" if mode == "docs" else None, p, f"round-{n}/build.md")
 
 
+def acceptance_modes():
+    """Job modes that get hidden acceptance tests: config.acceptance_tests missing -> full only;
+    true -> full and light; false -> none; a list -> those modes (docs never)."""
+    v = config().get("acceptance_tests")
+    modes = ["full"] if v is None else ["full", "light"] if v is True else v if isinstance(v, list) else []
+    return [m for m in modes if m in ("full", "light")]
+
+
+def acceptance_ready(job):
+    return (first_line(os.path.join(jdir(job["id"]), "acceptance.md")) or "").startswith("ACCEPTANCE: WRITTEN")
+
+
 def reviewer_block(job, n, name):
     p = (paths(job) + f"Review round {n}. Port: {job['port'] + OFFSET.get(name, 0)}.\n"
          f"You must write round-{n}/review-{name}.md (first line VERDICT: PASS|CHANGES); "
          f"it is required and part of your task.")
     if name in ("ux", "ui"):
         p += house_style()
+    if name == "audit" and acceptance_ready(job):
+        p += (f"\nHidden acceptance tests: {os.path.join(jdir(job['id']), 'acceptance.md')} (the builder has not "
+              "seen them): copy, run and remove them as your instructions say, and report per criterion.")
     return (f"factory-reviewer-{name}", None, p, f"round-{n}/review-{name}.md")
 
 
@@ -669,13 +684,29 @@ def step(job, out, start=None):
             if not os.path.exists(p):
                 return spawn(job, out, "spec", [("factory-spec-writer", None, paths(job) + feature_line(job), "spec.md")])
             already = (first_line(p) or "").startswith("SPEC: ALREADY-DONE")
-            verdict_metric(job, "factory-spec-writer", "spec", p, "ALREADY-DONE" if already else "WRITTEN")
-            job.pop("pending", None)
+            if not (job.get("metric_rounds") or {}).get("spec"):
+                verdict_metric(job, "factory-spec-writer", "spec", p, "ALREADY-DONE" if already else "WRITTEN")
+                job.setdefault("metric_rounds", {})["spec"] = True
+            if (job.get("pending") or {}).get("key") == "spec":
+                job.pop("pending", None)
             if already:
                 set_stage(job, "superseded", "spec-writer: the base already does this (see spec.md)")
                 continue
             n = int(job.get("round") or 0)
             built = n >= 1 and os.path.exists(os.path.join(jd, f"round-{n}", "build.md"))
+            a = os.path.join(jd, "acceptance.md")
+            if not built and job.get("mode") in acceptance_modes() and not job.get("acceptance"):
+                if not os.path.exists(a):
+                    return spawn(job, out, "acceptance", [("factory-acceptance-writer", None,
+                                                           paths(job) + f"Mode: {job.get('mode')}.", "acceptance.md")])
+                fl = first_line(a) or ""
+                verdict_metric(job, "factory-acceptance-writer", "acceptance", a,
+                               "WRITTEN" if fl.startswith("ACCEPTANCE: WRITTEN") else
+                               "NONE" if fl.startswith("ACCEPTANCE: NONE") else "INVALID")
+                job.pop("pending", None)
+                job["acceptance"] = "written" if fl.startswith("ACCEPTANCE: WRITTEN") else "none"
+                out.notes.append("NOTE: hidden acceptance tests " + ("written (acceptance.md)" if job["acceptance"] == "written"
+                                                                     else f"not written: {fl[:80] or 'empty acceptance.md'}"))
             set_stage(job, "review" if built else "build")  # review: a docs job that turned out not to be docs
             continue
 

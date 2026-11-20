@@ -78,6 +78,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` set the machine-wide limits of
   `.factory/heavy` (defaults: at most max(2, cores/2) commands at once, together at most
   75% of the cores, CPU not above 90%, load average ignored). See **Resources**.
+- `acceptance_tests` (optional): hidden acceptance tests. Missing → on for `full` jobs only;
+  `true` → `full` and `light`; `false` → off; or a list of modes. See **Hidden acceptance tests**.
 - `routing` (optional): model and effort per spawn, and the builder's escalation ladder.
   `routing.agents.<agent>.model|effort` (a value, or one per job mode such as
   `{"light": "low"}`) wins over the script's choice and the agent's frontmatter;
@@ -118,6 +120,18 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
   new jobs wait. More are `queued`. The machine-wide guard is `.factory/heavy` (Resources).
 - Ports for job `NNN-…`: builder `port_base + 10·NNN`; ux `+1`, ui `+2`, audit `+3`.
 
+## Hidden acceptance tests
+
+With `acceptance_tests` on for the job's mode, `.factory/job` spawns
+**factory-acceptance-writer** (sonnet) after the spec and before round 1: from spec.md's
+numbered acceptance criteria only, it writes tests into the job folder (`acceptance/`, at
+their worktree-relative paths) and `acceptance.md` (`ACCEPTANCE: WRITTEN` with a `Run:`
+command and a criterion → test table, or `ACCEPTANCE: NONE <reason>`). The builder is never
+told about them and is instructed not to look. Every round the audit reviewer's prompt
+gets a `Hidden acceptance tests:` line: it copies them into the worktree, runs them through
+`heavy`, removes them in the same call and reports one row per criterion. You never read
+or relay their content.
+
 ## Routing
 
 Every spawn block carries `MODEL:` and `EFFORT:` (see **Job state**). The defaults are in the
@@ -146,6 +160,7 @@ in name only (the metrics still record it); the model step works either way.
   jobs/<job-id>/
     job.json                             (written only by .factory/job)
     spec.md
+    acceptance.md, acceptance/            (factory-acceptance-writer: hidden tests; only the audit uses them)
     round-N/build.md
     round-N/build-blocked-K.md            (a BUILD: BLOCKED that was retried one step up)
     round-N/review-<name>.md

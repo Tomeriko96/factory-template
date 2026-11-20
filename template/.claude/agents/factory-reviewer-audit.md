@@ -81,6 +81,22 @@ to CI).
    yours turns out to be an artefact, **withdraw it explicitly** under Withdrawn, with
    the evidence.
 
+## Hidden acceptance tests
+Only when your prompt has a `Hidden acceptance tests:` line. `factory-acceptance-writer`
+wrote them from spec.md's criteria before the build; the builder has not seen them. Never
+quote their code in your review (the next builder reads it): name the test and the outcome.
+1. Read `<Job>/acceptance.md` (its `Run:` command and the criterion per test).
+2. Copy, run and remove in **one** Bash call, so the files sit in the shared worktree only
+   for that run and are removed even when it fails:
+   `cd <Worktree> && trap 'cd <Worktree> && rm -f <each copied file>' EXIT && cp -R <Job>/acceptance/. . && <Repo>/.factory/heavy -- <Run command>`
+   (no `--cache`: the tree is dirty while they are there). Never commit them, never `git add`
+   them; check with `git status --porcelain` afterwards that nothing of them is left.
+3. Add one row per criterion to the claims table, source `acceptance.md`: ✅ passes;
+   ❌ fails on behaviour (wrong output, missing feature): `[blocking]` like any unmet
+   criterion; ⚠️ fails only because the test guessed an interface the spec did not fix
+   (import error, other name or signature, while the behaviour is there by your own check):
+   `[non-blocking]`, say what the test assumed.
+
 ## Red-green evidence and debugging
 Adapted from obra/superpowers (test-driven-development, systematic-debugging; MIT).
 - A bug-fix criterion needs red-green evidence in build.md: the regression test failing on

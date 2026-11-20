@@ -43,7 +43,7 @@ git add . && git commit -qm init
 git remote add origin "$T/origin.git" && git push -q origin main
 "$ROOT/install" --no-setup >/dev/null || { echo "install failed"; exit 1; }
 cat > .factory/config.json <<'EOF'
-{"port_base": 5100, "reviewers": ["security", "code", "audit"],
+{"port_base": 5100, "reviewers": ["security", "code", "audit"], "acceptance_tests": false,
  "delivery": {"mode": "local", "remote": "origin"}, "limits": {"active_jobs": 2}}
 EOF
 
@@ -701,6 +701,52 @@ assert ux and "House style: " in ux[0] and code and "House style" not in code[0]
 PY
 park "$H2"; park "$H"
 cp "$T/config.rt" .factory/config.json
+
+# ---------- hidden acceptance tests: written after the spec, before the build; only the audit sees them ----------
+scenario=acceptance
+cp .factory/config.json "$T/config.acc"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c.pop("acceptance_tests"); json.dump(c, open(".factory/config.json","w"))'
+AT="$(newjob "zq acc full")"; echo SPEC > "$(jd "$AT")/spec.md"
+out="$(J next "$AT")"; has "$out" "AGENT: factory-acceptance-writer"; has "$out" "MODEL: sonnet"; has "$out" "WRITES: $(jd "$AT")/acceptance.md"
+lacks "$out" "factory-builder"
+out="$(J next "$AT")"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-acceptance-writer"   # no file: respawned
+mkdir -p "$(jd "$AT")/acceptance/tests"; echo 'def test_ac1(): assert True' > "$(jd "$AT")/acceptance/tests/test_factory_acceptance.py"
+printf 'ACCEPTANCE: WRITTEN
+Run: python3 -m pytest -q tests/test_factory_acceptance.py
+' > "$(jd "$AT")/acceptance.md"
+out="$(J next "$AT")"; has "$out" "AGENT: factory-builder"; has "$out" "hidden acceptance tests written"
+python3 - "$out" <<'PY' && ok || bad "builder prompt mentions the acceptance tests"
+import sys; p = sys.argv[1].split("PROMPT:", 1)[1].split("---")[0]; assert "cceptance" not in p, p
+PY
+field "$AT" "j['acceptance']" written
+missing "$(wt "$AT")/tests/test_factory_acceptance.py"
+build "$AT" 1; J next "$AT" >/dev/null
+out="$(J reviewers "$AT" code,audit)"
+python3 - "$out" "$(jd "$AT")" <<'PY' && ok || bad "acceptance line only in the audit block"
+import sys
+blocks = sys.argv[1].split("---")
+audit = [b for b in blocks if "AGENT: factory-reviewer-audit" in b][0]
+code = [b for b in blocks if "AGENT: factory-reviewer-code" in b][0]
+assert f"Hidden acceptance tests: {sys.argv[2]}/acceptance.md" in audit and "acceptance" not in code.lower(), blocks
+PY
+python3 -c "import json; r=[json.loads(l) for l in open('$R/.factory/metrics.jsonl')]; \
+v=[x for x in r if x['job']=='$AT' and x['event']=='verdict']; \
+v=v[:2]; assert [(x['agent'][8:], x['verdict']) for x in v]==[('spec-writer','WRITTEN'),('acceptance-writer','WRITTEN')], v; \
+assert v[1]['resumes']==1" && ok || bad "acceptance metrics"
+park "$AT"
+# light: off by default; NONE: the audit gets no line; true: light too; docs never
+AL="$(newjob --mode light "zq acc light")"; echo SPEC > "$(jd "$AL")/spec.md"
+out="$(J next "$AL")"; has "$out" "AGENT: factory-builder"; park "$AL"
+AN="$(newjob "zq acc none")"; echo SPEC > "$(jd "$AN")/spec.md"; J next "$AN" >/dev/null
+printf 'ACCEPTANCE: NONE - every criterion needs a browser
+' > "$(jd "$AN")/acceptance.md"
+out="$(J next "$AN")"; has "$out" "AGENT: factory-builder"; has "$out" "not written: ACCEPTANCE: NONE"
+build "$AN" 1; J next "$AN" >/dev/null; out="$(J reviewers "$AN" audit)"; lacks "$out" "Hidden acceptance tests"; park "$AN"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["acceptance_tests"]=True; json.dump(c, open(".factory/config.json","w"))'
+AL2="$(newjob --mode light "zq acc light on")"; echo SPEC > "$(jd "$AL2")/spec.md"
+out="$(J next "$AL2")"; has "$out" "AGENT: factory-acceptance-writer"; park "$AL2"
+AD="$(newjob --mode docs "zq acc docs")"; out="$(J next "$AD")"; lacks "$out" "acceptance-writer"; park "$AD"
+cp "$T/config.acc" .factory/config.json
 
 # ---------- input checks and concurrency ----------
 scenario=input

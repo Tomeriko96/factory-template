@@ -82,6 +82,10 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 5. Run **Prepare** from repo.md (through `heavy`) after your last commit, so the reviewers can serve the
    app without building. Note in build.md that it ran.
 
+## Hidden acceptance tests
+Never open, list or search `<Job>/acceptance.md` or `<Job>/acceptance/`: they are hidden
+acceptance tests that measure your work blind (the audit runs them). Build from spec.md.
+
 ## Discipline
 Adapted from obra/superpowers (test-driven-development, verification-before-completion,
 systematic-debugging; MIT, see NOTICE in factory-template).

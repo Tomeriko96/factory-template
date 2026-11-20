@@ -32,5 +32,17 @@ for line in open(CASES):
     if got != want:
         bad += 1
         print(f"want {want} got {got}: {cmd}" + (f"   ({why.splitlines()[0][:160]})" if why else ""))
+# The heavy refusal names the exact rewritten command, at the agent's priority
+H = os.path.join(os.path.dirname(os.path.abspath(GUARD)), "heavy")
+for cmd, agent, want in [
+        ("npm test", "factory-builder", f"  {H} --priority high -- npm test\n"),
+        ("pytest -q tests/test_a.py", None, f"  {H} --priority normal -- pytest -q tests/test_a.py\n"),
+        ("cd web && npm run build", "factory-reviewer-audit", f"  {H} --priority low -- bash -c 'cd web && npm run build'\n"),
+        ("CI=1 pytest", "factory-reviewer-code", f"  {H} --priority normal -- bash -c 'CI=1 pytest'\n")]:
+    total += 1
+    msg = guard.refusal(cmd, agent) or ""
+    if want not in msg:
+        bad += 1
+        print(f"rewrite of {cmd!r} ({agent}): want {want.strip()!r} in\n{msg}")
 print(f"{total - bad}/{total} ok")
 sys.exit(1 if bad else 0)

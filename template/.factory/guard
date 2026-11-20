@@ -391,7 +391,21 @@ def kill_reason(cmd, depth=0):
     return None
 
 
-def refusal(cmd):
+# The priority each factory agent runs its heavy commands at (SKILL.md, Resources)
+AGENT_PRIORITY = {"factory-builder": "high", "factory-reviewer-audit": "low"}
+
+
+def rewrite(cmd, agent=None):
+    """`cmd` as it should have been typed: through heavy, at the agent's priority."""
+    cmd = cmd.strip()
+    w = words(cmd)
+    simple = (len(pipe_parts(cmd)) == 1 and w and not ENV_ASSIGN.match(w[0])
+              and not re.search(r"[<>$`*?~]|\b(cd|export|source)\b", cmd))
+    prio = AGENT_PRIORITY.get(agent or "", "normal")
+    return f"{HERE}/heavy --priority {prio} -- " + (cmd if simple else "bash -c " + shlex.quote(cmd))
+
+
+def refusal(cmd, agent=None):
     """The message for the agent when `cmd` is refused, else None."""
     if stash_reason(cmd):
         return ("factory guard: `git stash` is refused. The stash stack is shared by every worktree of "
@@ -420,11 +434,11 @@ def refusal(cmd):
     what = heavy_reason(cmd)
     if what:
         return (f"factory guard: `{what}` is a heavy command and must go through the limiter, "
-                f"or parallel jobs overload the machine. Run it from the worktree root as\n"
-                f"  {HERE}/heavy [--cache] -- <command>\n"
-                f"(a compound command as `bash -c '…'`). For a command that may take long use "
-                f"`heavy --background -- <command>` and then `heavy wait <ticket>`. Do not work "
-                f"around this.\n")
+                f"or parallel jobs overload the machine. Run exactly this, from the worktree root:\n"
+                f"  {rewrite(cmd, agent)}\n"
+                f"(add --cache for a pure check on a committed tree). For a command that may take "
+                f"long use `heavy --background … -- <command>` and then `heavy wait <ticket>`. "
+                f"Do not work around this.\n")
     return None
 
 
@@ -440,7 +454,7 @@ def main():
         if "--subagents-only" in sys.argv and not (data.get("agent_id") or data.get("agent_type")):
             return 0
         cmd = (data.get("tool_input") or {}).get("command") or ""
-        msg = refusal(cmd)
+        msg = refusal(cmd, data.get("agent_type"))
     except Exception:
         return 0
     if msg:

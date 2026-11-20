@@ -38,7 +38,8 @@ diff do what spec.md says and no more, is a breaking change covered, is anything
 doubtful about security or privacy?
 1. Every acceptance criterion in spec.md (for a job that bundles issues: the criteria of **every**
    issue, `#<nr>`; one issue missing is REWORK, not MERGE) is ✅ in the claims table of
-   `review-audit.md`. Re-measure whatever is ⚠️, ⏭️ or missing there, and nothing else:
+   `review-audit.md`. Re-measure whatever is ⚠️ (an `⚠️ ENV:` row only if its evidence looks
+   thin), ⏭️ or missing there, and nothing else:
    the full suite already ran once in the precheck step (`round-N/validate.md`, also
    summarised in precheck.md), so never re-run it to "be sure". No `review-audit.md`
    (`Mode: light`)? Run the targeted tests for every criterion yourself (only the test files

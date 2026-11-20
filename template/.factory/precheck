@@ -24,7 +24,9 @@ Checks (each failing one is listed under Issues):
   - round-N/build.md exists, and spec.md too (not in docs mode: there the feature text is the spec)
   - round-N/validate.md (written by --validate) does not say `VALIDATE: FAIL`
   - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
-  - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue)
+  - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue; a row whose
+    only ⚠️ is `⚠️ ENV: <cause with the measured load, or a network cause>` is environment-only:
+    noted, but no deviation for the auto-merge gate)
   - the diff touches nothing under .factory/ or .claude/
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
   - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
@@ -32,7 +34,8 @@ Checks (each failing one is listed under Issues):
 Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ is still seen.
 
 Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>`. The mechanical half
-of the auto-merge gate (.factory/job adds the rest): no issues, no audit deviation (⚠️), and no
+of the auto-merge gate (.factory/job adds the rest): no issues, no audit deviation (⚠️; an
+`⚠️ ENV:` row with a measured load or network cause is not one), and no
 file in a class that CI alone does not vouch for (CI/pipeline config, dependencies and
 lockfiles, containers, schema and migrations, auth), plus whatever `delivery.auto_merge_never`
 in config.json lists (globs; put personal-data paths there).
@@ -56,6 +59,9 @@ SECRET_CONTENT = [
 # No "*.txt": requirements.txt and other config would pass as documentation
 DOCS_GLOBS = ["*.md", "*.mdx", "*.rst", "*.adoc", "docs/**", "LICENSE*", "mkdocs.yml"]
 MAX_FILES, MAX_LINES, MAX_BYTES = 40, 1500, 1_000_000
+# An environment-only deviation in the audit table: `⚠️ ENV: <cause>` up to the end of the cell
+ENV_MARK = re.compile(r"⚠\ufe0f?\s*ENV:([^|]*)")
+ENV_EVIDENCE = re.compile(r"\bload\s*(average\s*)?[:=]?\s*\d|\bnetwork\b|\bDNS\b|\btimeout\b.*\bnetwork", re.I)
 # Files where a green CI is not enough to merge unseen. A glob with a "/" is matched against the
 # whole path (with a leading "/", so "*/auth/*" also matches a top-level auth/), one without
 # against the file name.
@@ -324,7 +330,17 @@ def main():
                 if "❌" in line or "⏭" in line:
                     issues.append("audit row not confirmed: " + re.sub(r"\s+", " ", line.strip())[:140])
                 elif "⚠" in line:
-                    notes.append("audit deviation: " + re.sub(r"\s+", " ", line.strip())[:140])
+                    row = re.sub(r"\s+", " ", line.strip())[:140]
+                    # `⚠️ ENV: <cause, measured load>`: the deviation came from the machine (load,
+                    # network), not the change. Only with a measured load or a network cause;
+                    # any other ⚠️ in the row still counts.
+                    envs = ENV_MARK.findall(line)
+                    rest = ENV_MARK.sub("", line)
+                    if envs and "⚠" not in rest and all(ENV_EVIDENCE.search(e) for e in envs):
+                        notes.append("audit environment-only (⚠️ ENV, not a deviation): " + row)
+                    else:
+                        notes.append("audit deviation: " + row
+                                     + (" (⚠️ ENV without a measured load or network cause)" if envs and "⚠" not in rest else ""))
 
     files = lines = 0
     commits = "?"

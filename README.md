@@ -169,7 +169,9 @@ merge --auto`), so the forge merges once its own checks pass. It never merges di
 or `AUTO-MERGE: no (<reasons>)`, and `no` means a ready PR/MR that a human merges (and auto-merge
 switched off if a rework had left it on). `yes` needs all of: an approver `MERGE` (or a clean
 `--docs` precheck, never `/factory approve`); precheck without issues and without an audit
-deviation (⚠️); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
+deviation (⚠️; a reviewer may mark an item `⚠️ ENV: <cause, measured load>` when it deviates only
+because of the environment, e.g. a timing check that was slow at load 10 on 4 cores and passes
+alone: that does not block, any other ⚠️ does); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
 schema/migrations or auth, nor in `delivery.auto_merge_never` (your globs, e.g. personal-data
 paths); no `HOLD: <reason>` line from the approver (breaking change, public API, user-visible
 behaviour); and no sync merge on the branch (an agent resolved a conflict, one reviewer checked

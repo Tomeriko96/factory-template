@@ -501,7 +501,8 @@ report the error (the branch is already up).
 **Auto-merge** (only if `delivery.auto_merge` is true and `delivery.draft` is false, and the
 `ACTION: deliver` printed `AUTO-MERGE: yes`). `.factory/job` decides: `yes` only for a job that
 got here through an approver `MERGE` (or a clean `--docs` precheck), whose precheck says
-`AUTO-MERGE: yes` (no issues, no audit deviation, no file in CI/pipeline config, dependencies,
+`AUTO-MERGE: yes` (no issues, no audit deviation — an `⚠️ ENV: <cause, measured load>` row,
+caused only by load or network, is not one — no file in CI/pipeline config, dependencies,
 containers, schema/migrations, auth or `auto_merge_never`), without an approver `HOLD:` line,
 and whose branch has no agent-resolved sync merge. On `AUTO-MERGE: no (<reasons>)` open the
 PR/MR ready for review **without** auto-merge, and if this PR/MR already has it on (after a

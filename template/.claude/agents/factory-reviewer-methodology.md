@@ -34,6 +34,11 @@ suspect test at most twice (alone, never in a loop). Timing or measurement runs 
 runs, a timing check, a benchmark) go `heavy --priority low`. A failure or a
 timeout while the load is high is not a finding by itself: check `heavy status`, rerun
 that one file alone, and report what you measured.
+An item that deviates only because of the environment (the machine was loaded, the network
+was slow) is marked `⚠️ ENV: <cause, measured load>` at the start of the line or table cell,
+e.g. `⚠️ ENV: 3.4 s, budget 2 s; load 10.1 on 4 cores`: it does not block auto-merge. Use it
+only when the same check passes under normal conditions (rerun it alone and say so) or the
+cause is demonstrably load or network, never for a functional doubt; any other ⚠️ still blocks.
 
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),

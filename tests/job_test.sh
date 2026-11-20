@@ -295,6 +295,24 @@ M6="$(newjob "zq am pii")"; drive "$M6" data/pii/rows.py
 merge_decision "$M6"
 out="$(J next "$M6")"; has "$out" "touches delivery.auto_merge_never: data/pii/rows.py"; park "$M6"
 
+# ⚠️ ENV: an environment-only deviation in the audit does not block; any other ⚠️ does
+drive_audit() {
+  echo SPEC > "$(jd "$1")/spec.md"; J next "$1" >/dev/null
+  buildnew "$1" "$2"; J next "$1" >/dev/null
+  J reviewers "$1" security,code,audit >/dev/null
+  review "$1" 1 security PASS; review "$1" 1 code PASS
+  printf 'VERDICT: PASS\n\n| # | Claim | Command | Measured | |\n|---|---|---|---|---|\n| 1 | fast | `t` | %s |\n' "$3" > "$(jd "$1")/round-1/review-audit.md"
+  JV "$1" >/dev/null; merge_decision "$1"
+}
+M8="$(newjob "zq am env")"; drive_audit "$M8" src/env.py "3.4 s | ⚠️ ENV: budget 2 s; load 10.1 on 4 cores, 1.2 s alone"
+out="$(J next "$M8")"; has "$out" "AUTO-MERGE: yes"; has "$(cat "$(jd "$M8")/precheck.md")" "environment-only"; park "$M8"
+M9="$(newjob "zq am dev")"; drive_audit "$M9" src/dev.py "3.4 s | ⚠️ slower than the spec says"
+out="$(J next "$M9")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M9"
+M10="$(newjob "zq am env bare")"; drive_audit "$M10" src/bare.py "3.4 s | ⚠️ ENV: probably the machine"
+out="$(J next "$M10")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; has "$(cat "$(jd "$M10")/precheck.md")" "without a measured load"; park "$M10"
+M11="$(newjob "zq am env mixed")"; drive_audit "$M11" src/mixed.py "⚠️ wrong total | ⚠️ ENV: load 9 on 4 cores"
+out="$(J next "$M11")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M11"
+
 # switched off, or not pr mode: no AUTO-MERGE line at all
 sed -i 's/"auto_merge": true/"auto_merge": false/' .factory/config.json
 M7="$(newjob --mode docs "zq am off")"; buildnew "$M7" docs/off.md

@@ -98,6 +98,13 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
 
   ✅ = confirmed exactly · ⚠️ = confirmed with a deviation (explain) · ❌ = not
   confirmed · ⏭️ = not measurable here (say why; does not count as confirmed).
+  `⚠️ ENV: <cause, measured load>` in the last cell = a deviation caused only by the
+  environment, e.g. `⚠️ ENV: 3.4 s, budget 2 s; load 10.1 on 4 cores (heavy status), 1.2 s
+  alone`. The precheck does not count it as a deviation for auto-merge, so use it only
+  when the same check passes under normal conditions (rerun it alone and give that
+  result) or the cause is demonstrably load (`heavy status`, `/proc/loadavg`) or network,
+  never for a functional doubt. Without a measured load or a network cause it counts as
+  a plain ⚠️. Any other ⚠️ still keeps the job off auto-merge.
 - **Findings**: numbered, each `[blocking]` or `[non-blocking]` + `path:line` +
   problem + impact + fix + the table row. `None.` if empty. A ❌ on an acceptance
   criterion or on a claim in build.md is always blocking, except a size or shape limit

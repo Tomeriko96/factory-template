@@ -704,10 +704,21 @@ out="$(J reviewers "$L2" code)"; has "$out" "AGENT: factory-reviewer-code"; has 
 review "$L2" 1 code CHANGES; out="$(J next "$L2")"; lacks "$out" "ESCALATED"; has "$out" "EFFORT: low"; park "$L2"
 cp "$T/config.rt" .factory/config.json
 
+# ---------- UI work: the builder reads frontend-design only when the spec or diff names a UI path ----------
+scenario=ui-work
+U="$(newjob --mode light "zq ui work")"; printf 'SPEC\nAdd a banner to `web/page.html`; see src/app.py.\n' > "$(jd "$U")/spec.md"
+out="$(J next "$U")"; has "$out" "UI work: spec.md names web/page.html"; has "$out" "$R/.claude/skills/frontend-design/SKILL.md"
+park "$U"
+U2="$(newjob --mode light "zq ui diff")"; printf 'SPEC\nRestyle it; tests/page.html is a fixture.\n' > "$(jd "$U2")/spec.md"
+out="$(J next "$U2")"; lacks "$out" "UI work:"                       # a test file is no UI path
+buildnew "$U2" app/style.css; J next "$U2" >/dev/null; J reviewers "$U2" code >/dev/null
+review "$U2" 1 code CHANGES; out="$(J next "$U2")"; has "$out" "UI work: the diff touches app/style.css"; park "$U2"
+D3="$(newjob --mode docs "zq ui docs")"; out="$(J next "$D3")"; lacks "$out" "UI work:"; park "$D3"
+
 # ---------- house style: an optional config key, passed to the builder and the ux/ui reviewers ----------
 scenario=house-style
 H="$(newjob --mode light "zq house")"; echo SPEC > "$(jd "$H")/spec.md"
-out="$(J next "$H")"; lacks "$out" "House style:"
+out="$(J next "$H")"; lacks "$out" "House style:"; lacks "$out" "UI work:"   # spec names no UI path
 J fail "$H" x >/dev/null; rm "$(jd "$H")/spec.md"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["house_style"]={"skills": ["brand-kit", "bad name;rm"]}; json.dump(c, open(".factory/config.json","w"))'
 H2="$(newjob --mode light "zq house2")"; echo SPEC > "$(jd "$H2")/spec.md"

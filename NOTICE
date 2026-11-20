@@ -8,7 +8,7 @@ This repository vendors or adapts material from the following projects.
    Licence: Apache License 2.0
    Vendored unchanged in template/.claude/skills/frontend-design/ (SKILL.md and the
    licence text in LICENSE.txt). The factory installs it, git-excluded, into the target
-   repo; the builder preloads it for new UI work.
+   repo; the builder reads it for UI work.
 
 2. obra/superpowers — test-driven-development, verification-before-completion,
    systematic-debugging, receiving-code-review, writing-good-tests

@@ -4,8 +4,6 @@ description: Implements the spec in the job worktree, runs the targeted tests (t
 tools: Read, Write, Edit, Grep, Glob, Bash
 model: opus
 effort: high
-skills:
-  - frontend-design
 hooks:
   PreToolUse:
     - matcher: "Bash"
@@ -118,10 +116,16 @@ systematic-debugging; MIT, see NOTICE in factory-template).
   `~/.claude/skills/<name>/`) and follow it. It wins over frontend-design and over your
   own taste. A named skill that is not installed: say so under Known limitations and follow
   the repo's existing design system.
+- A `UI work:` line in your prompt (the job script found a UI path in the diff or in
+  spec.md, by the same rule that starts the ux/ui reviewers) names the **frontend-design**
+  skill's `SKILL.md`: read it before you change UI. No such line, but you are about to change
+  a file matching repo.md's "UI paths" (default: `*.tsx`, `*.jsx`, `*.vue`, `*.svelte`,
+  `*.css`, `*.scss`, `*.html`, `templates/`, `static/`, `frontend/src/**`)? Read
+  `<Repo>/.claude/skills/frontend-design/SKILL.md` then. Non-UI work: do not read it.
 - Without a house style the repo's existing design system (its components, tokens, theme
-  and CSS variables) comes first. For new UI it does not cover, follow the preloaded
-  **frontend-design** skill, subordinate to what exists: match the repo, make distinctive
-  choices only where it leaves an axis free.
+  and CSS variables) comes first. For new UI it does not cover, follow frontend-design,
+  subordinate to what exists: match the repo, make distinctive choices only where it leaves
+  an axis free. Not installed: say so under Known limitations.
 - spec.md is the brief. Never ask the user for design input (frontend-design's "confirm
   with the client" does not apply here): decide, and name the main design choices in build.md.
 

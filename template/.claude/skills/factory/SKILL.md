@@ -89,8 +89,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
 - `house_style` (optional, no default; set by whoever runs the factory, never by setup):
   `{"skills": ["<skill>", …]}`. The builder and the ux/ui reviewers get a `House style:`
   line naming these skills; they load and follow them for UI work, over the vendored
-  `frontend-design` skill (which the builder otherwise uses for new UI, below the repo's
-  own design system). A skill the session does not have is reported, not fatal.
+  `frontend-design` skill (which the builder otherwise reads for new UI, below the repo's
+  own design system: not preloaded, but named on a `UI work:` line of the builder's prompt
+  when the diff or spec.md touches a UI path). A skill the session does not have is reported, not fatal.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.
 

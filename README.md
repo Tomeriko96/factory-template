@@ -203,8 +203,11 @@ missing = `full` jobs only, `true` = `full` and `light`, `false` = off.
 
 ## Skills and engineering discipline
 
-- **frontend-design** (anthropics/skills, vendored unchanged) is preloaded into the builder
-  (`skills:` frontmatter) for new UI, below the repo's own design system. spec.md is the
+- **frontend-design** (anthropics/skills, vendored unchanged) is the builder's design
+  reference for new UI, below the repo's own design system. It is not preloaded (that cost
+  tokens on every non-UI build): `job next` adds a `UI work:` line to the builder's prompt
+  when the diff or spec.md names a UI path (the rule that starts the ux/ui reviewers), and
+  the builder reads its `SKILL.md` then. spec.md is the
   brief; the builder never asks the user for design input.
 - **House style** (optional, no default): `"house_style": {"skills": ["<skill>"]}` in
   config.json, set by whoever runs the factory. The builder and the ux/ui reviewers then
@@ -334,7 +337,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 347 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step; heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 369 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step; heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 167 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 56 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 21 | CI on drafts and required checks, with a fake `gh`/`glab` |

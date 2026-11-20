@@ -471,6 +471,30 @@ def house_style():
             + " for any UI work; it wins over frontend-design.")
 
 
+PATH_TOKEN_RE = re.compile(r"[\w@.~/-]+")
+
+
+def ui_work(job):
+    """Why this build is UI work, or None: the job branch already touches a UI path (repo.md's
+    "UI paths", else UI_GLOBS: the ux/ui reviewer rule), or spec.md names a file or folder that
+    matches one. The builder then reads frontend-design; it is no longer preloaded."""
+    globs = ui_paths() or UI_GLOBS
+    wt, base = job.get("worktree"), job.get("base")
+    names = git("diff", "--name-only", "--no-renames", f"{base}...HEAD", cwd=wt) if wt and base and os.path.isdir(wt) else None
+    hit = [x for x in (names or "").split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, globs)]
+    if hit:
+        return f"the diff touches {hit[0]}" + (f" (+{len(hit) - 1})" if len(hit) > 1 else "")
+    try:
+        spec = open(os.path.join(jdir(job["id"]), "spec.md"), errors="replace").read()
+    except OSError:
+        return None
+    for tok in PATH_TOKEN_RE.findall(spec):
+        tok = tok.rstrip(".").lstrip("./")
+        if ("/" in tok or "." in tok) and not SIDE_RE.search(tok) and glob_hit(tok, globs):
+            return f"spec.md names {tok}"
+    return None
+
+
 def builder_block(job, n):
     mode = job.get("mode", "full")
     p = paths(job) + f"Build round {n}. Port: {job['port']}. Mode: {mode}."
@@ -488,7 +512,13 @@ def builder_block(job, n):
         p += (f"\nAn earlier builder of this round wrote BUILD: BLOCKED (round-{n}/{os.path.basename(blocked[-1])}); "
               "you run one step higher: try again. Write BUILD: BLOCKED yourself only when the block is a "
               "decision a human must take (not a technical difficulty).")
-    p += house_style() if mode != "docs" else ""
+    if mode != "docs":
+        p += house_style()
+        why = ui_work(job)
+        if why:
+            p += (f"\nUI work: {why}. Before you change UI, read "
+                  f"{os.path.join(REPO, '.claude', 'skills', 'frontend-design', 'SKILL.md')} (design reference; "
+                  "below the house style and the repo's own design system).")
     if job.get("rework_round") == n:
         p += "\nAlso read rework.md."
         if job.get("rework_untrusted"):

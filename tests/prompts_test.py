@@ -135,7 +135,12 @@ check(os.path.exists(os.path.join(FD, "SKILL.md")) and "Apache License" in open(
 for src in ("github.com/obra/superpowers", "MIT", "github.com/anthropics/skills", "Apache License 2.0"):
     check(src in NOTICE, f"NOTICE: {src} missing")
 b_front = texts.get("builder", "").split("---", 2)[1]
-check(re.search(r"^skills:\n  - frontend-design$", b_front, re.M), "builder: frontend-design not preloaded via skills:")
+check("frontend-design" not in b_front and "skills:" not in b_front, "builder: frontend-design preloaded again (read on UI work only)")
+check("UI work:" in JOB and "frontend-design" in JOB and "`UI work:`" in texts.get("builder", ""),
+      "UI work: line not printed by job or not explained to the builder")
+_ui = re.search(r'^UI_GLOBS = \[(.*)\]$', JOB, re.M)
+check(_ui and all(f"`{g}`" in texts.get("builder", "") for g in re.findall(r'"([^"]+)"', _ui.group(1))),
+      "builder: default UI paths differ from job's UI_GLOBS")
 for sec in ("Discipline", "Design reference (UI work only)", "Handling findings (round > 1)"):
     check(section(texts.get("builder", ""), sec), f"builder: no '## {sec}' section")
 for word in ("obra/superpowers", "fail", "heavy", "should pass", "3 fixes", "poll"):

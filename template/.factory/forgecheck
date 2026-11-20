@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Setup check: does CI run on a draft PR/MR, and does the forge require checks before a merge?
+"""Setup check: where does CI run (pushed branch, PR/MR, draft), and does the forge require checks?
 
   .factory/forgecheck [--forge github|gitlab] [--offline] [--json]
 
@@ -8,7 +8,11 @@ the forge (gh / glab) whether the base branch requires status checks. The forge 
 `--forge`, else from .factory/config.json (setup runs this before that file exists). Prints:
 
   CI-ON-DRAFT: yes | no | unknown        a draft PR/MR gets CI (so a draft still gives a signal)
+  CI-ON-PUSH: yes | no | unknown         a pushed factory/* branch gets a pipeline without a PR/MR
+  CI-ON-PR: yes | no | unknown           a PR/MR gets a pipeline (pull_request / merge request pipelines)
   REQUIRED-CHECKS: yes | no | unknown    the forge refuses a merge until checks pass
+  VALIDATE: ci|local <json>              the `validate` block setup writes into config.json
+                                         (ci: the full validation runs on the forge's CI, see setup.md)
   RECOMMEND: <one line each>
 
 Only a heuristic on the config text: a workflow that lists `types:` without opened/synchronize,
@@ -16,6 +20,8 @@ or tests `draft` in an `if:`, or a GitLab rule on a "Draft:" title counts as "sk
 `unknown` is an honest answer: ask the user. `setup.md` says what to do with each.
 """
 import glob, json, os, re, subprocess, sys
+
+BRANCH = "factory/001-x"   # what a job branch looks like, for branch filters
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 REPO = os.path.dirname(HERE)
@@ -82,6 +88,97 @@ def github_drafts():
     return "yes", [f"{running} workflow(s) run on pull_request without a draft filter"]
 
 
+def gh_glob(pattern):
+    """A GitHub Actions branch filter as a regex: `**` any characters, `*` any but `/`."""
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r"\Z")
+
+
+def yaml_list(block, key):
+    """The items of `key: [a, b]` or a `key:` followed by `- a` lines, in `block`; None if absent."""
+    m = re.search(rf"^[ \t]*{key}:[ \t]*(\[[^\]]*\]|\n(?:[ \t]+-[^\n]*\n?)+)", block, re.M)
+    if not m:
+        return None
+    items = (x.strip().lstrip("-").strip().strip("'\"") for x in re.split(r"[,\n]", m.group(1).strip().strip("[]")))
+    return [x for x in items if x]
+
+
+def github_triggers():
+    """(ci_on_push, ci_on_pr, reasons): does a pushed factory/* branch, or a PR, start a workflow?"""
+    files = sorted(glob.glob(os.path.join(REPO, ".github", "workflows", "*.y*ml")))
+    if not files:
+        return "no", "no", ["no GitHub workflows"]
+    push, pr, why = False, False, []
+    for f in files:
+        text = read(f)
+        m = re.search(r"^(?:on|\"on\"|'on')\s*:(.*?)(?=^\S|\Z)", text, re.M | re.S)
+        block = m.group(1) if m else ""
+        if re.search(r"\bpull_request(_target)?\b", block):
+            pr = True
+        if not re.search(r"\bpush\b", block):
+            continue
+        sub = re.search(r"^([ \t]*)push:[ \t]*\n((?:\1[ \t]+[^\n]*\n?)*)", block, re.M)
+        body = sub.group(2) if sub else ""
+        branches, ignore = yaml_list(body, "branches"), yaml_list(body, "branches-ignore")
+        name = os.path.basename(f)
+        if branches is not None:
+            hit = any(gh_glob(b).match(BRANCH) for b in branches if not b.startswith("!"))
+        elif ignore is not None:
+            hit = not any(gh_glob(b).match(BRANCH) for b in ignore)
+        else:
+            hit = yaml_list(body, "tags") is None   # only tags: no branch push
+        if hit:
+            push = True
+            why.append(f"{name} runs on a push to factory/* branches")
+        else:
+            why.append(f"{name}: its push trigger does not match factory/* branches")
+    return ("yes" if push else "no"), ("yes" if pr else "no"), why or ["no workflow has a push trigger"]
+
+
+def gitlab_triggers():
+    """(ci_on_push, ci_on_pr, reasons) from .gitlab-ci.yml (includes are not followed)."""
+    text = read(os.path.join(REPO, ".gitlab-ci.yml"))
+    if not text:
+        return "unknown", "unknown", ["no .gitlab-ci.yml (includes are not followed)"]
+    mr = bool(re.search(r"CI_MERGE_REQUEST_IID|CI_PIPELINE_SOURCE\s*==\s*['\"]?merge_request_event", text))
+    wf = re.search(r"^workflow:(.*?)(?=^\S|\Z)", text, re.M | re.S)
+    if not wf:
+        if mr:
+            return "unknown", "yes", ["job rules mention merge requests, no workflow:rules: branch pipelines may have no jobs"]
+        return "yes", "yes", ["no workflow:rules: every pushed branch gets a pipeline (an MR shows it too)"]
+    rules = wf.group(1)
+    if re.search(r"^[ \t]*-[ \t]*if:[ \t]*['\"]?\$CI_COMMIT_BRANCH['\"]?[ \t]*$", rules, re.M) or \
+            re.search(r"CI_PIPELINE_SOURCE\s*==\s*['\"]?push", rules):
+        return "yes", ("yes" if mr else "unknown"), ["workflow:rules let branch pipelines run"]
+    if mr:
+        return "no", "yes", ["workflow:rules run merge request pipelines, not plain branch pipelines"]
+    return "unknown", "unknown", ["workflow:rules mention neither branch nor merge request pipelines"]
+
+
+def validate_block(push, pr, draft, cfg):
+    """(validate config, why): `ci` when the forge's CI runs the suite for a job branch and delivery is `pr`."""
+    d = cfg.get("delivery") or {}
+    if (d.get("mode") or "pr") != "pr":
+        return {"mode": "local"}, "delivery is not pr: validation stays local"
+    if push == "yes":
+        return {"mode": "ci", "open_pr": False}, "a pushed job branch gets a pipeline: push it and wait for that"
+    if pr == "yes" and draft == "yes":
+        return ({"mode": "ci", "open_pr": True, "draft": True},
+                "CI runs on PRs/MRs, drafts too: open a draft PR/MR at validation and wait for its pipeline")
+    if pr == "yes" and d.get("draft") is False:
+        return ({"mode": "ci", "open_pr": True, "draft": False},
+                "CI runs on PRs/MRs (drafts unclear): open the PR/MR ready, as delivery would")
+    return {"mode": "local"}, ("CI would not run on a draft and delivery.draft is true, or CI on a job branch is "
+                               "unclear: validation stays local (ask the user, or set delivery.draft false)")
+
+
 def gitlab_drafts():
     text = read(os.path.join(REPO, ".gitlab-ci.yml"))
     if not text:
@@ -126,10 +223,14 @@ def main():
                            cwd=REPO).stdout.strip() or "main")
     if forge == "github":
         draft, why = github_drafts()
+        push, pr, twhy = github_triggers()
     elif forge == "gitlab":
         draft, why = gitlab_drafts()
+        push, pr, twhy = gitlab_triggers()
     else:
         draft, why = "unknown", ["forge is not github or gitlab"]
+        push, pr, twhy = "unknown", "unknown", ["forge is not github or gitlab"]
+    validate, vwhy = validate_block(push, pr, draft, cfg)
     if "--offline" in args:
         req, rwhy = "unknown", "--offline: the forge was not asked"
     else:
@@ -147,16 +248,23 @@ def main():
         rec.append("cannot tell if checks are required: ask the user to confirm in the forge settings before auto_merge")
     else:
         rec.append("checks are required: auto_merge waits for them")
+    rec.append(f"validate.mode {validate['mode']}: {vwhy}")
     res = {"forge": forge or None, "base": base, "ci_on_draft": draft, "ci_on_draft_why": why,
-           "required_checks": req, "required_checks_why": rwhy, "recommend": rec}
+           "ci_on_push": push, "ci_on_pr": pr, "ci_triggers_why": twhy,
+           "required_checks": req, "required_checks_why": rwhy, "validate": validate, "recommend": rec}
     if "--json" in args:
         print(json.dumps(res, indent=2))
         return
     print(f"CI-ON-DRAFT: {draft}")
     for w in why:
         print(f"  - {w}")
+    print(f"CI-ON-PUSH: {push}")
+    print(f"CI-ON-PR: {pr}")
+    for w in twhy:
+        print(f"  - {w}")
     print(f"REQUIRED-CHECKS: {req}")
     print(f"  - {rwhy}")
+    print(f"VALIDATE: {validate['mode']} {json.dumps(validate)}")
     print("RECOMMEND:")
     for r in rec:
         print(f"  - {r}")

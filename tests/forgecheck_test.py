@@ -80,6 +80,51 @@ try:
     r = repo("none", {}, "no-forge-2")
     check(run(r, "--offline", "--json")["ci_on_draft"] == "unknown", "no forge: unknown")
 
+    # where CI runs for a job branch (push / PR), and the validate block setup writes
+    tcases = [
+        ("push all + pr", {".github/workflows/ci.yml": "on: [push, pull_request]\njobs: {}\n"}, "yes", "yes"),
+        ("push main only", gh("  push:\n    branches: [main]\n  pull_request:"), "no", "yes"),
+        ("push factory/**", gh("  push:\n    branches:\n      - main\n      - 'factory/**'"), "yes", "no"),
+        ("push branches-ignore", gh("  push:\n    branches-ignore: [main]"), "yes", "no"),
+        ("push tags only", gh("  push:\n    tags: ['v*']\n  pull_request:"), "no", "yes"),
+    ]
+    for label, files, want_push, want_pr in tcases:
+        r = repo("github", files, "ght-" + label.replace(" ", "-").replace("/", "_").replace("*", "s"))
+        res = run(r, "--offline", "--json")
+        check((res["ci_on_push"], res["ci_on_pr"]) == (want_push, want_pr),
+              f"github {label}: push/pr={res['ci_on_push']}/{res['ci_on_pr']}, want {want_push}/{want_pr}")
+    def cfg(r, delivery):
+        json.dump({"forge": json.load(open(os.path.join(r, ".factory", "config.json")))["forge"], "delivery": delivery},
+                  open(os.path.join(r, ".factory", "config.json"), "w"))
+    r = repo("github", {".github/workflows/ci.yml": "on: [push, pull_request]\njobs: {}\n"}, "ghv-push")
+    cfg(r, {"mode": "pr", "draft": True})
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": False}, "push pipelines: ci without a PR")
+    out = run(r, "--offline")
+    check('VALIDATE: ci {"mode": "ci", "open_pr": false}' in out and "CI-ON-PUSH: yes" in out, "text output lacks VALIDATE/CI-ON-PUSH")
+    cfg(r, {"mode": "local"})
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "local"}, "delivery local: validate stays local")
+    r = repo("github", gh("  push:\n    branches: [main]\n  pull_request:"), "ghv-pr")
+    cfg(r, {"mode": "pr", "draft": True})
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": True, "draft": True},
+          "PR pipelines on drafts: ci with a draft PR")
+    r = repo("github", gh("  push:\n    branches: [main]\n  pull_request:\n    types: [ready_for_review]"), "ghv-ready")
+    cfg(r, {"mode": "pr", "draft": True})
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "local"}, "drafts skipped and delivery.draft: local")
+    cfg(r, {"mode": "pr", "draft": False})
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": True, "draft": False},
+          "drafts skipped, delivery.draft false: ci with a ready PR")
+    glmr = "workflow:\n  rules:\n    - if: $CI_PIPELINE_SOURCE == \"merge_request_event\"\n"
+    r = repo("gitlab", {".gitlab-ci.yml": glmr + "test:\n  script: [make test]\n"}, "glv-mr")
+    cfg(r, {"mode": "pr", "draft": True})
+    res = run(r, "--offline", "--json")
+    check((res["ci_on_push"], res["ci_on_pr"], res["ci_on_draft"]) == ("no", "yes", "yes") and
+          res["validate"] == {"mode": "ci", "open_pr": True, "draft": True}, f"gitlab MR pipelines: draft MR at validation, got {res}")
+    r = repo("gitlab", {".gitlab-ci.yml": glmr + "    - if: $CI_COMMIT_BRANCH\n"}, "glv-both")
+    res = run(r, "--offline", "--json")
+    check((res["ci_on_push"], res["ci_on_pr"]) == ("yes", "yes"), f"gitlab branch + MR pipelines: {res['ci_on_push']}/{res['ci_on_pr']}")
+    r = repo("gitlab", {".gitlab-ci.yml": "test:\n  script: [make test]\n"}, "glv-plain")
+    check(run(r, "--offline", "--json")["ci_on_push"] == "yes", "gitlab without workflow: branch pipelines")
+
     # required checks, with a fake gh / glab
     r = repo("github", gh("  pull_request:\n    branches: [main]"), "gh-req")
     env = fake("gh", 'case "$2" in *rules/branches*) echo \'[{"type":"required_status_checks"}]\';; *) exit 1;; esac')

@@ -260,6 +260,20 @@ switches auto-merge back on after its push). `/factory setup` runs `.factory/for
 PR/MR (if not, use `draft: false`), and does the forge require checks before a merge (if not,
 auto-merge has nothing to wait for and is not switched on).
 
+**Validation on the forge's CI** (`"validate": {"mode": "ci", …}`, set by `/factory setup` when
+`forgecheck` finds a pipeline that runs for a pushed job branch or a PR/MR and delivery is `pr`;
+default `local`). Every PR/MR's pipeline runs the full suite again on fast runners, so the local
+full validation (median 39 min on a 4-thread laptop, plus hours of waiting for a heavy slot)
+duplicated it. In `ci` mode `precheck --validate` runs nothing locally: it pushes `factory/<id>`
+(never forced), opens the PR/MR when CI only runs on PRs/MRs (`open_pr`; a draft when CI runs on
+drafts, `draft`), and waits for that commit's pipeline through `.factory/ci` without holding a heavy
+slot (bounded polls, then `VALIDATE: PENDING`; run it again). A failing pipeline becomes
+`validate.md` with the failing jobs and the tail of their logs, a blocking finding for the next
+round as a local failure would be; no pipeline after `no_pipeline_min` (10), a rejected push or a
+forge that keeps failing is `VALIDATE: ERROR` and `needs-human`. Delivery reuses the branch and the
+PR/MR (title and body replaced, marked ready when it was a draft and `delivery.draft` is false).
+Targeted tests during build and review are unchanged.
+
 Once the forge confirms a job's PR/MR is merged, the factory closes the issue the job came
 from (`issues.close_on_merge`, default `true`; `false` leaves that to you), and no other
 one. This also catches up older merged jobs on `status`/`sync`. Review comments go back in
@@ -391,10 +405,10 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 369 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step; heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; hidden acceptance tests; old job.json files; input checks |
-| `python3 -I tests/guard_test.py` | 176 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
-| `python3 -I tests/watch_test.py` | 56 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
-| `python3 -I tests/forgecheck_test.py` | 21 | CI on drafts and required checks, with a fake `gh`/`glab` |
+| `bash tests/job_test.sh` | 572 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing and the escalation ladder; house style; the `UI work:` line; hidden acceptance tests; old job.json files; input checks |
+| `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
+| `python3 -I tests/watch_test.py` | 61 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
+| `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |
 | `python3 -I tests/install_test.py` | 19 | install, exclusion of every template skill, re-install, remove, a repo that tracks its own copy of a skill |
 | `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE) |
 

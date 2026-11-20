@@ -87,6 +87,14 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `routing.escalate: false` switches the ladder off; `routing.cap` (default
   `{"model": "opus", "effort": "xhigh"}`) is its top; `routing.blocked_retries` (default 1)
   is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
+- `validate` (optional): where the round's full validation runs. `{"mode": "local"}` (default):
+  repo.md's Validate commands through `heavy` on this machine. `{"mode": "ci", "open_pr": true|false,
+  "draft": true|false}` (setup writes it when `.factory/forgecheck` finds CI that runs the suite for
+  a job branch and delivery is `pr`): the validation step pushes the job branch, opens the PR/MR when
+  `open_pr` (a draft when `draft`, else as `delivery.draft`), and waits for that commit's pipeline on
+  the forge, without a heavy slot; a job delivered `local`/`push` still validates locally. Optional
+  `poll_s` (30), `no_pipeline_min` (10: no pipeline for the pushed commit by then = `VALIDATE: ERROR`),
+  `timeout_min` (180).
 - `adopt_conflicting` (optional, default `false`): `true` lets `.factory/job adoptable` adopt every
   open PR/MR by an allowed author in this repo that has a merge conflict and no job (see
   `/factory adopt`); `false` only lists them as adoptable.
@@ -173,7 +181,8 @@ in name only (the metrics still record it); the model step works either way.
     round-N/review-<name>.md
     round-N/shots/<name>/                (ui/ux screenshots, made with .factory/shoot)
     round-N/decision.md                  (an approver's REWORK, moved here by the script)
-    round-N/validate.md, validate.json   (.factory/precheck --validate: the round's one full-suite run)
+    round-N/validate.md, validate.json   (.factory/precheck --validate: the round's one full-suite run,
+                                         local or on the forge's CI: validate.mode)
     precheck.md                          (.factory/precheck, before the approver)
     decision.md                          (approver: the current decision)
     sync-N/build.md, review-code.md      (/factory sync: base merged into the branch)
@@ -220,7 +229,13 @@ line of its output, act, and call `.factory/job next <id>` again:
   worktree, written to `round-N/validate.md`. Builders and reviewers run only targeted
   tests, never with coverage (coverage is left to CI). `VALIDATE: FAIL` → the script builds
   round N+1 with validate.md as a blocking finding; it is a factory script, not you running
-  tests, so the rule below does not forbid it.
+  tests, so the rule below does not forbid it. With `validate.mode: ci` the same command runs
+  nothing locally: it pushes `factory/<id>` (never forced), opens the PR/MR if CI needs one
+  (`PR:` line in validate.md; `job next` records it as the job's `pr_url`), and waits for that
+  commit's pipeline through `.factory/ci` (bounded polls inside the call, then `PENDING`; never a
+  sleep loop of yours). A failing pipeline is `VALIDATE: FAIL` with the failing jobs and their log
+  tails, exactly like a local failure; `VALIDATE: ERROR <why>` (push rejected, PR/MR not opened, no
+  pipeline, the forge not answering) sends the job to `needs-human`.
 - `ACTION: deliver` → see **Delivery**, then `job delivered` (or `job fail`).
 - `ACTION: push` → only in a sync: see `/factory sync`.
 - `WAIT: …` / `DONE: …` → report it in one line (with `NEXT:` if given) and stop.
@@ -610,6 +625,13 @@ Steps 1–2 of `push`, then open the PR/MR from the `## PR` section of the `PR-T
 (title on its first line, body below). Write the body to
 `<Job>/pr-body.md`, append `<issues.link> #<nr>` if the job came from an issue, and end it
 with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+
+When `ACTION: deliver` prints a `PR: <url> is already open` line (the CI validation opened it),
+push the branch again (a no-op when nothing changed), keep that PR/MR, replace its title and
+description from the PR text (`gh pr edit <url> --title "<title>" --body-file <Job>/pr-body.md`;
+`glab mr update <iid> --title "<title>" --description "$(cat <Job>/pr-body.md)"`) and, when the line
+says so (it was a draft and `delivery.draft` is false), mark it ready (`gh pr ready <url>`;
+`glab mr update <iid> --ready`).
 
 - `github`: if `gh pr view factory/<job-id> --json url` already finds one, reuse it.
   Otherwise `gh pr create --base <base> --head factory/<job-id> --title "<title>"

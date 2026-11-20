@@ -103,6 +103,18 @@ check("forgecheck" in INSTALL and "forgecheck" in SETUP and "forgecheck" in SKIL
 for word in ("CI-ON-DRAFT", "REQUIRED-CHECKS"):
     check(word in SETUP and word in open(os.path.join(T, ".factory", "forgecheck")).read(), f"{word}: not in both forgecheck and setup.md")
 
+# Validation on the forge's CI: forgecheck prints it, setup writes it, precheck and job act on it
+FORGECHECK = open(os.path.join(T, ".factory", "forgecheck")).read()
+check("VALIDATE: {validate['mode']}" in FORGECHECK and "VALIDATE: ci" in SETUP and '"validate"' in SETUP,
+      "validate.mode ci: forgecheck's VALIDATE line not used by setup.md")
+check("def validate_ci" in PRECHECK and "head_pipeline" in PRECHECK and "def head_pipeline" in open(os.path.join(T, ".factory", "ci")).read(),
+      "precheck --validate in ci mode does not reuse .factory/ci")
+check('"VALIDATE: ERROR"' in JOB and "VALIDATE: ERROR" in PRECHECK and "VALIDATE: ERROR" in SKILL,
+      "VALIDATE: ERROR: not in precheck, job and SKILL.md")
+check("is already open" in JOB and "is already open" in SKILL and "gh pr ready" in SKILL and "--ready" in SKILL,
+      "delivery: reusing the validation's PR/MR (edit, mark ready) not described")
+check("validate.mode" in SKILL and "`validate`" in SKILL, "SKILL.md: config.validate not documented")
+
 # Triage and bundles: what the script prints and reads is what SKILL.md and the agent describe
 SKILL_FRONT = SKILL.split("---", 2)[1]
 check(re.search(r"^effort: (low|medium|high)$", SKILL_FRONT, re.M), "SKILL.md: effort not pinned in the frontmatter")

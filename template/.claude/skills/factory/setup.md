@@ -107,7 +107,15 @@ locally), `push` (push `factory/<id>` only) or `pr` (push + open a PR/MR). Forge
 can work: `gh auth status` / `glab auth status`, and `git ls-remote <remote>` succeeds.
 
 For `pr`, run `.factory/forgecheck --forge <forge>` (it reads the CI config and asks the forge;
-add `--offline` if `gh`/`glab` is not logged in) and report its three answers:
+add `--offline` if `gh`/`glab` is not logged in; write `delivery` to config.json first, it reads
+`delivery.draft`) and report its answers:
+- `VALIDATE: ci {…}` → write that JSON as `"validate"` in config.json: the round's full validation
+  then runs on the forge's CI (push the job branch, a PR/MR when CI only runs on PRs/MRs, wait for
+  that pipeline) instead of through `heavy` on this machine. Do this whenever the forge's pipeline
+  runs the full suite (check that `.github/workflows/*`/`.gitlab-ci.yml` runs the same tests as the
+  Validate commands; if CI runs only lint, keep `local`). `VALIDATE: local` → leave `validate` out
+  and say why (its RECOMMEND line). Tell the user that in `ci` mode the PR/MR exists from the
+  validation step on (a draft when `draft: true`), before the approver.
 - `draft` stays `false` whatever `CI-ON-DRAFT` says; set `true` only when the user asks for drafts.
 - Only when `REQUIRED-CHECKS: yes`: ask whether the factory should switch on auto-merge (`auto_merge`, default `false`; it needs
   `draft: false`, and only on the user's explicit yes). Explain what it does: the forge merges

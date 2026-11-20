@@ -1141,6 +1141,126 @@ J drop "$G7" >/dev/null
 export PATH="$OLDPATH"
 cp "$T/config.adopt" .factory/config.json
 
+# ---------- validate.mode ci: the full suite runs on the forge's CI, not through heavy ----------
+scenario=validate-ci
+cp .factory/config.json "$T/config.vci"
+FF="$T/forge-vci"; mkdir -p "$T/bin" "$FF"; OLDPATH="$PATH"; export PATH="$T/bin:$PATH" FF
+export FACTORY_VALIDATE_BUDGET=0 FACTORY_CI_POLL=0
+cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$FF/calls"
+case "$1 $2" in
+  "pr list") cat "$FF/prlist.json" 2>/dev/null || echo '[]' ;;
+  "pr create") echo "Creating pull request"; echo "https://github.example/o/r/pull/41" ;;
+  "run view") printf 'setup ok\n\033[31mFAILED tests/test_x.py::test_y - AssertionError\033[0m\n' ;;
+  "api "*check-runs*) cat "$FF/checks.json" 2>/dev/null || echo '{"check_runs": []}' ;;
+  "api "*/status) echo '{"statuses": []}' ;;
+  *) echo "fake gh: $*" >&2; exit 1 ;;
+esac
+SH
+cat > "$T/bin/glab" <<'SH'
+#!/usr/bin/env bash
+echo "glab $*" >> "$FF/calls"
+case "$*" in
+  "api projects/:id/merge_requests?source_branch="*) cat "$FF/mrlist.json" 2>/dev/null || echo '[]' ;;
+  "api -X POST projects/:id/merge_requests "*) echo '{"iid": 52, "web_url": "https://gitlab.example/g/p/-/merge_requests/52", "draft": true}' ;;
+  "api projects/:id/merge_requests/52") cat "$FF/mr52.json" ;;
+  "api projects/:id/pipelines/900/jobs"*) echo '[{"id": 7001, "name": "unit", "stage": "test", "status": "failed", "web_url": "https://gitlab.example/g/p/-/jobs/7001"}, {"id": 7002, "name": "lint", "stage": "test", "status": "success", "web_url": "https://gitlab.example/g/p/-/jobs/7002"}]' ;;
+  "api projects/:id/jobs/7001/trace") printf 'collecting\nE   assert 2 == 3\n' ;;
+  *) echo "fake glab: $*" >&2; exit 1 ;;
+esac
+SH
+chmod +x "$T/bin/gh" "$T/bin/glab"
+cat >> .factory/repo.md <<'EOF'
+- Validate (one exact command per line, run as `heavy --cache -- <command>`):
+  - `false`
+EOF
+vcfg() { python3 - "$@" <<'PY'
+import json, sys
+c = json.load(open(".factory/config.json"))
+c["forge"] = sys.argv[1]
+c["delivery"] = {"mode": "pr", "remote": "origin", "draft": sys.argv[2] == "true"}
+c["validate"] = json.loads(sys.argv[3])
+json.dump(c, open(".factory/config.json", "w"))
+PY
+}
+checks() { python3 - "$@" > "$FF/checks.json" <<'PY'
+import json, sys
+st = {"pending": ("in_progress", None), "pass": ("completed", "success"), "fail": ("completed", "failure")}[sys.argv[1]]
+print(json.dumps({"check_runs": [
+    {"id": 77, "name": "test", "status": st[0], "conclusion": st[1],
+     "details_url": "https://github.example/o/r/actions/runs/5/job/77"},
+    {"id": 78, "name": "lint", "status": "completed", "conclusion": "success",
+     "details_url": "https://github.example/o/r/actions/runs/5/job/78"}]}))
+PY
+}
+# tovalidate <id> <path>: a full job whose reviews all passed, at ACTION: validate
+tovalidate() {
+  echo SPEC > "$(jd "$1")/spec.md"; J next "$1" >/dev/null; buildnew "$1" "$2"; J next "$1" >/dev/null
+  J reviewers "$1" security,code,audit >/dev/null; for r in security code audit; do review "$1" 1 $r PASS; done
+}
+vcfg github true '{"mode": "ci", "open_pr": true, "draft": true}'
+C1="$(newjob "zq vci pass")"; tovalidate "$C1" src/c1.py
+out="$(J next "$C1")"; first "$out" "ACTION: validate"; has "$out" "validate.mode ci: it pushes the job branch"
+checks pending; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$C1")"; rc=$?
+first "$out" "VALIDATE: PENDING the CI pipeline is running"; has "$out" "pull/41"; [ $rc = 124 ] && ok || bad "pending exit $rc, want 124"
+git --git-dir="$T/origin.git" rev-parse -q --verify "refs/heads/factory/$C1" >/dev/null && ok || bad "job branch not pushed"
+command grep -q -- "pr create --base main --head factory/$C1 .*--draft" "$FF/calls" && ok || bad "no draft PR opened: $(cat "$FF/calls")"
+command grep -qF "heavy" "$FF/calls" && bad "heavy used in ci mode" || ok
+missing "$(jd "$C1")/round-1/validate.md"
+first "$(J next "$C1")" "ACTION: validate"                                # still pending: run it again
+checks pass; echo '[{"url": "https://github.example/o/r/pull/41", "isDraft": true}]' > "$FF/prlist.json"; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$C1")"; first "$out" "VALIDATE: PASS"; has "$out" "PR: https://github.example/o/r/pull/41 (draft"
+has "$out" "✅ test: success"; command grep -qF "pr create" "$FF/calls" && bad "a second PR was opened" || ok
+command grep -qF "push" "$FF/calls" && bad "pushed through gh?" || ok
+out="$(J next "$C1")"; has "$out" "AGENT: factory-approver"; has "$out" "the CI validation opened https://github.example/o/r/pull/41 (draft)"
+field "$C1" "j['pr_url'], j['validate_pr']['draft']" "https://github.example/o/r/pull/41 True"
+printf 'DECISION: MERGE\n\n## PR\nTitle\n' > "$(jd "$C1")/decision.md"
+out="$(J next "$C1")"; first "$out" "ACTION: deliver"; has "$out" "PR: https://github.example/o/r/pull/41 is already open (a draft, opened by the CI validation)"
+lacks "$out" "mark it ready"; park "$C1"
+# failure: the failing jobs and their log tail become the blocking finding of the next round
+rm -f "$FF/prlist.json"; vcfg github false '{"mode": "ci", "open_pr": true}'
+C2="$(newjob "zq vci fail")"; tovalidate "$C2" src/c2.py; checks fail; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$C2")"; first "$out" "VALIDATE: FAIL"
+has "$out" "❌ test: failed (https://github.example/o/r/actions/runs/5/job/77)"; lacks "$out" "❌ lint"
+has "$out" "FAILED tests/test_x.py::test_y - AssertionError"; lacks "$out" $'\033'
+has "$out" "[blocking] the CI pipeline fails"
+command grep -qF "run view --job 77 --log-failed" "$FF/calls" && ok || bad "log not fetched by job id"
+command grep -qF -- "--draft" "$FF/calls" && bad "ready PR opened as draft" || ok        # delivery.draft false
+out="$(J next "$C2")"; has "$out" "Build round 2."; has "$out" "read round-1/validate.md"
+field "$C2" "j['pr_url']" "https://github.example/o/r/pull/41"
+park "$C2"
+# no PR needed (push pipelines): nothing opened; no pipeline at all for the commit -> ERROR -> needs-human
+vcfg github true '{"mode": "ci", "open_pr": false}'; echo '{"check_runs": []}' > "$FF/checks.json"
+C3="$(newjob "zq vci none")"; tovalidate "$C3" src/c3.py; : > "$FF/calls"
+first "$("$R/.factory/precheck" --validate "$C3")" "VALIDATE: PENDING the CI pipeline is none"
+command grep -qF "pr create" "$FF/calls" && bad "PR opened with open_pr false" || ok
+out="$(FACTORY_CI_NO_PIPELINE_MIN=0 "$R/.factory/precheck" --validate "$C3")"; first "$out" "VALIDATE: ERROR no pipeline for the pushed commit"
+out="$(J next "$C3")"; first "$out" "DONE: needs-human: round 1: the CI validation could not run: no pipeline"
+field "$C3" "j.get('pr_url')" None
+# a job delivered locally keeps the local validation even with validate.mode ci
+C4="$(newjob --delivery local "zq vci local")"; tovalidate "$C4" src/c4.py
+out="$(J next "$C4")"; lacks "$out" "validate.mode ci"
+out="$(FACTORY_LOCK_DIR="$T/locks" FACTORY_CPU_MAX=100 "$R/.factory/precheck" --validate "$C4")"; first "$out" "VALIDATE: FAIL"; has "$out" "\`false\`: exit 1"
+park "$C4"
+# GitLab: a draft MR opened through the API, its head pipeline for this commit, the failing job's trace
+vcfg gitlab true '{"mode": "ci", "open_pr": true, "draft": true}'
+C5="$(newjob "zq vci gitlab")"; tovalidate "$C5" src/c5.py; : > "$FF/calls"
+echo '{"iid": 52, "state": "opened", "head_pipeline": {"id": 899, "sha": "0000000", "status": "success", "created_at": "2000-01-01T00:00:00Z"}}' > "$FF/mr52.json"
+out="$("$R/.factory/precheck" --validate "$C5")"; first "$out" "VALIDATE: PENDING the CI pipeline is none"   # the old pipeline does not count
+command grep -qF -- "-f title=Draft: zq vci gitlab" "$FF/calls" && ok || bad "draft MR not opened: $(cat "$FF/calls")"
+H5="$(git -C "$(wt "$C5")" rev-parse HEAD)"
+printf '{"iid": 52, "state": "opened", "head_pipeline": {"id": 900, "sha": "%s", "status": "failed", "web_url": "https://gitlab.example/g/p/-/pipelines/900"}}' "$H5" > "$FF/mr52.json"
+out="$("$R/.factory/precheck" --validate "$C5")"; first "$out" "VALIDATE: FAIL"; has "$out" "❌ unit [test]: failed"
+has "$out" "E   assert 2 == 3"; has "$out" "Pipeline: https://gitlab.example/g/p/-/pipelines/900"
+has "$out" "PR: https://gitlab.example/g/p/-/merge_requests/52 (draft"
+park "$C5"
+sed -i '/^- Validate/,$d' .factory/repo.md
+unset FACTORY_VALIDATE_BUDGET FACTORY_CI_POLL
+export PATH="$OLDPATH"
+cp "$T/config.vci" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

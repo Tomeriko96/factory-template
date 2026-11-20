@@ -7,7 +7,12 @@
                                         of repo.md through `heavy --cache --background --priority high` in the job
                                         worktree; writes round-N/validate.md (first line
                                         `VALIDATE: PASS|FAIL|NONE`); still running after ~9 minutes:
-                                        prints `VALIDATE: PENDING` and exits 124 (run it again)
+                                        prints `VALIDATE: PENDING` and exits 124 (run it again).
+                                        With `validate.mode: ci` (config.json, `pr` delivery) it runs
+                                        nothing locally: it pushes the job branch, opens the PR/MR when
+                                        `validate.open_pr`, and waits for that commit's pipeline on the
+                                        forge (through .factory/ci); `VALIDATE: ERROR <why>` when the
+                                        push, the PR/MR or the pipeline cannot be had (a human looks)
   .factory/precheck --hold <job-id>     only list the files of the job's diff that sit in a class
                                         CI alone does not vouch for (`<class>: <file>` per line);
                                         .factory/job uses it to lift a `light` job to `full`
@@ -41,9 +46,10 @@ lockfiles, containers, schema and migrations, auth), plus whatever `delivery.aut
 in config.json lists (globs; put personal-data paths there).
 Also reported: files, lines, commits, [blocking] mentions per review (information only).
 """
-import fnmatch, json, os, re, shlex, subprocess, sys, time
+import fnmatch, json, os, re, shlex, subprocess, sys, time, urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
+REPO = os.path.dirname(HERE)
 SECRET = re.compile(r"(^|/)(\.env(?!\.(example|sample|template|dist)$)(\..*)?|id_(rsa|ed25519|ecdsa)|"
                     r".*\.(pem|key|p12|pfx|jks|kdbx)|credentials(\.json)?|.*secrets?.*\.(ya?ml|json|toml)|"
                     r"service[-_]?account.*\.json|\.git-credentials|\.netrc|\.pgpass)$", re.I)
@@ -170,6 +176,196 @@ def validate_commands():
 
 
 VALIDATE_BUDGET = 530  # seconds per call, inside a 10-minute tool call
+CI_POLL = 30           # seconds between two looks at the forge's pipeline (inside one call)
+CI_NO_PIPELINE_MIN = 10   # no pipeline for the pushed commit after this long: ERROR
+CI_TIMEOUT_MIN = 180      # the pipeline still runs after this long: ERROR
+CI_MAX_ERRORS = 5         # forge errors in a row before ERROR
+
+
+def load_config():
+    try:
+        with open(os.path.join(HERE, "config.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def validate_mode(job, cfg):
+    """`ci` when config.validate.mode is ci and the job is delivered as a PR/MR, else `local`."""
+    v = cfg.get("validate") if isinstance(cfg.get("validate"), dict) else {}
+    delivery = job.get("delivery_mode") or (cfg.get("delivery") or {}).get("mode") or "local"
+    return "ci" if v.get("mode") == "ci" and delivery == "pr" else "local"
+
+
+def env_num(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+def ci_module():
+    import importlib.machinery, importlib.util
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader("factory_ci", os.path.join(HERE, "ci"))
+    spec = importlib.util.spec_from_loader("factory_ci", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t))
+
+
+def sh(cmd, cwd=None, timeout=60):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+        return r.returncode, (r.stdout or ""), (r.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+
+
+def find_or_open_pr(job, cfg, draft, job_dir):
+    """(url, draft, error): the job branch's open PR/MR, opened now if there is none."""
+    forge = (cfg.get("forge") or "github").lower()
+    branch, base = job["branch"], job["base"]
+    title = (job.get("feature") or job["id"]).splitlines()[0].strip()[:72] or job["id"]
+    body = (f"Factory job {job['id']}: {title}\n\nOpened by the factory's validation step, so the CI pipeline "
+            "runs on this branch before the approver; the description is replaced when the job is delivered.\n\n"
+            "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    bf = os.path.join(job_dir, "pr-body.md")
+    if not os.path.exists(bf):
+        open(bf, "w").write(body)
+    if forge == "github":
+        rc, out, err = sh(["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url,isDraft"], cwd=REPO)
+        if rc == 0 and out.strip():
+            try:
+                found = json.loads(out)
+            except ValueError:
+                found = []
+            if found:
+                return found[0].get("url"), bool(found[0].get("isDraft")), None
+        rc, out, err = sh(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title,
+                           "--body-file", bf] + (["--draft"] if draft else []), cwd=REPO)
+        urls = re.findall(r"https?://\S+/pull/\d+", out)
+        return (urls[-1], draft, None) if rc == 0 and urls else (None, draft, f"gh pr create failed: {(err or out).strip()[-300:]}")
+    if forge == "gitlab":
+        q = urllib.parse.quote(branch, safe="")
+        rc, out, err = sh(["glab", "api", f"projects/:id/merge_requests?source_branch={q}&state=opened"], cwd=REPO)
+        try:
+            found = json.loads(out) if rc == 0 and out.strip() else []
+        except ValueError:
+            found = []
+        if found:
+            return found[0].get("web_url"), bool(found[0].get("draft") or found[0].get("work_in_progress")), None
+        rc, out, err = sh(["glab", "api", "-X", "POST", "projects/:id/merge_requests",
+                           "-f", f"source_branch={branch}", "-f", f"target_branch={base}",
+                           "-f", f"title={'Draft: ' if draft else ''}{title}", "-f", f"description={open(bf).read()}"], cwd=REPO)
+        try:
+            mr = json.loads(out) if rc == 0 else {}
+        except ValueError:
+            mr = {}
+        return (mr["web_url"], draft, None) if mr.get("web_url") else (None, draft, f"opening the MR failed: {(err or out).strip()[-300:]}")
+    return None, draft, f"unknown forge '{forge}' in config.json"
+
+
+def validate_ci(job, job_dir, rdir, rnd, head, cfg):
+    """The full validation on the forge's CI: push, PR/MR if needed, wait for the pipeline (module doc)."""
+    v = cfg["validate"]
+    forge = (cfg.get("forge") or "github").lower()
+    remote = (cfg.get("delivery") or {}).get("remote") or "origin"
+    out = os.path.join(rdir, "validate.md")
+    state_path = os.path.join(rdir, "validate.json")
+    try:
+        state = json.load(open(state_path))
+    except (OSError, ValueError):
+        state = {}
+    if state.get("head") != head or state.get("mode") != "ci":
+        state = {"mode": "ci", "head": head, "errors": 0}
+
+    def save():
+        with open(state_path + ".tmp", "w") as f:
+            json.dump(state, f)
+        os.replace(state_path + ".tmp", state_path)
+
+    def finish(word, body):
+        pr = state.get("pr_url")
+        lines = [f"VALIDATE: {word}", f"Head: {head}"]
+        lines += [f"PR: {pr} ({'draft' if state.get('pr_draft') else 'ready'}, opened for the CI validation)"] if pr else []
+        lines += [f"Pipeline: {state['pipeline_url']}"] if state.get("pipeline_url") else []
+        text = "\n".join(lines + [""] + body) + "\n"
+        save()
+        open(out, "w").write(text)
+        print(text, end="")
+        return 0
+
+    wt = job["worktree"]
+    if state.get("pushed") != head:
+        rc, _, err = sh(["git", "-C", wt, "push", remote, f"HEAD:refs/heads/{job['branch']}"], timeout=120)
+        if rc != 0:
+            return finish("ERROR the job branch could not be pushed (never forced)",
+                          [f"`git push {remote} {job['branch']}` failed:", "", "```", err.strip()[-1200:], "```"])
+        state.update(pushed=head, pushed_at=time.time())
+        save()
+    if v.get("open_pr", True) and not state.get("pr_url"):
+        draft = v.get("draft") if isinstance(v.get("draft"), bool) else (cfg.get("delivery") or {}).get("draft", True)
+        url, is_draft, err = find_or_open_pr(job, cfg, draft, job_dir)
+        if err:
+            return finish("ERROR the PR/MR for the CI pipeline could not be opened", [err])
+        state.update(pr_url=url, pr_draft=is_draft)
+        save()
+    ci = ci_module()
+    poll = env_num("FACTORY_CI_POLL", v.get("poll_s", CI_POLL))
+    end = time.time() + env_num("FACTORY_VALIDATE_BUDGET", VALIDATE_BUDGET)
+    no_pipe = 60 * env_num("FACTORY_CI_NO_PIPELINE_MIN", v.get("no_pipeline_min", CI_NO_PIPELINE_MIN))
+    limit = 60 * float(v.get("timeout_min") or CI_TIMEOUT_MIN)
+    while True:
+        res = ci.head_pipeline(forge, job["branch"], head, state.get("pr_url"), iso(state["pushed_at"] - 60))
+        age = time.time() - state["pushed_at"]
+        if res.get("error"):
+            state["errors"] = int(state.get("errors") or 0) + 1
+            if state["errors"] >= CI_MAX_ERRORS:
+                return finish("ERROR the forge did not answer", [f"{state['errors']} errors in a row: {res['error']}"])
+        else:
+            state["errors"] = 0
+            state["pipeline_url"] = res.get("url") or state.get("pipeline_url")
+            p = res.get("pipeline")
+            jobs_ok = all(j.get("status") in ("success", "skipped", "manual") for j in res.get("jobs") or [])
+            if p == "success" or (p in ("skipped", "manual") and res.get("jobs") and jobs_ok):
+                return finish("PASS", [f"The full validation of round {rnd} ran on the forge's CI "
+                                       f"(validate.mode ci): {len(res.get('jobs') or [])} jobs passed.", ""]
+                              + [f"- ✅ {j['name']}: {j['status']}" for j in res.get("jobs") or []])
+            if p in ("failed", "canceled"):
+                bad = [j for j in res.get("jobs") or [] if j.get("status") in ("failed", "canceled")]
+                logs = ci.failed_logs(forge, res.get("jobs") or [])
+                body = [f"The full validation of round {rnd} ran on the forge's CI (validate.mode ci): the "
+                        f"pipeline {p}.", ""]
+                body += [f"- ❌ {j['name']}" + (f" [{j['stage']}]" if j.get("stage") else "") + f": {j['status']}"
+                         + (f" ({j['url']})" if j.get("url") else "") for j in bad] or [f"- ❌ pipeline {p}"]
+                for name, tail in logs.items():
+                    body += ["", f"## Failed: `{name}`", "", "```", tail[-3000:], "```"]
+                body += ["", "1. [blocking] the CI pipeline fails on this round's head (see above): fix the cause; "
+                         "a flaky job or one that fails on the base too is no bug of this change, say so in build.md "
+                         "with the evidence."]
+                return finish("FAIL", body)
+            if p in (None, "none") and age > no_pipe:
+                return finish("ERROR no pipeline for the pushed commit",
+                              [f"No CI pipeline appeared for {head[:12]} on {job['branch']} within "
+                               f"{int(no_pipe // 60)} min" + (f" (PR/MR {state['pr_url']})" if state.get("pr_url") else "")
+                               + ": CI does not run on this branch. Set validate.open_pr true, or validate.mode local."])
+            if age > limit:
+                return finish("ERROR the pipeline did not finish", [f"still {p} after {int(age // 60)} min"])
+        if time.time() + poll > end:
+            break
+        time.sleep(max(poll, 0))
+    save()
+    pend = res.get("pipeline") if not res.get("error") else f"forge error ({res['error'][:120]})"
+    print(f"VALIDATE: PENDING the CI pipeline is {pend} for {head[:12]}"
+          + (f" ({state['pr_url']})" if state.get("pr_url") else "")
+          + f": run `.factory/precheck --validate {job['id']}` again")
+    return 124
 
 
 def validate_main(job_id, rnd=None):
@@ -185,6 +381,10 @@ def validate_main(job_id, rnd=None):
         sys.exit(f"no worktree for {job_id}")
     head = git("rev-parse", "HEAD", cwd=wt)
     head = head.strip() if head else "?"
+    cfg = load_config()
+    if validate_mode(job, cfg) == "ci":
+        os.chdir(REPO)   # gh/glab find the project from the checkout's remote
+        return validate_ci(job, job_dir, rdir, rnd, head, cfg)
     cmds = validate_commands()
     out = os.path.join(rdir, "validate.md")
     if not cmds:

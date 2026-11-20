@@ -696,6 +696,27 @@ def sync_conflicts(job):
     return n + (1 if (job.get("syncing") or {}).get("conflicts") else 0)
 
 
+def validate_mode(job):
+    """`ci` when config.validate.mode is ci and this job is delivered as a PR/MR (as precheck decides)."""
+    v = config().get("validate")
+    mode = job.get("delivery_mode") or (config().get("delivery") or {}).get("mode") or "local"
+    return "ci" if isinstance(v, dict) and v.get("mode") == "ci" and mode == "pr" else "local"
+
+
+def ci_pr(job, state_path, out):
+    """Record the PR/MR the CI validation opened (validate.json), so delivery reuses it."""
+    try:
+        st = json.load(open(state_path))
+    except (OSError, ValueError):
+        return
+    url = st.get("pr_url")
+    if url and job.get("pr_url") != url:
+        job["pr_url"] = url
+        job["validate_pr"] = {"url": url, "draft": bool(st.get("pr_draft"))}
+        out.notes.append(f"NOTE: the CI validation opened {url} ({'draft' if st.get('pr_draft') else 'ready'}); "
+                         "delivery reuses it")
+
+
 def merge_had_conflicts(wt):
     """True/False when HEAD is a merge commit whose parents conflict (git merge-tree), else None."""
     parents = (git("rev-list", "--parents", "-n", "1", "HEAD", cwd=wt) or "").split()[1:]
@@ -886,14 +907,22 @@ def step(job, out, start=None):
             v = os.path.join(jd, f"round-{n}", "validate.md")
             vfl = first_line(v) or ""
             head = git("rev-parse", "HEAD", cwd=job["worktree"])
-            if not vfl.startswith(("VALIDATE: PASS", "VALIDATE: FAIL", "VALIDATE: NONE")) or \
+            if not vfl.startswith(("VALIDATE: PASS", "VALIDATE: FAIL", "VALIDATE: NONE", "VALIDATE: ERROR")) or \
                     (first_lines(v, 2) + ["", ""])[1] != f"Head: {head}":
+                ci = validate_mode(job) == "ci"
                 out.main += ["ACTION: validate",
                              f"RUN: {os.path.join(HERE, 'precheck')} --validate {job['id']} {n}   (Bash timeout 600000; "
-                             "it runs repo.md's Validate commands through heavy once; `VALIDATE: PENDING` "
-                             "(exit 124) = run it again)",
+                             + ("validate.mode ci: it pushes the job branch (never forced), opens the PR/MR if CI needs "
+                                "one, and waits for that commit's pipeline on the forge, without a heavy slot; "
+                                if ci else "it runs repo.md's Validate commands through heavy once; ")
+                             + "`VALIDATE: PENDING` (exit 124) = run it again)",
                              f"THEN: .factory/job next {job['id']}"]
                 return
+            ci_pr(job, os.path.join(jd, f"round-{n}", "validate.json"), out)
+            if vfl.startswith("VALIDATE: ERROR"):
+                set_stage(job, "needs-human", f"round {n}: the CI validation could not run: {vfl[16:].strip()} "
+                                              f"(see round-{n}/validate.md)")
+                continue
             if vfl.startswith("VALIDATE: FAIL"):
                 if n < budget(job):
                     out.notes.append(f"NOTE: round {n}: the full validation fails (round-{n}/validate.md); building round {n + 1}")
@@ -950,6 +979,13 @@ def step(job, out, start=None):
                 out.main.append("AUTO-MERGE: yes" if gate[0] else
                                 "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): open the PR/MR ready for review, "
                                 "leave auto-merge off, and switch it off if this PR/MR already has it")
+            vpr = job.get("validate_pr") or {}
+            if mode == "pr" and vpr.get("url"):
+                out.main.append(f"PR: {vpr['url']} is already open ({'a draft' if vpr.get('draft') else 'ready'}, "
+                                "opened by the CI validation): push the branch again, reuse it, replace its title and "
+                                "description from PR-TEXT"
+                                + (", and mark it ready (delivery.draft is false)" if vpr.get("draft")
+                                   and (config().get("delivery") or {}).get("draft", True) is False else ""))
             out.main += [
                          "PR-TEXT: " + (os.path.join(jd, text) + " (its ## PR section)" if text else
                                         "none: write a minimal body (feature + \"approved by the user "

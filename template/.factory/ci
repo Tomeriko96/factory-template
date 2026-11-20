@@ -10,6 +10,10 @@
 Cache: .factory/cache/ci-<job-id>.json + ci-others.json, so `watch` never blocks on
 the API. Forge comes from .factory/config.json (`github` | `gitlab`).
 
+Also a library for `.factory/precheck --validate` in `validate.mode: ci`: `head_pipeline()` (the
+pipeline of one pushed commit, through its PR/MR or the branch) and `failed_logs()` (the tail
+of each failing job's log).
+
 Requires: `gh` (github) or `glab` (gitlab) logged in. Missing CLI/auth -> cached
 state is kept and the error is reported once, never crashes watch.
 """
@@ -52,9 +56,9 @@ def load_jobs():
     return jobs
 
 
-def run(cmd):
+def run(cmd, cwd=None, raw=False):
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=CLI_TIMEOUT)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=CLI_TIMEOUT, cwd=cwd)
     except FileNotFoundError:
         return None, "command not found: " + cmd[0]
     except subprocess.TimeoutExpired:
@@ -62,6 +66,8 @@ def run(cmd):
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip().splitlines()
         return None, "; ".join(err[-2:]) if err else f"exit {r.returncode}"
+    if raw:
+        return r.stdout, None
     try:
         return json.loads(r.stdout) if r.stdout.strip() else {}, None
     except ValueError:
@@ -289,7 +295,8 @@ def fetch_gitlab(job, pid=None):
                              "url": jb.get("web_url", "")})
     return {"forge": "gitlab", "pipeline": pipeline, "merge": str(merge).lower(),
             "mr_state": mr.get("state"), "jobs": jobs, "url": pr_url,
-            "pipeline_id": pid_pipe,
+            "pipeline_id": pid_pipe, "pipeline_sha": pipe.get("sha"), "pipeline_url": pipe.get("web_url"),
+            "pipeline_created": pipe.get("created_at"),
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
@@ -308,6 +315,84 @@ def fetch_gitlab_others(pid, limit=5):
         if len(items) >= limit:
             break
     return {"pipelines": items, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+
+
+# ---------- one pushed commit (precheck --validate in validate.mode ci) ----------
+
+REPO = os.path.dirname(HERE)
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def gh_commit(sha):
+    """Check runs + commit statuses of one commit: the PR's checks and the push workflows alike."""
+    runs, err = run(["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{sha}/check-runs?per_page=100"], cwd=REPO)
+    if err:
+        return {"error": err}
+    jobs = []
+    for c in (runs or {}).get("check_runs") or []:
+        url = c.get("details_url") or c.get("html_url") or ""
+        jobs.append({"name": c.get("name") or "?", "stage": "", "url": url, "id": c.get("id"),
+                     "status": normalize_gh_run(c.get("status"), c.get("conclusion"))})
+    st, err = run(["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{sha}/status"], cwd=REPO)
+    for c in ((st or {}).get("statuses") or []) if not err else []:
+        jobs.append({"name": c.get("context") or "?", "stage": "", "url": c.get("target_url") or "",
+                     "status": gh_check({"__typename": "StatusContext", "state": c.get("state")})})
+    return {"pipeline": overall(jobs) if jobs else "none", "jobs": jobs, "url": None}
+
+
+def gl_pipeline_jobs(pid, pipe_id):
+    js, err = run(["glab", "api", f"projects/{pid}/pipelines/{pipe_id}/jobs?per_page=100"], cwd=REPO)
+    return [{"name": jb.get("name", "?"), "stage": jb.get("stage", ""), "id": jb.get("id"),
+             "status": normalize_gl(jb.get("status")), "url": jb.get("web_url", "")}
+            for jb in (js if not err and isinstance(js, list) else [])]
+
+
+def head_pipeline(forge, branch, sha, pr_url=None, since=None):
+    """The CI state of commit `sha` on `branch`: {pipeline: none|pending|running|success|failed|
+    canceled|manual|skipped, jobs: [{name, stage, status, url, id}], url} or {error}. With a GitLab MR
+    its head pipeline counts when it is for `sha` or was created after `since` (ISO time of the push:
+    a merged-results pipeline runs on a merge commit, not on `sha`)."""
+    if forge == "github":
+        return gh_commit(sha)
+    if forge != "gitlab":
+        return {"error": f"unknown forge '{forge}' (config.json)"}
+    if pr_url:
+        mr = fetch_gitlab({"pr_url": pr_url}, pid=":id")
+        if mr.get("error"):
+            return mr
+        fresh = mr.get("pipeline_sha") == sha or (since and (mr.get("pipeline_created") or "") >= since)
+        if mr.get("pipeline") != "none" and fresh:
+            return {"pipeline": mr["pipeline"], "jobs": mr.get("jobs") or [], "url": mr.get("pipeline_url")}
+        return {"pipeline": "none", "jobs": [], "url": None}
+    ref = urllib.parse.quote(branch, safe="")
+    pipes, err = run(["glab", "api", f"projects/:id/pipelines?sha={sha}&ref={ref}&per_page=5"], cwd=REPO)
+    if err:
+        return {"error": err}
+    if not pipes:
+        return {"pipeline": "none", "jobs": [], "url": None}
+    p = pipes[0]
+    return {"pipeline": normalize_gl(p.get("status")), "jobs": gl_pipeline_jobs(":id", p.get("id")),
+            "url": p.get("web_url")}
+
+
+def failed_logs(forge, jobs, lines=40):
+    """{job name: the last `lines` lines of its log} for the failed jobs (best effort)."""
+    out = {}
+    for jb in [j for j in jobs if j.get("status") == "failed"][:5]:
+        text = None
+        if forge == "github":
+            m = re.search(r"/job/(\d+)", jb.get("url") or "")
+            jid = m.group(1) if m else jb.get("id")
+            if jid:
+                text, _ = run(["gh", "run", "view", "--job", str(jid), "--log-failed"], cwd=REPO, raw=True)
+        elif forge == "gitlab":
+            m = re.search(r"/-/jobs/(\d+)", jb.get("url") or "")
+            jid = m.group(1) if m else jb.get("id")
+            if jid:
+                text, _ = run(["glab", "api", f"projects/:id/jobs/{jid}/trace"], cwd=REPO, raw=True)
+        tail = ANSI.sub("", text or "").rstrip().splitlines()[-lines:]
+        out[jb["name"]] = "\n".join(tail) if tail else "(no log available through the forge)"
+    return out
 
 
 # ---------- main ----------

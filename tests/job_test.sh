@@ -800,6 +800,21 @@ done
 has "$(cat "${last##*log=}")" "did NOT run"
 has "$(cat "$(tail -1 "$T/hr1" | sed 's/.*log=//')")" "hello"
 
+# ---------- heavy cancel: stop your own background run by ticket (pkill/killall are refused) ----------
+scenario=heavy-cancel
+(
+  export FACTORY_LOCK_DIR="$T/hcan" FACTORY_CPU_MAX=100
+  mkdir -p "$T/hcan"
+  tid="$("$H" --background -- bash -c "sleep 30; echo late > '$T/hcan/late'" | awk '/^ticket/{print $2}')"
+  for _ in $(seq 50); do grep -q '"running"' "$R/.factory/run/heavy-$tid.json" 2>/dev/null && break; sleep 0.1; done
+  "$H" cancel "$tid" 2>&1
+  "$H" wait "$tid" --timeout 5 > "$T/hcan/out" 2>&1; echo $? > "$T/hcan/rc"
+  sleep 0.5
+)
+[ "$(cat "$T/hcan/rc")" = 143 ] && ok || bad "cancelled ticket exits $(cat "$T/hcan/rc"), want 143"
+has "$(tail -1 "$T/hcan/out")" "heavy: exit=143"; missing "$T/hcan/late"
+"$H" cancel h000000 2>/dev/null && bad "cancel of an unknown ticket succeeded" || ok
+
 # ---------- heavy: FIFO within a priority, so a big waiter is not starved by newer small ones ----------
 scenario=heavy-fifo
 (

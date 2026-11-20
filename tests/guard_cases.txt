@@ -198,3 +198,18 @@ A .factory/heavy -- npm run build 2>&1 > /tmp/build.log; tail -1 /tmp/build.log
 A .factory/heavy -- npm test || echo failed
 A .factory/heavy status | grep waiting
 A .factory/heavy -- bash -c 'npm run build | tail -1'
+# --- killing by name or pattern reaches other sessions' processes
+R pkill -f "until grep -qE"
+R pkill node
+R pkill -9 -f vite
+R killall node
+R sudo pkill -f uvicorn
+R bash -c 'pkill -f "npm run dev"'
+R sleep 1; pkill -f vite
+A kill 12345
+A kill $!
+A kill -TERM "$pid"
+A .factory/heavy cancel h1a2b3
+A .factory/serve stop 5110
+A pgrep -af vite
+A pkill --version

@@ -667,6 +667,8 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
    holds capacity, who waits (with priority) and the CPU. Every run ends with the line
    `heavy: exit=<n> log=<path>` (also on a refusal, exit 75); the guard refuses piping
    heavy's output (`heavy … | tail`) unless the command sets `set -o pipefail`.
+   It also refuses `pkill`/`killall` (by name or pattern they hit other sessions' processes):
+   stop your own work by PID (`kill $!`), `heavy cancel <ticket>` or `serve stop <port>`.
    **Priority** (`--priority high|normal|low`, env `FACTORY_HEAVY_PRIORITY`, default
    normal): a waiter only takes a free slot when no waiter of a higher priority, and no
    older waiter of the same priority, is queued (FIFO, so a big build is not starved; stale waiters whose process is gone are ignored). The precheck's full validation and

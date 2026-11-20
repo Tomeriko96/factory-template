@@ -366,6 +366,31 @@ def pipe_reason(cmd, depth=0):
     return None
 
 
+# `pkill -f "until grep -qE"` killed the wait loops of other sessions on the same machine:
+# killing by name or pattern reaches processes this agent does not own. Kill by PID instead.
+KILL_BY_NAME = {"pkill", "killall", "pkill.sh"}
+
+
+def kill_reason(cmd, depth=0):
+    """`pkill`/`killall` (kills by name or pattern, also other sessions' processes), else None."""
+    cmd = HEREDOC.sub("", cmd)
+    if depth > 4:
+        return None
+    for seg in segments(cmd):
+        w = unwrap(words(seg))
+        if not w:
+            continue
+        if base(w[0]) in SHELLS:
+            for i, a in enumerate(w[1:]):
+                if re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", a) and i + 2 < len(w):
+                    why = kill_reason(w[i + 2], depth + 1)
+                    if why:
+                        return why
+        if base(w[0]) in KILL_BY_NAME and not any(a in VERSION for a in w[1:]):
+            return seg
+    return None
+
+
 def refusal(cmd):
     """The message for the agent when `cmd` is refused, else None."""
     if stash_reason(cmd):
@@ -375,6 +400,15 @@ def refusal(cmd):
                 "  git worktree add --detach \"$TMPDIR/base-$$\" HEAD   (or the base commit)\n"
                 "run the test there, then `git worktree remove --force` it; or read a file with "
                 "`git show <base>:<path>`. To set work aside, make a WIP commit on your own branch.\n")
+    killer = kill_reason(cmd)
+    if killer:
+        return (f"factory guard: `{killer}` is refused: pkill/killall kill by name or pattern, which "
+                "also hits processes of other jobs and sessions on this machine (a builder's "
+                "`pkill -f \"until grep\"` killed other sessions' wait loops). Kill only what you "
+                "started, by PID:\n"
+                "  some-server & pid=$!; …; kill \"$pid\"      (or `kill <pid>` from `ps`/`pgrep -a`)\n"
+                f"  {HERE}/heavy cancel <ticket>              (a heavy --background run)\n"
+                f"  {HERE}/serve stop <port>                  (an app server you started)\n")
     piped = pipe_reason(cmd)
     if piped:
         return (f"factory guard: `{piped} | …` hides heavy's exit code: when heavy refuses (no room, the "

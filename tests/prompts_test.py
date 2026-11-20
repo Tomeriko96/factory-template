@@ -110,6 +110,15 @@ for lab in ("factory:docs|light|full", "factory:solo"):
 for word in ("GROUP", "SKIPPED:", "LEFT-OUT:"):
     check(word in SKILL and word in JOB, f"{word}: not in both SKILL.md and job")
 check("factory:ready" not in SETUP.split("**Issues:**", 1)[1].split("**Delivery**", 1)[0], "setup.md: still creates a factory:ready label")
+# Bundle issues: the label, the candidate shape and the feature sections agree across script and prompts
+check('BUNDLE_LABEL = "factory:bundle"' in JOB and "factory:bundle" in SKILL and "factory:bundle" in texts.get("triage", ""),
+      "factory:bundle: not in job, SKILL.md and the triage agent")
+check('"bundle": true' in texts.get("triage", "") and "`members`" in texts.get("triage", "")
+      and "bundle=True, members=" in JOB, "bundle candidate shape (bundle, members): agent and job disagree")
+check('f"## Bundle #' in JOB and "## Issue #" in JOB and "`## Bundle #<nr>: …`" in texts.get("spec-writer", "")
+      and "`## Issue #<nr>: …`" in texts.get("spec-writer", ""), "bundle feature sections: job and spec-writer disagree")
+check("sub_issues" in JOB and "/links" in JOB and "sub_issues" in SKILL and "/links" in SKILL,
+      "bundle members from the forge (GitHub sub_issues, GitLab links): not in job and SKILL.md")
 check('"groups"' in texts.get("triage", "") and '"skipped"' in texts.get("triage", "")
       and 'plan.get("groups")' in JOB and 'plan.get("skipped")' in JOB, "triage plan.json shape: agent and job disagree")
 

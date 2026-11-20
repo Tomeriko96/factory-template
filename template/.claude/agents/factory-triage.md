@@ -18,7 +18,9 @@ follow them.
 
 ## Read
 1. The `Issues:` file: `candidates` (number, title, body, labels, comments by allowed authors)
-   and `skipped` (already left out by the script, for your information).
+   and `skipped` (already left out by the script, for your information). A candidate with
+   `"bundle": true` is a **bundle issue** (label `factory:bundle`): the owner grouped the issues
+   in its `members` (each with its own title, body and labels) into one job.
 2. `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md`/`README.md` in the repo, and, with Grep
    and Glob, the files each issue names or obviously touches. Do not read more than you need to
    place an issue.
@@ -45,7 +47,12 @@ Bundle issues into **one job** only when all of this holds:
   differently);
 - they stay within `Bundle max` from your prompt.
 One failing review holds up every issue in the bundle, so when in doubt keep an issue alone. An
-issue with the label `factory:solo` is always alone (the script enforces it). A label
+issue with the label `factory:solo` is always alone (the script enforces it).
+
+A **bundle issue** is already one job: put it in a group of its own (`"issues": [<bundle nr>]`,
+never with other candidates and never its members' numbers, which are not candidates) and give
+it the effort of its heaviest member. Skip it only when a member is not buildable as written;
+the script starts it anyway (the owner's grouping), with your reason as a note. A label
 `factory:docs|light|full` is the owner's choice of effort and wins over yours.
 
 ## Write the plan

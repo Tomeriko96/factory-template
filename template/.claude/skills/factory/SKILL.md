@@ -49,7 +49,8 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   is optional: when set, only issues with that label count (older configs have
   `factory:ready`; leave it out to take all). Labels that steer a single issue:
   `factory:docs|light|full` (the effort, wins over the triage), `factory:solo` (never
-  bundled). `limits.bundle_max` (default 4) is the most issues in one `docs`/`light` job
+  bundled), `factory:bundle` (a bundle issue: one job for it and its members, see **Bundle
+  issues**). `limits.bundle_max` (default 4) is the most issues in one `docs`/`light` job
   (a `full` job takes at most `limits.full_bundle_max`, default 2). `issues.link` is the keyword that
   references the issue in PR/MR bodies: `Closes` (closes it on merge) or `Refs` (link
   only; required when merge commits are mirrored to another forge, where `Closes #N`
@@ -306,11 +307,17 @@ related issues become a few jobs instead of many, each with the effort it deserv
    starts, or `WAIT`s in the queue), then drive it (see **Job state**). Several groups together
    only when their files are unlikely to overlap, as with any parallel jobs.
 
-A job from a bundle carries all its issue numbers (`"issues": [..]`, `"issue"` is the first).
+A job from a bundle carries all its issue numbers (`"issues": [..]`, `"issue"` is the first; for a
+bundle issue: the bundle issue first, then its members).
 Without `config.issues`, take the first unchecked item (`- [ ]`) in `.factory/backlog.md`,
 check it (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
 ### `/factory issue <nr> [<nr>…] [--docs|--light] [--force]`
+One number of a **bundle issue** (label `factory:bundle`) works like several numbers: `triage
+prepare … --no-agent`, then `.factory/job triage bundle <docs|light|full> <bundle nr>` starts the
+bundle and its open members as one job (the effort is raised by any member's label). A member
+number on its own is refused (`in bundle #N`): start the bundle, or remove the issue from it.
+
 Several numbers = **one job for all of them** (a bundle you chose yourself): `mkdir -p
 .factory/run/triage`, fetch the open issues as for `next`, `.factory/job triage prepare
 .factory/run/triage/raw.json --no-agent` (the filter, no triage agent), then `.factory/job triage bundle
@@ -447,6 +454,25 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
   (add `--label <issues.label>` only when that is set). Use `iid`, not `id`.
 
 `feature` = `#<nr> <title>` + blank line + body + allowed comments.
+
+### Bundle issues
+The owner can group small modular issues under a **bundle issue**: an issue with the label
+`factory:bundle` whose description lists its members as a checklist, one per line, same
+project: `- [ ] #123` (or `- [x] #123`; `*`/`+` bullets and text after the number are fine).
+Members are also taken from the forge when it ties issues to the bundle: GitHub sub-issues
+(`gh api repos/{owner}/{repo}/issues/<nr>/sub_issues`) and GitLab issue links
+(`glab api projects/:id/issues/<iid>/links`, any link type such as `relates_to`). `triage prepare`
+reads those itself (forge CLI logged in; otherwise a NOTE says only the checklist counts). Only a
+bundle issue by an allowed author counts. Each member passes the same filter as any issue (open,
+allowed author, skip labels, no job/PR/commit); left out with a `NOTE: bundle #N: #M left out: …`
+line: closed or unknown members, untrusted authors, other projects, nested bundles and
+`factory:solo` members (those stay their own candidates). Members are `SKIPPED: … in bundle #N`
+as single issues. A bundle is always **one job** with `"issues": [bundle, members…]`: never split
+or mixed with other issues, effort = the highest of the triage and the labels of the bundle and its
+members (the floor rules still apply), not capped by `bundle_max` (a NOTE warns above it), and
+started even when the triage agent would skip it. Delivery and closing treat it like any bundle: the
+PR/MR body gets `<issues.link> #<nr>` for the bundle issue and every member, and `close_on_merge`
+closes them all. A bundle without open members is skipped (close it).
 
 ### Triage
 `/factory next` does not take issues one by one. `.factory/job triage prepare` removes what must not

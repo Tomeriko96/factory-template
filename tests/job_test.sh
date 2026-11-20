@@ -779,6 +779,27 @@ FACTORY_LOCK_DIR="$T/hlocks" FACTORY_CPU_MAX=100 timeout 20 "$H" --priority low 
 missing "$T/hlocks/waiter-999999999.json"
 FACTORY_LOCK_DIR="$T/hlocks" "$H" --priority urgent -- true 2>/dev/null && bad "--priority urgent accepted" || ok
 
+# ---------- heavy: the last line is always `heavy: exit=<n> log=<path>`, also on a refusal ----------
+scenario=heavy-result
+(
+  export FACTORY_LOCK_DIR="$T/hres" FACTORY_HEAVY_SLOTS=1 FACTORY_CPU_MAX=100
+  mkdir -p "$T/hres"
+  "$H" -- bash -c 'echo hello; exit 3' > "$T/hr1" 2>&1; echo $? > "$T/hr1.rc"
+  "$H" -- no-such-command-zq > "$T/hr2" 2>&1; echo $? > "$T/hr2.rc"
+  "$H" -- sleep 3 2>/dev/null &
+  for _ in $(seq 50); do "$H" status | grep -q "slot 0:" && break; sleep 0.1; done
+  "$H" --wait-max 1 -- true > "$T/hr3" 2>&1; echo $? > "$T/hr3.rc"
+  wait
+)
+for k in 1:3 2:127 3:75; do
+  f="$T/hr${k%%:*}"; want="${k##*:}"
+  [ "$(cat "$f.rc")" = "$want" ] && ok || bad "run ${k%%:*}: exit $(cat "$f.rc"), want $want"
+  last="$(tail -1 "$f")"; [[ "$last" == "heavy: exit=$want log=/"* ]] && ok || bad "run ${k%%:*}: last line '$last'"
+  log="${last##*log=}"; exists "$log"
+done
+has "$(cat "${last##*log=}")" "did NOT run"
+has "$(cat "$(tail -1 "$T/hr1" | sed 's/.*log=//')")" "hello"
+
 # ---------- heavy: FIFO within a priority, so a big waiter is not starved by newer small ones ----------
 scenario=heavy-fifo
 (

@@ -24,13 +24,13 @@ for line in open(CASES):
     want, cmd = line[0], line[2:]
     total += 1
     try:
-        why = guard.stash_reason(cmd) or guard.heavy_reason(cmd)
+        why = guard.refusal(cmd)
     except Exception as e:  # the hook allows on errors; a crash here is a bug either way
         why = None
         print(f"CRASH {cmd!r}: {e!r}")
     got = "R" if why else "A"
     if got != want:
         bad += 1
-        print(f"want {want} got {got}: {cmd}" + (f"   ({why})" if why else ""))
+        print(f"want {want} got {got}: {cmd}" + (f"   ({why.splitlines()[0][:160]})" if why else ""))
 print(f"{total - bad}/{total} ok")
 sys.exit(1 if bad else 0)

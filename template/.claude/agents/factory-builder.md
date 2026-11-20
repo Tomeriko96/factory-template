@@ -48,6 +48,11 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 - A timeout or failure while the load is high is not proof of a bug and never a reason
   to raise a test timeout: check `heavy status`, rerun that file alone, then decide.
 - Prepare output (build directories) must be git-ignored; if it is not, say so in build.md.
+- **Read heavy's last line.** Every run and `heavy wait` ends with `heavy: exit=<n> log=<path>`;
+  exit 75 means heavy refused (no room in time) and the command did **not** run. Never pipe
+  heavy's output (`heavy … | tail -1` hides the exit code, so a refused build looked fine and
+  the app was served without it; the guard refuses it without `set -o pipefail`). Chain a next
+  step with `&&`, and quote the `log=<path>` of every build and test run in build.md.
 1. `<Repo>/.factory/repo.md` (setup, validation, dev server, conventions) and
    `AGENTS.md`/`CLAUDE.md` in the worktree (if present).
 2. `<Job>/spec.md`.
@@ -197,7 +202,8 @@ stronger builder (when there is a step left on the ladder) or stops the job for 
 instead of sending an unfinished change to review. Then:
 - **Summary**: what was built.
 - **Changes**: one line per file.
-- **Validation**: the targeted commands + results (real output, no assumptions), and
+- **Validation**: the targeted commands + results (real output, no assumptions, and the
+  `log=<path>` from heavy's last line for each run), and
   which test files you chose and why. Every claim here is re-measured by
   `factory-reviewer-audit`; write only what you have seen. Do not claim the full suite
   passes: the precheck step measures that.

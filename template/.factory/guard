@@ -303,6 +303,97 @@ def stash_reason(cmd):
     return "git stash" if STASH.search(HEREDOC.sub("", cmd)) else None
 
 
+# `heavy … | tail -1` hides heavy's exit code (and a refusal: "no room", the command did not
+# run) behind the exit code of the last command in the pipe. Seen in practice: a build that was
+# refused, then `serve start` served the app without it. Allowed with `set -o pipefail`.
+PIPEFAIL = re.compile(r"\bset\s+(?:-[a-zA-Z]+\s+)*(?:-o\s+pipefail|-[a-zA-Z]*o\s+pipefail)\b")
+
+
+def pipe_parts(cmd):
+    """[(segment, piped)] split like segments(); piped = the segment's output goes into a `|`."""
+    out, cur, quote, i = [], [], None, 0
+    while i < len(cmd):
+        c = cmd[i]
+        if quote:
+            cur.append(c)
+            if c == "\\" and quote == '"' and i + 1 < len(cmd):
+                cur.append(cmd[i + 1])
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+            cur.append(c)
+        elif c == "\\" and i + 1 < len(cmd):
+            cur.append(c + cmd[i + 1])
+            i += 1
+        elif c == "&" and ((cur and cur[-1] in "<>") or cmd[i + 1:i + 2] == ">"):
+            cur.append(c)   # a redirection (2>&1, &>file), not a separator
+        elif c == "|" and cmd[i + 1:i + 2] == "&":
+            out.append(("".join(cur), True))   # |& pipes stdout and stderr
+            i += 1
+        elif c == "|" and cmd[i + 1:i + 2] == "|":
+            out.append(("".join(cur), False))
+            cur = []
+            i += 1
+        elif c in ";&|()`\n":
+            out.append(("".join(cur), c == "|"))
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    out.append(("".join(cur), False))
+    return [(s.strip(), p) for s, p in out if s.strip()]
+
+
+def pipe_reason(cmd, depth=0):
+    """A heavy run whose output is piped (`heavy … | tail`) without `set -o pipefail`, else None."""
+    cmd = HEREDOC.sub("", cmd)
+    if depth > 4 or PIPEFAIL.search(cmd):
+        return None
+    for seg, piped in pipe_parts(cmd):
+        w = unwrap(words(seg))
+        if not w:
+            continue
+        if base(w[0]) in SHELLS:
+            for i, a in enumerate(w[1:]):
+                if re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", a) and i + 2 < len(w):
+                    why = pipe_reason(w[i + 2], depth + 1)
+                    if why:
+                        return why
+        if piped and base(w[0]) == "heavy" and (len(w) < 2 or w[1] not in ("status", "gate", "clean")):
+            return seg
+    return None
+
+
+def refusal(cmd):
+    """The message for the agent when `cmd` is refused, else None."""
+    if stash_reason(cmd):
+        return ("factory guard: `git stash` is refused. The stash stack is shared by every worktree of "
+                "this clone, so parallel jobs swap each other's changes. To run code without your "
+                "change (e.g. to show a test fails on the base), check the base out separately:\n"
+                "  git worktree add --detach \"$TMPDIR/base-$$\" HEAD   (or the base commit)\n"
+                "run the test there, then `git worktree remove --force` it; or read a file with "
+                "`git show <base>:<path>`. To set work aside, make a WIP commit on your own branch.\n")
+    piped = pipe_reason(cmd)
+    if piped:
+        return (f"factory guard: `{piped} | …` hides heavy's exit code: when heavy refuses (no room, the "
+                "command did NOT run) or the command fails, the pipe still succeeds and the next step "
+                "runs on a missing result. Do not pipe heavy's output. heavy's last line is always "
+                "`heavy: exit=<n> log=<path>`: run it unpiped and read the log, or start the command "
+                "with `set -o pipefail; ` so the pipe keeps the exit code, and chain the next step with `&&`, e.g.\n"
+                f"  set -o pipefail; {cmd.strip()}\n")
+    what = heavy_reason(cmd)
+    if what:
+        return (f"factory guard: `{what}` is a heavy command and must go through the limiter, "
+                f"or parallel jobs overload the machine. Run it from the worktree root as\n"
+                f"  {HERE}/heavy [--cache] -- <command>\n"
+                f"(a compound command as `bash -c '…'`). For a command that may take long use "
+                f"`heavy --background -- <command>` and then `heavy wait <ticket>`. Do not work "
+                f"around this.\n")
+    return None
+
+
 def main():
     try:
         with open(os.path.join(HERE, "config.json")) as f:
@@ -315,27 +406,11 @@ def main():
         if "--subagents-only" in sys.argv and not (data.get("agent_id") or data.get("agent_type")):
             return 0
         cmd = (data.get("tool_input") or {}).get("command") or ""
-        stash = stash_reason(cmd)
-        what = None if stash else heavy_reason(cmd)
+        msg = refusal(cmd)
     except Exception:
         return 0
-    if stash:
-        sys.stderr.write(
-            "factory guard: `git stash` is refused. The stash stack is shared by every worktree of "
-            "this clone, so parallel jobs swap each other's changes. To run code without your "
-            "change (e.g. to show a test fails on the base), check the base out separately:\n"
-            "  git worktree add --detach \"$TMPDIR/base-$$\" HEAD   (or the base commit)\n"
-            "run the test there, then `git worktree remove --force` it; or read a file with "
-            "`git show <base>:<path>`. To set work aside, make a WIP commit on your own branch.\n")
-        return 2
-    if what:
-        sys.stderr.write(
-            f"factory guard: `{what}` is a heavy command and must go through the limiter, "
-            f"or parallel jobs overload the machine. Run it from the worktree root as\n"
-            f"  {HERE}/heavy [--cache] -- <command>\n"
-            f"(a compound command as `bash -c '…'`). For a command that may take long use "
-            f"`heavy --background -- <command>` and then `heavy wait <ticket>`. Do not work "
-            f"around this.\n")
+    if msg:
+        sys.stderr.write(msg)
         return 2
     return 0
 

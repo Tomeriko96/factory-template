@@ -17,7 +17,10 @@ run:    waits until the machine has room, then runs <command> at low priority in
         one second, not the lagging load average). The command sees FACTORY_CPUS = its
         weight: pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
         Foreground waits at most --wait-max (default 540s, inside a tool call's timeout);
-        exit 75 = no room in time: use --background.
+        exit 75 = no room in time (the command did NOT run): use --background.
+        The last line of every run and `wait` is `heavy: exit=<n> log=<path>`, also on a
+        refusal: the output is kept in .factory/run/heavy-run-*.log (a day). Do not pipe
+        heavy's output (`| tail` hides the exit code; the guard refuses it without pipefail).
 --priority  high, normal (default) or low; env FACTORY_HEAVY_PRIORITY. A waiting command only
         takes a free slot when no command of a higher priority, and no command of the same
         priority that queued earlier, is waiting for one (FIFO within a priority, so freed
@@ -100,8 +103,39 @@ def lock_dir():
     return d
 
 
+RESULT_LOG = None   # the log `heavy: exit=<n> log=<path>` points to (set by cmd_run)
+
+
 def say(msg):
     print(f"heavy: {msg}", file=sys.stderr, flush=True)
+
+
+def refuse(msg, rc):
+    """A run that did not happen: the reason goes to stderr and into the run log."""
+    say(msg)
+    if RESULT_LOG:
+        try:
+            with open(RESULT_LOG, "a") as f:
+                f.write(f"heavy: {msg}\n")
+        except OSError:
+            pass
+    return rc
+
+
+def drop_stdout():
+    """The reader of our stdout went away (`| head`): send the rest to /dev/null, quietly."""
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except OSError:
+        pass
+
+
+def result_line(rc, log):
+    """The last line of every run and wait, so `… | tail -1` never hides a refusal."""
+    try:
+        print(f"heavy: exit={rc} log={log or '-'}", flush=True)
+    except (BrokenPipeError, OSError):
+        drop_stdout()
 
 
 def load1():
@@ -357,19 +391,23 @@ def cmd_wait(argv):
         rec = read_json(ticket_path(tid))
         if not rec:
             say(f"unknown ticket {tid}")
+            result_line(2, None)
             return 2
         if rec.get("state") == "done":
             sys.stdout.write(tail(rec["log"], 40))
             say(f"ticket {tid} finished, exit {rec.get('rc')}")
+            result_line(int(rec.get("rc", 1)), rec["log"])
             return int(rec.get("rc", 1))
         if rec.get("pid") and not alive(rec["pid"]):
             sys.stdout.write(tail(rec["log"], 40))
             say(f"ticket {tid}: the process died without a result")
+            result_line(1, rec["log"])
             return 1
         if time.time() > end:
             age = int(time.time() - rec.get("created", time.time()))
             sys.stdout.write(tail(rec["log"], 5))
             say(f"ticket {tid} is still {rec.get('state')} after {age}s; call `heavy wait {tid}` again")
+            result_line(124, rec["log"])
             return 124
         time.sleep(2)
 
@@ -580,8 +618,23 @@ def cmd_run(argv):
             return 127
         rc = subprocess.call(command)
         return 128 - rc if rc < 0 else rc
+    global RESULT_LOG
     shown = label or " ".join(command)
     ticket = os.environ.get("HEAVY_TICKET")
+    if ticket:   # a --background run: stdout already is the ticket's log
+        RESULT_LOG = read_json(ticket_path(ticket)).get("log")
+    else:
+        rd = run_dir()
+        for name in os.listdir(rd):   # keep the run logs of the last day
+            q = os.path.join(rd, name)
+            if name.startswith("heavy-run-") and time.time() - os.path.getmtime(q) > 86400:
+                try:
+                    os.remove(q)
+                except OSError:
+                    pass
+        RESULT_LOG = os.path.join(rd, f"heavy-run-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}.log")
+        with open(RESULT_LOG, "w") as f:
+            f.write(f"$ {' '.join(command)}\n(cwd {os.getcwd()})\n")
     wait_max = wait_max if wait_max is not None else (BACKGROUND_WAIT if ticket else FOREGROUND_WAIT)
     weight = weight if weight is not None else auto_weight(command)
 
@@ -597,18 +650,23 @@ def cmd_run(argv):
                 say(f"CACHE HIT: this command already passed on tree {tree[:12]} at {rec['finished']} "
                     f"({rec['seconds']}s). Nothing was run. Full log: {rec['log']}. Last lines:")
                 sys.stdout.write(tail(rec["log"], 15))
+                if not ticket:
+                    try:
+                        os.remove(RESULT_LOG)
+                    except OSError:
+                        pass
+                    RESULT_LOG = rec["log"]
                 return 0
 
     if not shutil.which(command[0]):
-        say(f"cannot run {command[0]}: command not found")
-        return 127
+        return refuse(f"cannot run {command[0]}: command not found", 127)
     deadline = time.time() + wait_max  # one budget for both waits, not wait_max each
     if not wait_until_calm(lim, wait_max):
         say(f"CPU still above {lim['cpu_max']:.0f}% after {wait_max}s; asking for a slot anyway")
     lock = take_slot(lim, weight, max(0, deadline - time.time()), shown, priority)
     if lock is None:
-        say(f"no room within {wait_max}s; run it with --background and `heavy wait <ticket>`")
-        return 75
+        return refuse(f"no room within {wait_max}s; the command did NOT run. Run it with --background "
+                      "and `heavy wait <ticket>`", 75)
     if ticket:
         update_ticket(ticket, state="running", started=time.time())
 
@@ -617,10 +675,8 @@ def cmd_run(argv):
     env.pop("HEAVY_TICKET", None)
     prefix = ["ionice", "-c2", "-n7"] if shutil.which("ionice") else []
     started = time.time()
-    log = None
-    if key:
-        os.makedirs(cache, exist_ok=True)
-        log = open(os.path.join(cache, key + ".log"), "w")
+    # Output goes to stdout and into the run log (a --background run: stdout is the log already)
+    log = None if ticket else open(RESULT_LOG, "a")
 
     def child_setup():
         os.nice(10)
@@ -638,8 +694,9 @@ def cmd_run(argv):
                                 stdout=subprocess.PIPE if log else None,
                                 stderr=subprocess.STDOUT if log else None)
     except OSError as e:
-        say(f"cannot run {command[0]}: {e}")
-        return 127
+        if log:
+            log.close()
+        return refuse(f"cannot run {command[0]}: {e}", 127)
 
     def forward(sig, _frame):
         try:
@@ -650,9 +707,15 @@ def cmd_run(argv):
         signal.signal(s, forward)
 
     if log:
+        tty_ok = True
         for chunk in iter(lambda: proc.stdout.read1(65536), b""):
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
+            if tty_ok:
+                try:
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                except (BrokenPipeError, OSError):
+                    tty_ok = False   # the reader went away (`| head`); keep logging
+                    drop_stdout()
             log.write(chunk.decode(errors="replace"))
         log.close()
     rc = proc.wait()
@@ -664,13 +727,16 @@ def cmd_run(argv):
     if left:
         say(f"stopped {left} process(es) the command left running")
     if key and rc == 0:
+        os.makedirs(cache, exist_ok=True)
+        if RESULT_LOG and os.path.exists(RESULT_LOG):
+            shutil.copyfile(RESULT_LOG, os.path.join(cache, key + ".log"))
+        else:
+            open(os.path.join(cache, key + ".log"), "w").close()
         rec = {"cmd": command, "tree": tree, "cwd": os.getcwd(), "exit": 0,
                "finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "seconds": int(time.time() - started),
                "log": os.path.join(cache, key + ".log")}
         with open(os.path.join(cache, key + ".json"), "w") as f:
             json.dump(rec, f)
-    elif key:
-        os.remove(os.path.join(cache, key + ".log"))
     return rc
 
 
@@ -686,10 +752,13 @@ def main():
     if "--background" in head:
         argv.remove("--background")
         return cmd_background(argv)
+    nested = os.environ.get("FACTORY_HEAVY") == "1"
     rc = cmd_run(argv)
     tid = os.environ.get("HEAVY_TICKET")
     if tid:
         update_ticket(tid, state="done", rc=rc, finished=time.time())
+    if not nested:
+        result_line(rc, RESULT_LOG)
     return rc
 
 

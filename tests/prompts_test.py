@@ -179,6 +179,14 @@ check("trap" in (section(texts.get("reviewer-audit", ""), "Hidden acceptance tes
 check("Never open" in (section(texts.get("builder", ""), "Hidden acceptance tests") or ""), "builder: may read the hidden tests")
 check("acceptance_tests" in SKILL and "factory-acceptance-writer" in SKILL, "SKILL.md: acceptance tests not documented")
 
+# heavy's result line: printed by heavy, refused-when-piped by the guard, quoted by the builder
+HEAVY_SRC = open(os.path.join(T, ".factory", "heavy")).read()
+GUARD_SRC = open(os.path.join(T, ".factory", "guard")).read()
+check("heavy: exit={rc} log=" in HEAVY_SRC and "heavy: exit=<n> log=<path>" in texts.get("builder", "")
+      and "pipefail" in GUARD_SRC and "log=<path>" in (section(texts.get("builder", ""), "What `round-N/build.md` holds "
+                                                        "(written last: see the final section)") or ""),
+      "heavy result line: not printed by heavy, guarded, or quoted in build.md")
+
 # Every agent's output file is its last, explicit step (an approver once gave MERGE only in its reply)
 for n, t in texts.items():
     last = re.findall(r"^## (.+)$", re.sub(r"```.*?```", "", t, flags=re.S), re.M)

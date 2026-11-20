@@ -35,6 +35,11 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job rework <id> [--untrusted] "<note>"
   job sync <id>                       start (or continue) a base merge of a pr-open job
   job sync-done <id>                  the synced branch is pushed
+  job adopt <pr|mr nr>                adopt an open PR/MR made outside the factory (allowed author, same
+                                      repo): a minimal pr-open job on its own branch, only so its merge
+                                      conflicts can be patched (job sync: merge, targeted tests, push)
+  job adoptable                       open PRs/MRs by allowed authors with a merge conflict and no job
+                                      (config adopt_conflicting: true adopts them)
   job fail <id> "<reason>"            -> needs-human
   job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
@@ -81,6 +86,9 @@ MODELS = ("haiku", "sonnet", "opus")
 BUILDER_EFFORT = {"full": "high", "light": "medium", "docs": "low"}
 BLOCKED_RETRIES = 1
 # A resume prompt starts with RESUME_HEAD (cheap: write the file from the earlier conclusion)
+ADOPTED_SYNC = ("\nAdopted PR/MR #{nr} ({url}), made outside the factory: a merge-conflict patch only. "
+                "Merge the base in and resolve the conflicts as below, then run only the tests that cover the "
+                "conflicted files, through heavy (targeted: no full validation). Change nothing beyond the merge.")
 RESUME_HEAD = ("Your previous run gave its verdict but wrote no {file}; write it now from your previous "
                "conclusion, do not redo the {what}.")
 RESUME_NOTE = ("This is a resume: your previous run ended without writing its output file. "
@@ -372,7 +380,7 @@ def room(job, jobs, prs_count=True):
     act = [j for j in others if j.get("stage") in ACTIVE or j.get("syncing")]
     if len(act) >= lim["active"]:
         return f"{len(act)}/{lim['active']} jobs active ({', '.join(j['id'] for j in act)})"
-    prs = [j for j in others if j.get("stage") == "pr-open"]
+    prs = [j for j in others if j.get("stage") == "pr-open" and not j.get("adopted")]
     if prs_count and lim["open_prs"] and not job.get("pr_url") and len(prs) >= lim["open_prs"]:
         return f"{len(prs)}/{lim['open_prs']} PRs/MRs open"
     return None
@@ -657,6 +665,10 @@ def auto_merge_gate(job):
     if mode != "pr" or not d.get("auto_merge") or d.get("draft", True):
         return None
     jd, why = jdir(job["id"]), []
+    if job.get("adopted"):   # made outside the factory: only the conflict patch counts
+        if sync_conflicts(job) > 0:
+            why.append("an agent resolved merge conflicts with the base (sync); a human merges")
+        return (not why), why
     docs = job.get("mode") == "docs"
     if job.get("approved_by"):
         why.append("approved by hand (/factory approve), no approver pass")
@@ -713,6 +725,12 @@ def step(job, out, start=None):
     jd = jdir(job["id"])
     for _ in range(16):
         s = job.get("stage")
+        if job.get("adopted") and s not in AT_REST:
+            set_stage(job, "needs-human", f"adopted PR/MR: the factory only patches its merge conflicts "
+                                          f"(.factory/job sync {job['id']}), it never builds or reviews it")
+            continue
+        if s == "pr-open" and job.get("adopted") and not job.get("syncing"):
+            return adopted_check(job, out)
         if s == "queued":
             why = room(job, all_jobs())
             if why:
@@ -726,7 +744,10 @@ def step(job, out, start=None):
             out.main.append(f"DONE: {s}" + (f": {job['reason']}" if job.get("reason") else ""))
             if s != start and s in ("needs-human", "superseded"):
                 cleanup(job, out, remove_worktree=(s == "superseded"))
-            hint = {"needs-human": (f"/factory rework {job['id']} \"<note>\" (its PR/MR stays open), or fix it by hand"
+            hint = {"needs-human": (f".factory/job sync {job['id']} patches the conflict again, or fix it by hand; "
+                                    f".factory/job drop {job['id']} forgets the adoption (the PR/MR stays)"
+                                    if job.get("adopted") else
+                                    f"/factory rework {job['id']} \"<note>\" (its PR/MR stays open), or fix it by hand"
                                     if job.get("pr_url") else
                                     f"/factory approve {job['id']} or /factory rework {job['id']} \"<note>\""
                                     if int(job.get("round") or 0) else
@@ -951,6 +972,8 @@ def sync_step(job, out, start):
     b = os.path.join(jd, f"sync-{n}", "build.md")
     if not os.path.exists(b):
         prompt = paths(job) + f"Sync {n}. Port: {job['port']}. Mode: {job.get('mode')}."
+        if job.get("adopted"):
+            prompt += ADOPTED_SYNC.format(nr=job.get("pr_number"), url=job.get("pr_url"))
         return spawn(job, out, f"sync-{n}", [("factory-builder", "sonnet", prompt, f"sync-{n}/build.md")])
     fl = first_line(b) or ""
     if (job.get("pending") or {}).get("key") == f"sync-{n}":
@@ -971,6 +994,9 @@ def sync_step(job, out, start):
         if had and not claimed:
             out.notes.append(f"NOTE: sync {n}: build.md says CLEAN but the merge had conflicts (git merge-tree); counted as resolved")
     r = os.path.join(jd, f"sync-{n}", "review-code.md")
+    if job.get("adopted"):
+        job.pop("pending", None)
+        return sync_push(job, out, n)
     if not os.path.exists(r):
         prompt = (paths(job) + f"Review sync {n}. Port: {job['port']}.\nYou must write sync-{n}/review-code.md "
                   "(first line VERDICT: PASS|CHANGES); it is required and part of your task.")
@@ -982,11 +1008,17 @@ def sync_step(job, out, start):
         job.pop("syncing", None)
         set_stage(job, "needs-human", f"sync {n}: the code review of the merge has blocking findings (see sync-{n}/review-code.md)")
         return step(job, out, start)
+    return sync_push(job, out, n)
+
+
+def sync_push(job, out, n):
     gate = auto_merge_gate(job)
     if gate is not None:
         job["auto_merge"] = {"allowed": gate[0], "reasons": gate[1]}
     out.main += ["ACTION: push", f"SYNC: {'conflicts resolved by an agent' if job['syncing']['conflicts'] else 'clean (no conflicts)'}"]
-    if gate is not None:
+    if gate is not None and gate[0] and job.get("adopted"):
+        out.main.append("AUTO-MERGE: keep: an adopted PR/MR; leave its auto-merge setting as it is")
+    elif gate is not None:
         out.main.append("AUTO-MERGE: yes: after the push switch auto-merge on again (the forge may drop it on a new "
                         "push) and verify it" if gate[0] else
                         "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): switch auto-merge off before the push")
@@ -1295,6 +1327,8 @@ def cmd_approve(args):
     def fn(job, out):
         if job.get("stage") != "needs-human":
             raise Fail(f"{job['id']} is at {job.get('stage')}: approve is only for needs-human")
+        if job.get("adopted"):
+            raise Fail(f"{job['id']} is an adopted PR/MR: nothing to approve (job sync patches a conflict)")
         job.pop("syncing", None)
         job["approved_by"] = "user"
         job["pr_text"] = None
@@ -1315,6 +1349,8 @@ def cmd_rework(args):
             raise Fail(f"{jid} is at {job.get('stage')}: rework is for needs-human, pushed or pr-open jobs")
         if job.get("syncing"):
             raise Fail(f"{jid} is being synced; finish that first")
+        if job.get("adopted"):
+            raise Fail(f"{jid} is an adopted PR/MR: the factory only patches its merge conflicts (job sync)")
         jd, n = jdir(jid), int(job.get("round") or 0)
         if os.path.exists(os.path.join(jd, "decision.md")):
             os.makedirs(os.path.join(jd, f"round-{n}"), exist_ok=True)
@@ -1341,6 +1377,8 @@ def cmd_rework(args):
 
 def cmd_sync(args):
     def fn(job, out):
+        if job.get("adopted") and job.get("stage") == "needs-human":
+            set_stage(job, "pr-open")   # an adopted PR/MR: try the conflict patch again
         if job.get("stage") != "pr-open":
             raise Fail(f"{job['id']} is at {job.get('stage')}: sync is for pr-open jobs")
         if not job.get("syncing"):
@@ -1397,10 +1435,12 @@ def cmd_drop(args):
     reason = " ".join(args[1:]).strip()[:300]
 
     def fn(job, out):
-        if job.get("stage") not in ("needs-human", "queued"):
+        if job.get("adopted") and job.get("stage") == "pr-open" and not job.get("syncing"):
+            pass   # forgetting an adoption leaves the PR/MR and its branch as they are
+        elif job.get("stage") not in ("needs-human", "queued"):
             raise Fail(f"{job['id']} is at {job.get('stage')}: only a needs-human or queued job can be dropped "
                        "(a running one: `job fail` it first)")
-        if job.get("pr_url"):
+        if job.get("pr_url") and not job.get("adopted"):
             raise Fail(f"{job['id']} has an open PR/MR ({job['pr_url']}): close it on the forge first")
         start = job.get("stage")
         job.pop("syncing", None)
@@ -1551,6 +1591,234 @@ def cmd_report(args):
     for k, m in data["modes"].items():
         per = ", ".join(f"{a} {c:g}" for a, c in m["runs_per_job"].items())
         out.main.append(f"  {k:<6} {m['jobs']} job{'s' if m['jobs'] != 1 else ''}: {per or '-'}")
+    return out
+
+
+# ---------- adopt: open PRs/MRs made outside the factory ----------
+# Merge conflicts are fixed through the factory, also on a PR/MR it did not make. An adopted
+# PR/MR gets a minimal job at pr-open on its own branch (never renamed); the only thing the
+# factory ever does with it is the conflict patch of `job sync`: merge the base in, resolve,
+# run the tests that cover the conflicted files, push to the same branch (never force).
+
+CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?[ \t]+(#\d+(?:[ \t]*(?:,|and|&)[ \t]*#\d+)*)", re.I)
+
+
+def closing_issues(text):
+    """Issue numbers a PR/MR description closes: `Closes #1`, `fixes #2, #3`, `Resolves: #4`."""
+    nrs = []
+    for m in CLOSES_RE.finditer(text or ""):
+        for n in re.findall(r"#(\d+)", m.group(1)):
+            if int(n) not in nrs:
+                nrs.append(int(n))
+    return nrs
+
+
+def norm_pr(x):
+    """One PR (gh --json) or MR (GitLab API) as {nr, url, title, body, author, branch, base, fork,
+    state, conflict}; conflict is None while the forge has not worked it out."""
+    if not isinstance(x, dict):
+        return None
+    who = lambda a: str((a.get("login") or a.get("username") or "") if isinstance(a, dict) else a or "")
+    if "iid" in x:   # GitLab
+        dms = str(x.get("detailed_merge_status") or x.get("merge_status") or "").lower()
+        conflict = True if x.get("has_conflicts") or dms in ("conflict", "need_rebase", "cannot_be_merged") else \
+            None if dms in ("checking", "unchecked", "cannot_be_merged_recheck", "") else False
+        return {"nr": x.get("iid"), "url": x.get("web_url"), "title": str(x.get("title") or ""),
+                "body": str(x.get("description") or ""), "author": who(x.get("author")),
+                "branch": x.get("source_branch"), "base": x.get("target_branch"),
+                "fork": x.get("source_project_id") != x.get("target_project_id"),
+                "state": {"opened": "open"}.get(str(x.get("state")), str(x.get("state") or "")), "conflict": conflict}
+    m = str(x.get("mergeable") or "").upper()
+    conflict = True if m == "CONFLICTING" or str(x.get("mergeStateStatus") or "").upper() == "DIRTY" else \
+        None if m in ("UNKNOWN", "") else False
+    return {"nr": x.get("number"), "url": x.get("url"), "title": str(x.get("title") or ""),
+            "body": str(x.get("body") or ""), "author": who(x.get("author")),
+            "branch": x.get("headRefName"), "base": x.get("baseRefName"), "fork": bool(x.get("isCrossRepository")),
+            "state": str(x.get("state") or "").lower(), "conflict": conflict}
+
+
+GH_PR_FIELDS = "number,url,title,body,author,headRefName,baseRefName,isCrossRepository,state,mergeable,mergeStateStatus"
+
+
+def forge_json(cmd):
+    r = run(cmd, timeout=60)
+    if r.returncode == 0:
+        try:
+            return json.loads(r.stdout), None
+        except ValueError:
+            pass
+    return None, ((r.stderr or r.stdout or "").strip().splitlines() or ["no JSON"])[0][:160]
+
+
+def forge_pr(nr):
+    """(pr, error) for PR/MR nr of this repo, from gh or glab."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        x, err = forge_json(["gh", "pr", "view", str(nr), "--json", GH_PR_FIELDS])
+    elif forge == "gitlab" and shutil.which("glab"):
+        x, err = forge_json(["glab", "api", f"projects/:id/merge_requests/{nr}"])
+    else:
+        return None, f"no forge CLI for config.forge {forge!r}"
+    pr = norm_pr(x) if x is not None else None
+    return (pr, None) if pr else (None, err or "not a PR/MR")
+
+
+def forge_open_prs():
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        rows, err = forge_json(["gh", "pr", "list", "--state", "open", "--limit", "100", "--json", GH_PR_FIELDS])
+    elif forge == "gitlab" and shutil.which("glab"):
+        rows, err = forge_json(["glab", "mr", "list", "--per-page", "100", "-F", "json"])
+    else:
+        return [], f"no forge CLI for config.forge {forge!r}"
+    if not isinstance(rows, list):
+        return [], err or "no JSON list"
+    return [p for p in map(norm_pr, rows) if p], None
+
+
+def allowed_authors():
+    return {str(a).lower() for a in (config().get("issues") or {}).get("allowed_authors") or []}
+
+
+def job_of_pr(nr, branch, jobs):
+    """The live job (not merged or superseded) that already has PR/MR nr or its branch."""
+    for j in jobs:
+        if j.get("stage") in ("merged", "superseded"):
+            continue
+        if (j.get("adopted") and j.get("pr_number") == nr) or j.get("branch") == branch:
+            return j
+    return None
+
+
+def why_not_adopt(pr, allowed):
+    if pr["state"] != "open":
+        return f"it is {pr['state'] or 'not open'}"
+    if pr["author"].lower() not in allowed:
+        return f"author {pr['author'] or '?'} is not in issues.allowed_authors"
+    if pr["fork"]:
+        return "it comes from a fork (only branches of this repository are adopted)"
+    if not pr["branch"] or not pr["base"]:
+        return "the forge gave no source or target branch"
+    return None
+
+
+def cmd_adopt(args):
+    try:
+        nr = int(str(args[0]).lstrip("#!"))
+    except ValueError:
+        raise Fail("usage: job adopt <pr|mr number>")
+    allowed = allowed_authors()
+    if not allowed:
+        raise Fail("adopt needs issues.allowed_authors in .factory/config.json (whose PRs/MRs may be adopted)")
+    pr, err = forge_pr(nr)
+    if not pr:
+        raise Fail(f"cannot read PR/MR {nr} from the forge: {err}")
+    why = why_not_adopt(pr, allowed)
+    if why:
+        raise Fail(f"PR/MR {nr} is not adopted: {why}")
+    br, base, rem = pr["branch"], pr["base"], remote()
+    if git("branch", "--show-current") == br:
+        raise Fail(f"{br} is checked out in the main checkout: check out {base} first")
+    out = Out()
+    with Lock():
+        jobs = all_jobs()
+        j = job_of_pr(nr, br, jobs)
+        if j:
+            raise Fail(f"job {j['id']} already has PR/MR {nr} ({br}): .factory/job next {j['id']}")
+        if git("fetch", "--quiet", rem, f"+refs/heads/{br}:refs/remotes/{rem}/{br}", timeout=60) is None:
+            raise Fail(f"cannot fetch {br} from {rem}")
+        if git("rev-parse", "--verify", "--quiet", f"refs/heads/{br}") is None:
+            if git("branch", "--no-track", br, f"refs/remotes/{rem}/{br}") is None:
+                raise Fail(f"cannot create the local branch {br}")
+            out.notes.append(f"NOTE: local branch {br} from {rem}/{br}")
+        else:
+            out.notes.append(f"NOTE: local branch {br} exists; the sync takes what was pushed to {rem}/{br}")
+        n = max([int(x[:3]) for x in os.listdir(JOBS) if ID_RE.match(x)], default=0) + 1
+        jid = f"{n:03d}-{slugify(pr['title'] or br)}"
+        issues = closing_issues(pr["body"])
+        job = {"id": jid, "feature": pr["title"], "mode": "adopted", "adopted": True, "stage": "pr-open",
+               "round": 0, "round_budget": MAX_ROUNDS, "port": int(config().get("port_base") or 5100) + 10 * n,
+               "base": base, "branch": br,
+               "worktree": os.path.join(os.path.dirname(REPO), os.path.basename(REPO) + "-worktrees", jid),
+               "pr_url": pr["url"], "pr_number": nr, "pr_author": pr["author"], "delivery_mode": "pr",
+               "delivery": {"mode": "pr", "at": None, "adopted": now()}, "resumes": 0, "reviews": {},
+               "started": now(), "updated": now(), "round_heads": {}, "issue_closed": None,
+               "history": [{"stage": "pr-open", "at": now(), "event": f"adopted PR/MR {nr} ({br} -> {base})"}],
+               "sync": {"count": 0, "conflicts": 0, "last": None}}
+        if issues:
+            job.update(issue=issues[0], issues=issues)
+        os.makedirs(jdir(jid))
+        out.main.append(f"JOB: {jid}  adopted PR/MR {nr}  branch {br}  base {base}"
+                        + (f"  issues {', '.join('#' + str(i) for i in issues)}" if issues else ""))
+        step(job, out)
+        save(job)
+    return out
+
+
+def adopted_check(job, out):
+    """job next on an adopted PR/MR: ask the forge; a conflict proposes the sync at once."""
+    jid = job["id"]
+    pr, err = forge_pr(job.get("pr_number"))
+    if not pr:
+        out.main += [f"DONE: pr-open (adopted; the forge did not answer: {err})",
+                     f"NEXT: .factory/job next {jid} again later"]
+        return
+    merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
+    job["pr_state"] = dict(job.get("pr_state") or {}, at=now(), merge=merge if pr["state"] == "open" else pr["state"])
+    if pr["state"] == "merged":
+        out.main += ["DONE: pr-open (adopted; the forge says merged)", f"NEXT: .factory/job pr-merged {jid}"]
+    elif pr["state"] != "open":
+        out.main += [f"DONE: pr-open (adopted; the forge says {pr['state']})",
+                     f"NEXT: .factory/job drop {jid} \"PR/MR closed\""]
+    elif pr["conflict"]:
+        out.main += [f"ACTION: sync   (adopted PR/MR {job.get('pr_number')} conflicts with {job['base']})",
+                     f"RUN: .factory/job sync {jid}",
+                     "THEN: drive it: the sync builder merges the base in, resolves the conflicts, runs the "
+                     "tests that cover them; then push to the same branch (never --force) and sync-done"]
+    elif pr["conflict"] is None:
+        out.main += ["DONE: pr-open (adopted; the forge has not worked out mergeability yet)",
+                     f"NEXT: .factory/job next {jid} again in a minute"]
+    else:
+        out.main += ["DONE: pr-open (adopted; no conflict)",
+                     "NEXT: nothing; a later conflict: .factory/job next " + jid]
+
+
+def cmd_adoptable(args):
+    out = Out()
+    allowed = allowed_authors()
+    if not allowed:
+        out.main.append("DONE: nothing adoptable (no issues.allowed_authors in config)")
+        return out
+    prs, err = forge_open_prs()
+    if err:
+        out.main.append(f"DONE: nothing adoptable (the forge did not answer: {err})")
+        return out
+    jobs = all_jobs()
+    cands = [p for p in prs if p["conflict"] and not why_not_adopt(p, allowed) and not job_of_pr(p["nr"], p["branch"], jobs)]
+    try:
+        os.makedirs(os.path.join(HERE, "cache"), exist_ok=True)
+        with open(os.path.join(HERE, "cache", "adoptable.json"), "w") as f:
+            json.dump({"at": now(), "prs": [{k: p[k] for k in ("nr", "title", "branch", "base", "url")} for p in cands]}, f)
+    except OSError:
+        pass
+    if not cands:
+        out.main.append("DONE: nothing adoptable (no conflicting PR/MR by an allowed author without a job)")
+        return out
+    if config().get("adopt_conflicting") is True:
+        texts = []
+        for p in cands:
+            try:
+                texts.append(cmd_adopt([str(p["nr"])]).text())
+            except Fail as e:
+                texts.append(f"NOTE: PR/MR {p['nr']} not adopted: {e}")
+        out.main.append(f"ACTION: adopted {len(cands)} conflicting PR/MR{'s' if len(cands) > 1 else ''} "
+                        "(adopt_conflicting: true); do what each block says")
+        out.main += texts
+        return out
+    out.main.append(f"DONE: {len(cands)} adoptable PR/MR{'s' if len(cands) > 1 else ''} (merge conflict, no job)")
+    out.main += [f"ADOPTABLE: #{p['nr']} {p['branch']} -> {p['base']}  {p['title'][:60]}  {p['url'] or ''}".rstrip()
+                 for p in cands]
+    out.main.append("NEXT: /factory adopt <nr> patches its conflict (config adopt_conflicting: true does it on its own)")
     return out
 
 
@@ -2060,7 +2328,8 @@ def main():
             "delivered": (cmd_delivered, 2), "pr-merged": (cmd_pr_merged, 1), "approve": (cmd_approve, 1),
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
             "fail": (cmd_fail, 2), "drop": (cmd_drop, 1), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
-            "triage": (cmd_triage, 1), "report": (cmd_report, 0)}
+            "triage": (cmd_triage, 1), "report": (cmd_report, 0), "adopt": (cmd_adopt, 1),
+            "adoptable": (cmd_adoptable, 0)}
     try:
         if argv[0] == "show":
             print(cmd_show(argv[1:]))

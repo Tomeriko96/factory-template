@@ -972,6 +972,175 @@ out="$(J next "$AL2")"; has "$out" "AGENT: factory-acceptance-writer"; park "$AL
 AD="$(newjob --mode docs "zq acc docs")"; out="$(J next "$AD")"; lacks "$out" "acceptance-writer"; park "$AD"
 cp "$T/config.acc" .factory/config.json
 
+# ---------- adopt: an open PR/MR made outside the factory, only its merge conflict is patched ----------
+scenario=adopt
+cp .factory/config.json "$T/config.adopt"
+FF="$T/forge-adopt"; mkdir -p "$T/bin" "$FF"; OLDPATH="$PATH"; export PATH="$T/bin:$PATH" FF
+cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$FF/calls"
+case "$1 $2" in
+  "pr view") cat "$FF/pr-$3.json" 2>/dev/null || { echo "no pull requests found for $3" >&2; exit 1; } ;;
+  "pr list") cat "$FF/prs.json" 2>/dev/null || echo '[]' ;;
+  *) echo "fake gh: $*" >&2; exit 1 ;;
+esac
+SH
+cat > "$T/bin/glab" <<'SH'
+#!/usr/bin/env bash
+echo "glab $*" >> "$FF/calls"
+case "$1 $2" in
+  "api projects/:id/merge_requests/"*) cat "$FF/mr-${2##*/}.json" 2>/dev/null || { echo "404 Not Found" >&2; exit 1; } ;;
+  "mr list") cat "$FF/mrs.json" 2>/dev/null || echo '[]' ;;
+  *) echo "fake glab: $*" >&2; exit 1 ;;
+esac
+SH
+chmod +x "$T/bin/gh" "$T/bin/glab"
+python3 - <<'PY'
+import json
+c = json.load(open(".factory/config.json"))
+c["forge"] = "github"; c["issues"] = {"allowed_authors": ["me"]}
+c["delivery"] = {"mode": "pr", "remote": "origin", "draft": False, "auto_merge": True}
+json.dump(c, open(".factory/config.json", "w"))
+PY
+# ghpr <nr> <branch> <author> <mergeable> [fork] [state]: what `gh pr view --json` gives
+ghpr() {
+  python3 - "$@" <<'PY'
+import json, os, sys
+nr, br, who, mg = sys.argv[1:5]
+fork = len(sys.argv) > 5 and sys.argv[5] == "fork"
+state = sys.argv[6] if len(sys.argv) > 6 else "OPEN"
+json.dump({"number": int(nr), "url": f"https://example.test/o/r/pull/{nr}", "title": f"Fix the thing {nr}",
+           "body": "Fixes #5 and #6.\n\nCloses: #7, refs #8, see o/r#9", "author": {"login": who},
+           "headRefName": br, "baseRefName": "main", "isCrossRepository": fork, "state": state,
+           "mergeable": mg, "mergeStateStatus": "DIRTY" if mg == "CONFLICTING" else "CLEAN"},
+          open(f"{os.environ['FF']}/pr-{nr}.json", "w"))
+PY
+}
+# a branch made by hand on the remote that conflicts with main
+git clone -q -b main "$T/origin.git" "$T/hand"
+git -C "$T/hand" checkout -qb feat/682-fix-thing
+echo "print('branch')" > "$T/hand/app.py"; git -C "$T/hand" commit -qam "fix the thing"
+git -C "$T/hand" push -q origin feat/682-fix-thing; TIP="$(git -C "$T/hand" rev-parse HEAD)"
+git -C "$T/hand" checkout -q main; echo "print('main')" > "$T/hand/app.py"; git -C "$T/hand" commit -qam "main moves"
+git -C "$T/hand" push -q origin main
+ghpr 682 feat/682-fix-thing me CONFLICTING
+out="$(J adopt 682)"; first "$out" "JOB: "; has "$out" "adopted PR/MR 682  branch feat/682-fix-thing  base main  issues #5, #6, #7"
+has "$out" "ACTION: sync   (adopted PR/MR 682 conflicts with main)"; lacks "$out" "AGENT:"
+AD="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; has "$out" "RUN: .factory/job sync $AD"
+field "$AD" "j['stage'], j['adopted'], j['mode'], j['branch'], j['base']" "pr-open True adopted feat/682-fix-thing main"
+field "$AD" "j['issues'], j['pr_number'], j['pr_url']" "[5, 6, 7] 682 https://example.test/o/r/pull/682"
+field "$AD" "j['pr_state']['merge']" conflict
+[ "$(git rev-parse feat/682-fix-thing)" = "$TIP" ] && ok || bad "local branch feat/682-fix-thing not made from the remote one"
+[ -z "$(git branch --list 'factory/*' | grep -F "$AD")" ] && ok || bad "a factory/ branch was made for an adopted PR"
+grep -qF "gh pr view 682 --json" "$FF/calls" && ok || bad "PR not read with gh pr view"
+first "$(J adopt 682)" "ERROR: job $AD already has PR/MR 682"
+out="$(J next "$AD")"; first "$out" "ACTION: sync"; lacks "$out" "AGENT:"   # job next proposes the sync, never a build
+# refused: another author, a fork, a closed PR, no PR
+ghpr 683 feat/683 eve CONFLICTING; first "$(J adopt 683)" "ERROR: PR/MR 683 is not adopted: author eve is not in issues.allowed_authors"
+ghpr 684 feat/684 me CONFLICTING fork; first "$(J adopt 684)" "ERROR: PR/MR 684 is not adopted: it comes from a fork"
+ghpr 685 feat/685 me MERGEABLE "" MERGED; first "$(J adopt 685)" "ERROR: PR/MR 685 is not adopted: it is merged"
+first "$(J adopt 999)" "ERROR: cannot read PR/MR 999 from the forge: no pull requests found"
+first "$(J adopt abc)" "ERROR: usage"
+# no build, review or approve steps for an adopted job
+first "$(J rework "$AD" "do more")" "ERROR: $AD is an adopted PR/MR"
+# the sync: a builder with the conflict-patch prompt, no code review, push to the same branch
+out="$(J sync "$AD")"; first "$out" "ACTION: spawn 1 agent"; has "$out" "AGENT: factory-builder"
+has "$out" "Sync 1."; has "$out" "Adopted PR/MR #682 (https://example.test/o/r/pull/682), made outside the factory: a merge-conflict patch only"
+has "$out" "run only the tests that cover the conflicted files, through heavy (targeted: no full validation)"
+has "$out" "Branch: feat/682-fix-thing"; has "$out" "Base: main"
+[ "$(git -C "$(wt "$AD")" branch --show-current)" = feat/682-fix-thing ] && ok || bad "worktree not on the PR branch"
+git -C "$(wt "$AD")" fetch -q origin; git -C "$(wt "$AD")" merge -q --no-edit origin/main >/dev/null 2>&1
+echo "print('both')" > "$(wt "$AD")/app.py"; git -C "$(wt "$AD")" commit -qam "Merge main into feat/682-fix-thing"
+mkdir -p "$(jd "$AD")/sync-1"; printf 'SYNC: RESOLVED\n\napp.py: kept both\n' > "$(jd "$AD")/sync-1/build.md"
+out="$(J next "$AD")"; first "$out" "ACTION: push"; lacks "$out" "factory-reviewer-code"; has "$out" "SYNC: conflicts resolved by an agent"
+has "$out" "AUTO-MERGE: no (an agent resolved merge conflicts with the base (sync); a human merges): switch auto-merge off"
+has "$out" "PUSH: git -C $(wt "$AD") push origin feat/682-fix-thing   (never --force)"; lacks "$out" "push --force"
+git -C "$(wt "$AD")" push -q origin feat/682-fix-thing || bad "push of the adopted branch rejected"
+git -C "$T/origin.git" merge-base --is-ancestor "$TIP" feat/682-fix-thing && ok || bad "the push rewrote the PR branch"
+first "$(J sync-done "$AD")" "DONE: pr-open (sync 1 pushed)"
+field "$AD" "j['sync']['count'], j['sync']['conflicts'], j['stage']" "1 1 pr-open"
+missing "$(wt "$AD")"; [ "$(git rev-parse feat/682-fix-thing)" != "" ] && ok || bad "local branch gone"
+ghpr 682 feat/682-fix-thing me MERGEABLE
+out="$(J next "$AD")"; first "$out" "DONE: pr-open (adopted; no conflict)"; field "$AD" "j['pr_state']['merge']" mergeable
+# a later conflict, merged cleanly by the builder: no code review, auto-merge kept as it is
+git -C "$T/hand" pull -q --ff-only; echo "other" > "$T/hand/other.txt"; git -C "$T/hand" add -A
+git -C "$T/hand" commit -qm "main moves again"; git -C "$T/hand" push -q origin main
+ghpr 682 feat/682-fix-thing me CONFLICTING
+first "$(J next "$AD")" "ACTION: sync"
+out="$(J sync "$AD")"; has "$out" "Sync 2."
+git -C "$(wt "$AD")" fetch -q origin; git -C "$(wt "$AD")" merge -q --no-edit origin/main
+mkdir -p "$(jd "$AD")/sync-2"; echo 'SYNC: CLEAN' > "$(jd "$AD")/sync-2/build.md"
+out="$(J next "$AD")"; first "$out" "ACTION: push"; has "$out" "SYNC: clean (no conflicts)"
+has "$out" "AUTO-MERGE: no (an agent resolved merge conflicts"   # the first sync's resolution still stands
+git -C "$(wt "$AD")" push -q origin feat/682-fix-thing; J sync-done "$AD" >/dev/null
+field "$AD" "j['sync']['count'], j['sync']['conflicts']" "2 1"
+# a sync that needs a human: the adopted job can be synced again from needs-human, never approved
+ghpr 682 feat/682-fix-thing me CONFLICTING
+J sync "$AD" >/dev/null; mkdir -p "$(jd "$AD")/sync-3"; echo 'SYNC: NEEDS-HUMAN both change the greeting' > "$(jd "$AD")/sync-3/build.md"
+out="$(J next "$AD")"; first "$out" "DONE: needs-human: sync 3: the merge needs a decision"; has "$out" "NEXT: .factory/job sync $AD patches the conflict again"
+first "$(J approve "$AD")" "ERROR: $AD is an adopted PR/MR: nothing to approve"
+first "$(J sync "$AD")" "DONE: needs-human: sync limit reached"   # MAX_SYNCS still holds
+first "$(J drop "$AD" "fixed by hand")" "DONE: superseded"
+git rev-parse -q --verify feat/682-fix-thing >/dev/null && ok || bad "drop deleted the adopted branch"
+# a clean first sync of an adopted PR keeps auto-merge as it is (the gate has no approver to ask for)
+git -C "$T/hand" checkout -qb feat/690-clean origin/main 2>/dev/null || git -C "$T/hand" checkout -qb feat/690-clean
+echo "x" > "$T/hand/x.txt"; git -C "$T/hand" add -A; git -C "$T/hand" commit -qm x; git -C "$T/hand" push -q origin feat/690-clean
+git -C "$T/hand" checkout -q main
+ghpr 690 feat/690-clean me CONFLICTING
+AC="$(J adopt 690 | awk '/^JOB:/{print $2; exit}')"; J sync "$AC" >/dev/null
+git -C "$(wt "$AC")" fetch -q origin; git -C "$(wt "$AC")" merge -q --no-edit origin/main
+mkdir -p "$(jd "$AC")/sync-1"; echo 'SYNC: CLEAN' > "$(jd "$AC")/sync-1/build.md"
+out="$(J next "$AC")"; first "$out" "ACTION: push"; has "$out" "AUTO-MERGE: keep: an adopted PR/MR; leave its auto-merge setting as it is"
+J fail "$AC" "test" >/dev/null; J drop "$AC" >/dev/null
+# adoptable: conflicting, allowed author, same repo, no job; adopt_conflicting adopts them
+python3 - <<'PY'
+import json, os
+FF = os.environ["FF"]
+def pr(nr, br, who="me", mg="CONFLICTING", fork=False):
+    return {"number": nr, "url": f"https://example.test/o/r/pull/{nr}", "title": f"PR {nr}", "body": "Resolves #3",
+            "author": {"login": who}, "headRefName": br, "baseRefName": "main", "isCrossRepository": fork,
+            "state": "OPEN", "mergeable": mg}
+rows = [pr(700, "feat/700-a"), pr(701, "feat/701-b", who="eve"), pr(702, "feat/702-c", fork=True),
+        pr(703, "feat/703-d", mg="MERGEABLE"), pr(704, "feat/704-e", mg="UNKNOWN")]
+json.dump(rows, open(f"{FF}/prs.json", "w"))
+json.dump(rows[0], open(f"{FF}/pr-700.json", "w"))
+PY
+git -C "$T/hand" checkout -qb feat/700-a; echo a > "$T/hand/a.txt"; git -C "$T/hand" add -A; git -C "$T/hand" commit -qm a
+git -C "$T/hand" push -q origin feat/700-a; git -C "$T/hand" checkout -q main
+out="$(J adoptable)"; first "$out" "DONE: 1 adoptable PR/MR (merge conflict, no job)"
+has "$out" "ADOPTABLE: #700 feat/700-a -> main  PR 700"; lacks "$out" "#701"; lacks "$out" "#702"; lacks "$out" "#703"; lacks "$out" "#704"
+has "$out" "NEXT: /factory adopt <nr>"; [ -z "$(ls "$R/.factory/jobs" | grep -- '-pr-700$')" ] && ok || bad "adoptable adopted without the config"
+python3 -c "import json; d=json.load(open('$R/.factory/cache/adoptable.json')); assert [p['nr'] for p in d['prs']]==[700]" && ok || bad "adoptable cache"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["adopt_conflicting"]=True; json.dump(c, open(".factory/config.json","w"))'
+out="$(J adoptable)"; first "$out" "ACTION: adopted 1 conflicting PR/MR"; has "$out" "adopted PR/MR 700  branch feat/700-a"
+has "$out" "issues #3"; has "$out" "RUN: .factory/job sync "
+first "$(J adoptable)" "DONE: nothing adoptable"
+A7="$(ls "$R/.factory/jobs" | grep -- '-pr-700$')"; J drop "$A7" >/dev/null
+# GitLab: the MR from the API; a fork is a source project that is not the target project
+python3 - <<'PY'
+import json, os
+FF = os.environ["FF"]
+c = json.load(open(".factory/config.json")); c["forge"] = "gitlab"; c.pop("adopt_conflicting"); json.dump(c, open(".factory/config.json", "w"))
+def mr(iid, br, src=5, who="me", conflicts=True):
+    return {"iid": iid, "web_url": f"https://example.test/g/p/-/merge_requests/{iid}", "title": f"MR {iid}",
+            "description": "Closes #11", "author": {"username": who}, "source_branch": br, "target_branch": "main",
+            "source_project_id": src, "target_project_id": 5, "state": "opened", "has_conflicts": conflicts,
+            "detailed_merge_status": "conflict" if conflicts else "mergeable"}
+json.dump(mr(710, "feat/710-gl"), open(f"{FF}/mr-710.json", "w"))
+json.dump(mr(711, "feat/711-fork", src=9), open(f"{FF}/mr-711.json", "w"))
+json.dump([mr(710, "feat/710-gl"), mr(711, "feat/711-fork", src=9)], open(f"{FF}/mrs.json", "w"))
+PY
+git -C "$T/hand" checkout -qb feat/710-gl; echo g > "$T/hand/g.txt"; git -C "$T/hand" add -A; git -C "$T/hand" commit -qm g
+git -C "$T/hand" push -q origin feat/710-gl; git -C "$T/hand" checkout -q main
+out="$(J adoptable)"; has "$out" "ADOPTABLE: #710 feat/710-gl"; lacks "$out" "#711"
+first "$(J adopt 711)" "ERROR: PR/MR 711 is not adopted: it comes from a fork"
+out="$(J adopt '!710')"; has "$out" "adopted PR/MR 710  branch feat/710-gl  base main  issues #11"; has "$out" "ACTION: sync"
+grep -qF "glab api projects/:id/merge_requests/710" "$FF/calls" && ok || bad "MR not read with glab api"
+G7="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; field "$G7" "j['pr_url']" "https://example.test/g/p/-/merge_requests/710"
+J drop "$G7" >/dev/null
+export PATH="$OLDPATH"
+cp "$T/config.adopt" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

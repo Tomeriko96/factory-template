@@ -29,6 +29,8 @@ the judgement sits in pinned agents):
                                 ones into one job, picks docs/light/full per job, shows the plan, then starts
                                 (without config.issues: the first item of .factory/backlog.md)
 /factory approve|rework|resume|drop|deliver <id>
+/factory adopt <pr|mr nr>       patch the merge conflict of a PR/MR made outside the factory
+                                (allowed author, same repo): merge the target in, targeted tests, push
 /factory status                 or live: .factory/watch [--tmux]   (factory-watch: all repos)
 ```
 
@@ -275,6 +277,28 @@ pushes. A conflict that needs a decision (the base already fixes the same thing,
 sides change the same behaviour, validation fails) is never resolved by picking a side:
 the job goes to `needs-human` with the reason. At most `MAX_SYNCS` (3) times per job.
 `/loop 10m /factory sync` watches continuously.
+
+`/factory adopt <pr|mr nr>` (script: `.factory/job adopt <nr>`): merge conflicts are always
+fixed through the factory, also on a PR/MR it did not make (a branch such as `feat/682-…`).
+The script reads the PR/MR from the forge (`gh pr view`, `glab api
+projects/:id/merge_requests/<iid>`) and refuses one by an author outside
+`issues.allowed_authors`, from a fork, or not open. It records a minimal job at `pr-open`
+(`"adopted": true`, mode `adopted`): branch = the PR's own source branch (fetched into a local
+branch of the same name, never renamed), base = its target branch, `issues` = what the
+description closes (`Closes`/`Fixes`/`Resolves #n`), and the PR/MR as the job's delivery, so the
+board, the CI line and `/factory sync` work on it. An adopted PR/MR only ever gets the
+conflict patch: `job next` asks the forge and, on a conflict, proposes `job sync` at once; the
+sync builder merges the target branch in, resolves the conflicts and runs only the tests that
+cover the conflicted files (targeted, through `heavy`; no full validation), and the merge is
+pushed to the same branch (never force). No spec, acceptance tests, review rounds, approver or
+code review of the merge; `rework` and `approve` are refused. The auto-merge rule is the same:
+after an agent resolved conflicts a human merges (auto-merge off), a clean merge leaves the
+PR/MR's auto-merge setting as it is. A later conflict is patched again (`MAX_SYNCS` still
+holds); `job drop <id>` forgets the adoption and leaves the PR/MR and its branch alone.
+`.factory/job adoptable` lists open PRs/MRs by allowed authors in this repo that have a merge
+conflict and no job (`/factory next` and `status` run it; the board shows them as
+"adoptable"). They are only adopted on their own with `"adopt_conflicting": true` in
+`config.json` (default `false`).
 
 `install` refuses if one of those paths is tracked in the repo, and it verifies
 afterwards with `git check-ignore` that git really ignores them.

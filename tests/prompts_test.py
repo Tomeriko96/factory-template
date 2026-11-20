@@ -59,6 +59,10 @@ check("SYNC: RESOLVED" in texts.get("builder", ""), "builder: sync verdict not d
 check("SYNC: CLEAN" in texts.get("builder", "") and '"SYNC: CLEAN"' in JOB and "SYNC: CLEAN" in SKILL,
       "SYNC: CLEAN (a sync without conflicts) not in builder, job and SKILL.md")
 check("Review sync N" in texts.get("reviewer-code", ""), "reviewer-code: no sync mode")
+check("Adopted PR/MR" in texts.get("builder", "") and "Adopted PR/MR #{nr}" in JOB and "/factory adopt <pr|mr nr>" in SKILL,
+      "adopted PR/MR: the sync builder, job and SKILL.md must describe the conflict-only patch")
+check("run only the tests that cover the " in JOB and "tests that cover" in texts.get("builder", ""),
+      "adopted sync: targeted tests only, in the job prompt and the builder")
 # Targeted tests during the build, the full suite once (precheck --validate)
 check("validate.md" in texts.get("builder", "") and "Targeted tests only" in texts.get("builder", ""),
       "builder: targeted tests / validate.md not described")

@@ -181,6 +181,11 @@ do not build anything new. Work in the worktree and write `<Job>/sync-<n>/build.
    (a sync has no precheck step, so here it is yours; no coverage flags beyond what
    Validate says) until it passes (Prepare too, through `heavy`). Never push; the
    orchestrator does.
+   **Adopted PR/MR** (the prompt says `Adopted PR/MR`: a branch made outside the factory, whose
+   merge conflict is all you fix): instead of the full validation run only the tests that cover
+   the conflicted files, through `heavy` (targeted; no full suite), and change nothing beyond the
+   merge. There is no code review after you, so keep both sides intact and say exactly what you ran.
+   In `SYNC: CLEAN`/`RESOLVED` below "the validation passes" then means those targeted tests pass.
 4. First line of `sync-<n>/build.md` is `SYNC: CLEAN` (git merged the base without any
    conflict and the validation passes), `SYNC: RESOLVED` (you resolved conflicts and the
    validation passes) or `SYNC: NEEDS-HUMAN`. Be exact: a clean sync may keep auto-merge on,

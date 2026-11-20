@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory status" and "/factory setup".
+description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory adopt <pr|mr nr>", "/factory status" and "/factory setup".
 effort: medium
 ---
 
@@ -87,6 +87,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `routing.escalate: false` switches the ladder off; `routing.cap` (default
   `{"model": "opus", "effort": "xhigh"}`) is its top; `routing.blocked_retries` (default 1)
   is how often a `BUILD: BLOCKED` is retried one step up in the same round. See **Routing**.
+- `adopt_conflicting` (optional, default `false`): `true` lets `.factory/job adoptable` adopt every
+  open PR/MR by an allowed author in this repo that has a merge conflict and no job (see
+  `/factory adopt`); `false` only lists them as adoptable.
 - `house_style` (optional, no default; set by whoever runs the factory, never by setup):
   `{"skills": ["<skill>", …]}`. The builder and the ux/ui reviewers get a `House style:`
   line naming these skills; they load and follow them for UI work, over the vendored
@@ -322,6 +325,10 @@ related issues become a few jobs instead of many, each with the effort it deserv
 
 A job from a bundle carries all its issue numbers (`"issues": [..]`, `"issue"` is the first; for a
 bundle issue: the bundle issue first, then its members).
+Then (also when there were no issues to start) run `.factory/job adoptable`: `ADOPTABLE:` lines are
+open PRs/MRs by allowed authors with a merge conflict and no job; report them in one line with
+`/factory adopt <nr>` (with `adopt_conflicting: true` the script adopted them already, `ACTION: adopted`: drive each
+block it printed, as in `/factory adopt`).
 Without `config.issues`, take the first unchecked item (`- [ ]`) in `.factory/backlog.md`,
 check it (`- [x] … (job <id>)`) and run `/factory <that item>`.
 
@@ -427,6 +434,26 @@ and whenever you notice that a PR/MR got merged (every merge can make the other 
 PRs/MRs conflict: then run it for all other jobs at `pr-open`). Jobs that are not
 checked for a while (nobody calls `status`) are caught by `/loop 10m /factory sync`.
 
+### `/factory adopt <pr|mr nr>`
+Merge conflicts are always fixed through the factory, also on a PR/MR it did not make (e.g. a
+branch `feat/682-…` that conflicts with `main`). `.factory/job adopt <nr>` reads the PR/MR from the
+forge and refuses one that is not open, whose author is not in `issues.allowed_authors`, or that
+comes from a fork (report the reason; never work around it). It records a minimal job at `pr-open`
+(`adopted: true`): branch = the PR/MR's own source branch (fetched into a local branch of the same
+name, never renamed), base = its target branch, `issues` = what its description closes, the PR/MR as
+its delivery. It then asks the forge for the merge state: `ACTION: sync` → run `.factory/job sync
+<id>` and drive it exactly as in `/factory sync`, with two differences the script handles: the
+sync builder's prompt says `Adopted PR/MR` (merge the target branch in, resolve the conflicts, run
+only the tests that cover the conflicted files through heavy: no full validation), and there is no
+code review of the merge (`SYNC: CLEAN|RESOLVED` → `ACTION: push` at once). Push with the printed
+command to the same branch (never `--force`), then `.factory/job sync-done <id>`.
+`AUTO-MERGE: no` → switch auto-merge off before the push; `AUTO-MERGE: keep` → leave it as it is.
+An adopted job never gets a spec, acceptance tests, build or review rounds, an approver or a rework
+(`rework`/`approve` are refused): it is only a merge-conflict patch. `SYNC: NEEDS-HUMAN` →
+`needs-human` with the reason; `.factory/job sync <id>` tries again later, `.factory/job drop <id>`
+forgets the adoption (the PR/MR and its branch stay). A later conflict on it is caught by
+`/factory sync` / `status` like any `pr-open` job (or `job next <id>`) and patched again.
+
 ### `/factory` (no argument) / `/factory status`
 `.factory/job list` (per job: id, mode, stage, round/budget, reviews, reason or PR).
 For jobs at `pr-open`, first run
@@ -437,7 +464,7 @@ For jobs at `pr-open`, first run
 `detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json
 statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
 failing, Z waiting on CI". Run `job next` for every `queued` job (it starts when there is
-room). Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
+room). Run `.factory/job adoptable` and mention any `ADOPTABLE:` PR/MR (see `/factory adopt`). Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
 has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board the
 user can keep open (interactive: what needs them, what runs, open PRs with CI; enter opens a
 job; `factory-watch` shows every repo). Do not run it yourself: `job list` is your view.

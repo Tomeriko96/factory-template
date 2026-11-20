@@ -74,3 +74,9 @@ Exactly this JSON, nothing before or after it:
 - `reason` is one line, English, no code and no secrets.
 
 When you have written the file, reply with one line: how many groups and how many skipped.
+
+## Last step: write the file
+Your run counts only through the `Plan:` file: the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

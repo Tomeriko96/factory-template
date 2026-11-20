@@ -50,7 +50,7 @@ doubtful about security or privacy?
    `[non-blocking]` findings do not block.
 4. The diff is small enough to review; no unexplained breaking changes.
 
-## Write `decision.md`
+## What `decision.md` holds (written last: see the final section)
 First line exactly one of:
 `DECISION: MERGE` · `DECISION: REWORK` · `DECISION: ESCALATE`
 
@@ -86,3 +86,9 @@ English:
 ```
 
 No code, diffs, raw data, personal data or secrets in this section.
+
+## Last step: write the file
+Your run counts only through `<Job>/decision.md`: the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

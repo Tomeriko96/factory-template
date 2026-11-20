@@ -40,7 +40,7 @@ the evidence (files, commits, the test or command that shows it) and stop; the
 orchestrator closes the job. Partly done: say what exists in the Approach and specify only
 the rest.
 
-## Write `spec.md`
+## What `spec.md` holds (written last: see the final section)
 - **Goal**: 2–3 sentences, what and why.
 - **Scope / out of scope**: explicit.
 - **Acceptance criteria**: numbered, each testable (a command or observable behaviour).
@@ -60,3 +60,9 @@ the rest.
 
 Keep it under ~80 lines, in English. Ask the user no questions. If the feature changes
 existing human-facing text, say in the Approach that it stays in that file's language.
+
+## Last step: write the file
+Your run counts only through `<Job>/spec.md`: the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

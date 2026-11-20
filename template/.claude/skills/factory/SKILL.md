@@ -196,7 +196,11 @@ line of its output, act, and call `.factory/job next <id>` again:
   = leave the parameter out, the agent's own), and its `PROMPT:` **verbatim** (it holds the paths block, the port, the
   untrusted marks and the resume note). Wait until all have returned, then `job next`.
   Never write an agent's file yourself, also not when it gave its verdict only in its
-  reply: `job next <id> --respawn` respawns it (cheaply: see the resume note).
+  reply: `job next <id> --respawn` respawns it. That prompt starts with "Your previous run gave
+  its verdict but wrote no <file>; write it now from your previous conclusion": continue the
+  same agent with it (SendMessage) when you can; otherwise spawn it and add the agent's earlier
+  reply, verbatim, below the PROMPT under `Previous reply:`, so it writes the file instead of
+  redoing the work.
 - **Look with `job show <id>`, move with `job next <id>`.** `job show` is read-only (stage,
   round, the pending agents, which files are written or missing). Run `job next` only when
   an agent has returned (or after a command that moves the job). A pending agent spawned

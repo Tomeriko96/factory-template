@@ -189,7 +189,7 @@ is probably superseded), both sides change the same behaviour so that a merge ne
 decision, the conflict is in a file the job should not have touched, or the validation
 fails after a merge you cannot fix without changing the job's intent.
 
-## Write `round-N/build.md`
+## What `round-N/build.md` holds (written last: see the final section)
 First line exactly `BUILD: DONE`, or `BUILD: BLOCKED <one-line reason>` when you cannot
 deliver the spec in this round (validation you cannot get green, a spec that contradicts
 the code, a missing secret or service): the orchestrator then retries the round once with a
@@ -207,3 +207,9 @@ instead of sending an unfinished change to review. Then:
 - **Findings handled** (round > 1): per reviewer and number: fixed / not fixed /
   disputed, with the reason (not fixed only for non-blocking; disputed only with evidence).
 - **Known limitations**.
+
+## Last step: write the file
+Your run counts only through `<Job>/round-N/build.md` (in sync mode `<Job>/sync-<n>/build.md`): the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

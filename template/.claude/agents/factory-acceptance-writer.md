@@ -57,7 +57,7 @@ way), never the full suite.
 - The tests must fail today on `<Base>` where the feature is missing; you do not need to
   prove that (the audit measures the result after the build).
 
-## Write `acceptance.md`
+## What `acceptance.md` holds (written last: see the final section)
 First line exactly `ACCEPTANCE: WRITTEN`, or `ACCEPTANCE: NONE <one-line reason>` when no
 criterion can be tested blind (then write no files under `acceptance/`). Then:
 - `Run: <one command, from the worktree root>` that runs exactly your files (the repo's test
@@ -66,3 +66,9 @@ criterion can be tested blind (then write no files under `acceptance/`). Then:
   `not testable blind: <why>`.
 
 Keep it short. Ask the user nothing.
+
+## Last step: write the file
+Your run counts only through `<Job>/acceptance.md`: the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

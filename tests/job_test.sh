@@ -75,6 +75,7 @@ has "$out" "Tmp: /tmp/factory-app-$A"            # repo name in the prefix: job 
 exists "$(wt $A)"
 echo SPEC > "$(jd $A)/spec.md"
 out="$(J next $A)"; has "$out" "AGENT: factory-builder"; has "$out" "Build round 1. Port: 5110. Mode: full."
+has "$out" "Last step, required: write $(jd $A)/round-1/build.md with the Write tool"; lacks "$out" "Your previous run"
 build $A 1
 first "$(J next $A)" "ACTION: choose-reviewers"
 field $A "j['round_heads']['1'] == __import__('subprocess').run(['git','-C','$(wt $A)','rev-parse','HEAD'],capture_output=True,text=True).stdout.strip()" True
@@ -93,6 +94,13 @@ has "$out" "written: round-2/review-code.md"
 out="$(J next $A)"; first "$out" "WAIT: factory-reviewer-security still running (spawned 0m ago)"; has "$out" "--respawn"
 field $A "j['pending']['spawns']" 1; field $A "j.get('resumes', 0)" 0
 out="$(J next $A --respawn)"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-reviewer-security"
+# the resume prompt starts with the cheap instruction: write the file from the earlier conclusion
+python3 - "$out" "$(jd $A)/round-2/review-security.md" <<'PY' && ok || bad "resume prompt does not start with the write-it-now line"
+import sys; p = sys.argv[1].split("PROMPT:\n", 1)[1].split("\n---")[0]
+assert p.startswith(f"Your previous run gave its verdict but wrote no {sys.argv[2]}; write it now from your "
+                    "previous conclusion, do not redo the review"), p[:200]
+assert p.rstrip().endswith(f"write {sys.argv[2]} with the Write tool before you reply; a verdict only in your reply is lost."), p[-200:]
+PY
 has "$out" "This is a resume"
 review $A 2 security PASS
 out="$(J next $A)"; first "$out" "ACTION: validate"; has "$out" "precheck --validate $A 2"

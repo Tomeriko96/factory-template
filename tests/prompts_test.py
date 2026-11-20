@@ -179,6 +179,14 @@ check("trap" in (section(texts.get("reviewer-audit", ""), "Hidden acceptance tes
 check("Never open" in (section(texts.get("builder", ""), "Hidden acceptance tests") or ""), "builder: may read the hidden tests")
 check("acceptance_tests" in SKILL and "factory-acceptance-writer" in SKILL, "SKILL.md: acceptance tests not documented")
 
+# Every agent's output file is its last, explicit step (an approver once gave MERGE only in its reply)
+for n, t in texts.items():
+    last = re.findall(r"^## (.+)$", re.sub(r"```.*?```", "", t, flags=re.S), re.M)
+    check(last and last[-1] == "Last step: write the file", f"{n}: the last section is not 'Last step: write the file'")
+    check("final, required step" in (section(t, "Last step: write the file") or ""), f"{n}: last step not marked required")
+check("RESUME_HEAD" in JOB and "wrote no {file}; write it now from your previous" in JOB
+      and "LAST_STEP" in JOB, "job: resume prompt head / last-step line missing")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

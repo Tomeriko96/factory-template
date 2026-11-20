@@ -80,9 +80,14 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MODELS = ("haiku", "sonnet", "opus")
 BUILDER_EFFORT = {"full": "high", "light": "medium", "docs": "low"}
 BLOCKED_RETRIES = 1
+# A resume prompt starts with RESUME_HEAD (cheap: write the file from the earlier conclusion)
+RESUME_HEAD = ("Your previous run gave its verdict but wrote no {file}; write it now from your previous "
+               "conclusion, do not redo the {what}.")
 RESUME_NOTE = ("This is a resume: your previous run ended without writing its output file. "
-               "Writing it is part of your task and required. Reuse your earlier screenshots in "
-               "round-N/shots/<name>/ instead of redoing the walk-through.")
+               "Writing it is part of your task and required. If you have no previous conclusion "
+               "(no earlier reply below and none in your context), do the work. Reuse your earlier "
+               "screenshots in round-N/shots/<name>/ instead of redoing the walk-through.")
+LAST_STEP = "Last step, required: write {file} with the Write tool before you reply; a verdict only in your reply is lost."
 
 
 class Fail(Exception):
@@ -596,8 +601,11 @@ def spawn(job, out, key, blocks):
                     + (f" (resume {count - 1}/{MAX_RESUMES})" if count > 1 else ""))
     out.main.append("GATE: run .factory/heavy gate first (Bash timeout 600000)")
     for agent, model, prompt, writes in blocks:
+        target = os.path.join(jdir(job["id"]), writes)
         if count > 1:
-            prompt += "\n" + RESUME_NOTE
+            what = "review" if agent.startswith("factory-reviewer-") or agent == "factory-approver" else "work"
+            prompt = RESUME_HEAD.format(file=target, what=what) + "\n" + prompt + "\n" + RESUME_NOTE
+        prompt += "\n" + LAST_STEP.format(file=target)
         model, effort, steps, why = route(job, agent, model, key)
         job["pending"]["models"][agent] = model
         job["pending"]["efforts"][agent] = effort
@@ -606,7 +614,7 @@ def spawn(job, out, key, blocks):
         out.main += ["---", f"AGENT: {agent}", f"MODEL: {model or 'default'}", f"EFFORT: {effort or 'default'}"]
         if steps:
             out.main.append(f"ESCALATED: +{steps} step{'s' if steps > 1 else ''} ({'; '.join(why)})")
-        out.main += [f"WRITES: {os.path.join(jdir(job['id']), writes)}", "PROMPT:", prompt]
+        out.main += [f"WRITES: {target}", "PROMPT:", prompt]
     out.main += ["---", f"THEN: when the agent{'s have' if many else ' has'} returned: "
                  f".factory/job next {job['id']}"]
 
@@ -1812,7 +1820,7 @@ def triage_prepare(args):
     out.main += [f"ACTION: spawn 1 agent  ({len(cands)} candidate issue{'s' if len(cands) != 1 else ''})",
                  "---", "AGENT: factory-triage", "MODEL: default", f"WRITES: {plan}", "PROMPT:",
                  f"Repo: {REPO}\nIssues: {os.path.join(TRIAGE, 'issues.json')}\nPlan: {plan}\n"
-                 f"Bundle max: {cap} issues (full: {full_cap}).",
+                 f"Bundle max: {cap} issues (full: {full_cap}).\n" + LAST_STEP.format(file=plan),
                  "---", "THEN: when the agent has returned: .factory/job triage plan"]
     return out
 

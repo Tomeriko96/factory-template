@@ -65,3 +65,9 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
 - **Notes**: short observations that need no change.
 
 `CHANGES` only with ≥1 **blocking** finding; non-blocking only → `PASS`.
+
+## Last step: write the file
+Your run counts only through `<Job>/round-N/review-privacy.md`: the orchestrator reads that file, never your reply.
+Writing it with the Write tool is the **final, required step** of every run, after all checks
+and before your reply, also when the verdict is clear early or the answer is short. A verdict
+that is only in your reply is lost and costs a full respawn. Then reply in one line.

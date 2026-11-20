@@ -195,6 +195,8 @@ for n, t in list(texts.items()) + [("SKILL.md", SKILL)]:
 _waits = {section(t, "Waiting") for t in texts.values()}
 check(len(_waits) == 1, "'## Waiting' differs between agents")
 
+check("Quiet notifications" in SKILL and "at most one word" in SKILL, "SKILL.md: no quiet-notification rule")
+
 # Every agent's output file is its last, explicit step (an approver once gave MERGE only in its reply)
 for n, t in texts.items():
     last = re.findall(r"^## (.+)$", re.sub(r"```.*?```", "", t, flags=re.S), re.M)

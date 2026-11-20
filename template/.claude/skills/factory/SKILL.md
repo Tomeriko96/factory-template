@@ -719,6 +719,10 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   agent reports back by itself. Never `sleep N` or polling loops (`until …; do sleep …`):
   they are refused and burn turns. The Monitor and TaskStop tools do not exist in subagents:
   never tell an agent to use them.
+- **Quiet notifications.** A background notification (a task or agent finished, a watch woke
+  you) that changes no job state gets a reply of at most one word ("waiting"), or none; never
+  a status line that repeats the last one. Post a status line only on a state change (built,
+  reviews in, PR open, merged, needs-human, failed).
 - **Long sessions:** all state is on disk. After about 10 jobs have been delivered in one
   session, or when the session feels slow, tell the user once: "state is on disk; `/clear`
   and run `/factory status` to continue with a fresh context".

@@ -47,6 +47,9 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
                                       made by hand; ui_review: light|full|auto, the ux/ui review form of this job)
   job show <id> [--json]              read-only: stage, round and the pending action (--json: job.json)
   job list | capacity
+  job pause ["<reason>"]              start no queued job (the queue holds; new jobs only queue); running
+                                      jobs, syncs, adopt and delivery go on. State: .factory/paused
+  job unpause                         end the pause and start queued jobs while there is room
   job report [--json]                 from metrics.jsonl: per role runs, first-pass yield, median
                                       duration, verdict mix; per job mode the agent runs per job
 """
@@ -443,8 +446,30 @@ def room(job, jobs, prs_count=True):
     return None
 
 
+PAUSE = os.path.join(HERE, "paused")
+
+
+def paused():
+    """The pause record ({at, reason}) while `job pause` is on, else None."""
+    if not os.path.exists(PAUSE):
+        return None
+    try:
+        with open(PAUSE) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def pause_text(p):
+    return "the factory is paused" + (f" since {p['at']}" if p.get("at") else "") + \
+        (f" ({p['reason']})" if p.get("reason") else "") + ": /factory unpause starts the queue again"
+
+
 def promote(out):
-    """Start queued jobs, lowest number first, while there is room."""
+    """Start queued jobs, lowest number first, while there is room (never while paused)."""
+    if paused() is not None:
+        return
     jobs = all_jobs()
     for j in jobs:
         if j.get("stage") != "queued" or room(j, jobs):
@@ -997,6 +1022,10 @@ def step(job, out, start=None):
         if s == "pr-open" and job.get("adopted") and not job.get("syncing"):
             return adopted_check(job, out)
         if s == "queued":
+            p = paused()
+            if p is not None:
+                out.main.append(f"WAIT: queued: {pause_text(p)}")
+                return
             why = room(job, all_jobs())
             if why:
                 out.main.append(f"WAIT: queued: {why}")
@@ -1428,6 +1457,8 @@ def cmd_show(args):
             lines.append(f"  {'written' if os.path.exists(os.path.join(jd, w)) else 'missing'}: {w}")
         lines.append(f"NEXT: when the agent{'s have' if len(want or []) > 1 else ' has'} returned: .factory/job next {job['id']}"
                      f" (returned without its file: --respawn)")
+    elif job.get("stage") == "queued" and paused() is not None:
+        lines.append(f"NEXT: queued; {pause_text(paused())}")
     elif job.get("stage") in AT_REST:
         lines.append("NEXT: at rest" + (f"; PR {job['pr_url']}" if job.get("pr_url") else ""))
     else:
@@ -1756,6 +1787,36 @@ def cmd_set(args):
     return with_job(args[0], fn)
 
 
+def cmd_pause(args):
+    out = Out()
+    with Lock():
+        p = paused()
+        if p is None:
+            p = {"at": now(), "reason": " ".join(args).strip()[:200]}
+            with open(PAUSE + ".tmp", "w") as f:
+                json.dump(p, f)
+            os.replace(PAUSE + ".tmp", PAUSE)
+        jobs = all_jobs()
+        act = [j["id"] for j in jobs if j.get("stage") in ACTIVE or j.get("syncing")]
+        q = [j["id"] for j in jobs if j.get("stage") == "queued"]
+        out.main.append(f"DONE: paused: {len(q)} queued job(s) stay queued; {len(act)} running job(s) continue")
+        out.main.append(f"NOTE: {pause_text(p)}; running jobs, syncs, adopt and delivery go on, new jobs only queue")
+        if act:
+            out.main.append("RUNNING: " + ", ".join(act))
+    return out
+
+
+def cmd_unpause(args):
+    out = Out()
+    with Lock():
+        was = paused()
+        if was is not None:
+            os.remove(PAUSE)
+        out.main.append("DONE: unpaused" if was is not None else "DONE: not paused")
+        promote(out)
+    return out
+
+
 def cmd_list(args):
     out = Out()
     jobs = all_jobs()
@@ -1764,7 +1825,8 @@ def cmd_list(args):
     prs = [j for j in jobs if j.get("stage") == "pr-open"]
     out.main.append(f"capacity: {len(act)}/{lim['active']} active, {len(prs)}"
                     f"{'/' + str(lim['open_prs']) if lim['open_prs'] else ''} PRs/MRs open, "
-                    f"{sum(j.get('stage') == 'queued' for j in jobs)} queued")
+                    f"{sum(j.get('stage') == 'queued' for j in jobs)} queued"
+                    + (f"; PAUSED ({pause_text(paused())})" if paused() is not None else ""))
     if args and args[0] == "capacity":
         return out
     for j in jobs:
@@ -2613,7 +2675,7 @@ def main():
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
             "fail": (cmd_fail, 2), "drop": (cmd_drop, 1), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
             "triage": (cmd_triage, 1), "report": (cmd_report, 0), "adopt": (cmd_adopt, 1),
-            "adoptable": (cmd_adoptable, 0)}
+            "adoptable": (cmd_adoptable, 0), "pause": (cmd_pause, 0), "unpause": (cmd_unpause, 0)}
     try:
         if argv[0] == "show":
             print(cmd_show(argv[1:]))

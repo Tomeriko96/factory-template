@@ -31,6 +31,8 @@ the judgement sits in pinned agents):
 /factory approve|rework|resume|drop|deliver <id>
 /factory adopt <pr|mr nr>       patch the merge conflict of a PR/MR made outside the factory
                                 (allowed author, same repo): merge the target in, targeted tests, push
+/factory pause | unpause        finish running jobs, start nothing new: the queue holds (new jobs only queue);
+                                running jobs, syncs, adopt and delivery go on; the board shows PAUSED
 /factory status                 or live: .factory/watch [--tmux]   (factory-watch: all repos)
 ```
 
@@ -444,9 +446,9 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 633 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 651 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
-| `python3 -I tests/watch_test.py` | 61 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
+| `python3 -I tests/watch_test.py` | 65 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |
 | `python3 -I tests/install_test.py` | 19 | install, exclusion of every template skill, re-install, remove, a repo that tracks its own copy of a skill |
 | `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE) |

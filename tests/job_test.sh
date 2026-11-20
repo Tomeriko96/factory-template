@@ -1371,6 +1371,24 @@ rm -rf node_modules web .venv; git rm -q package-lock.json uv.lock; git commit -
 sed -i '/^node_modules\/$/d; /^\.venv\/$/d' .git/info/exclude
 cp "$T/config.seed" .factory/config.json
 
+# ---------- pause: the queue starts nothing; running jobs go on ----------
+scenario=pause
+PR1="$(newjob "zq pause running")"                          # running before the pause
+out="$(J pause "finish running jobs")"; first "$out" "DONE: paused:"; has "$out" "RUNNING: $PR1"
+exists "$R/.factory/paused"
+out="$(J new "zq pause queued")"; PQ="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+has "$out" "WAIT: queued: the factory is paused since"; has "$out" "(finish running jobs): /factory unpause"
+field "$PQ" "j['stage']" queued
+echo SPEC > "$(jd "$PR1")/spec.md"; out="$(J next "$PR1")"; has "$out" "AGENT: factory-builder"   # running jobs continue
+park "$PR1"                                                 # a slot frees: nothing starts
+first "$(J next "$PQ")" "WAIT: queued: the factory is paused"; field "$PQ" "j['stage']" queued
+has "$(J list)" "PAUSED (the factory is paused"; has "$(J show "$PQ")" "NEXT: queued; the factory is paused"
+first "$(J pause)" "DONE: paused:"                          # pausing twice keeps the first record
+command grep -qF "finish running jobs" "$R/.factory/paused" && ok || bad "second pause overwrote the reason"
+out="$(J unpause)"; first "$out" "DONE: unpaused"; has "$out" "STARTED: $PQ left the queue"
+missing "$R/.factory/paused"; first "$(J unpause)" "DONE: not paused"
+out="$(J next "$PQ")"; has "$out" "AGENT: factory-spec-writer"; park "$PQ"
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

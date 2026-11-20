@@ -115,6 +115,12 @@ check("is already open" in JOB and "is already open" in SKILL and "gh pr ready" 
       "delivery: reusing the validation's PR/MR (edit, mark ready) not described")
 check("validate.mode" in SKILL and "`validate`" in SKILL, "SKILL.md: config.validate not documented")
 
+# Pause: the script's commands, SKILL.md's command section and the board agree
+check('"pause": (cmd_pause' in JOB and '"unpause": (cmd_unpause' in JOB and "### `/factory pause" in SKILL
+      and "job pause" in JOB.split('"""', 2)[1] and "/factory pause|unpause" in SKILL.split("---", 2)[1],
+      "pause/unpause: not in job, its usage text and SKILL.md")
+check("PAUSED" in open(os.path.join(T, ".factory", "watch")).read(), "watch: no PAUSED flag")
+
 # Triage and bundles: what the script prints and reads is what SKILL.md and the agent describe
 SKILL_FRONT = SKILL.split("---", 2)[1]
 check(re.search(r"^effort: (low|medium|high)$", SKILL_FRONT, re.M), "SKILL.md: effort not pinned in the frontmatter")

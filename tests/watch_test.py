@@ -131,6 +131,13 @@ try:
     shutil.rmtree(os.path.join(fd, "jobs", aj["id"]))
     os.remove(os.path.join(fd, "cache", "adoptable.json"))
 
+    # `.factory/job pause`: the header says the queue starts nothing
+    json.dump({"at": "2026-11-20T10:00:00+0000", "reason": "finish running jobs"}, open(os.path.join(fd, "paused"), "w"))
+    head = watch("--once", "--no-ci").splitlines()[0]
+    check("factory · my-repo  PAUSED" in head and len(head) <= 80, "paused repo not flagged in the header: " + head)
+    os.remove(os.path.join(fd, "paused"))
+    check("PAUSED" not in watch("--once", "--no-ci").splitlines()[0], "PAUSED shown after unpause")
+
     # A GitLab MR that is no longer open (merged or closed) while the job still says pr-open
     json.dump({"pipeline": "success", "merge": "not_open", "jobs": [{"name": "t", "status": "success"}]},
               open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))

@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory adopt <pr|mr nr>", "/factory status" and "/factory setup".
+description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory adopt <pr|mr nr>", "/factory pause|unpause", "/factory status" and "/factory setup".
 effort: medium
 ---
 
@@ -421,6 +421,15 @@ way): `.factory/job drop <id> "<reason>"` → `superseded`, its worktree and unp
 Only for `needs-human` or `queued` jobs; refused when the job has an open PR/MR (close that on the forge
 first). Its issue is free for `/factory next` again. A needs-human job that was never built (round 0)
 has nothing to approve: `status` and the board offer `drop` (or `resume`) for it, not `approve`.
+
+### `/factory pause ["<reason>"]` / `/factory unpause`
+"Finish what runs, start nothing new": `.factory/job pause "<reason>"` writes `.factory/paused`.
+While paused no queued job starts (`job next` on it prints `WAIT: queued: the factory is paused …`,
+a freed slot starts nothing); running jobs, syncs, `adopt` and delivery go on as usual, and a new
+job (`/factory <feature>`, `issue`, `next`) is only queued, so say that when you create one. Never
+park (`fail`) or `drop` jobs to stop the queue: pause keeps it. `.factory/job unpause` ends the pause
+and starts queued jobs while there is room: drive every `STARTED:` job with `job next`. The board
+and `job list` show `PAUSED`.
 
 ### `/factory sync [<id>]`
 Keeps open PRs/MRs mergeable. For `<id>`, or for every job at stage `pr-open`: ask the

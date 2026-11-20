@@ -153,6 +153,11 @@ class Repo:
                 j["_repo"], j["_dir"] = self, os.path.join(jd, name)
                 self.jobs.append(j)
 
+    def paused(self):
+        """The `.factory/job pause` record ({at, reason}) or None."""
+        d = read_json(os.path.join(self.fd, "paused"))
+        return (d if isinstance(d, dict) else {"at": None, "reason": ""}) if os.path.exists(os.path.join(self.fd, "paused")) else None
+
     def limit(self, key, default):
         return (self.cfg.get("limits") or {}).get(key, default)
 
@@ -521,17 +526,21 @@ def header(repos, width):
     jobs = [j for r in repos for j in r.jobs]
     active = sum(1 for j in jobs if section_of(j) == "running")
     prs = sum(1 for j in jobs if section_of(j) == "prs")
+    paused = [r.name for r in repos if r.paused() is not None]
     if len(repos) == 1:
         r = repos[0]
         cap, pr_cap = r.limit("active_jobs", 3), r.limit("open_prs", 5)
         left = f"factory · {r.name}"
         counts = f"active {active}/{cap} · PRs {prs}" + (f"/{pr_cap}" if pr_cap else "")
+        flag = "  PAUSED" if paused else ""
     else:
         left = f"factory · {len(repos)} repos"
         counts = f"active {active} · PRs {prs}"
+        flag = f"  PAUSED: {', '.join(paused)}" if paused else ""
     right = " · ".join(x for x in (f"CPU {cpu:.0f}%" if cpu is not None else "",
                                    f"heavy {used}/{budget} cores" if budget else "", counts) if x)
-    return [(left, "bold"), (" " * max(2, width - len(left) - len(right)), None), (right, None)], slots
+    return [(left, "bold"), (flag, "yellow"), (" " * max(2, width - len(left) - len(flag) - len(right)), None),
+            (right, None)], slots
 
 
 def grouped(repos, show_done, query=""):

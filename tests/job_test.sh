@@ -27,7 +27,7 @@ lacks() { grep -qF -- "$2" <<<"$1" && bad "output has '$2'" || ok; }
 # field <job-id> <python expression on j> <expected str()>
 field() {
   local got
-  got="$(J show "$1" | python3 -c "import json,sys; j=json.load(sys.stdin); print($2)" 2>&1)"
+  got="$(J show "$1" --json | python3 -c "import json,sys; j=json.load(sys.stdin); print($2)" 2>&1)"
   [ "$got" = "$3" ] && ok || bad "$1: $2 = '$got', want '$3'"
 }
 exists()  { [ -e "$1" ] && ok || bad "missing $1"; }
@@ -85,7 +85,14 @@ out="$(J next $A)"; has "$out" "Build round 2."; has "$out" "blocking reviews fr
 build $A 2; J next $A >/dev/null
 out="$(J reviewers $A security,code,audit)"; has "$out" "NOTE: reviewers round 2:"
 review $A 2 code PASS; review $A 2 audit PASS          # security never writes its file
-out="$(J next $A)"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-reviewer-security"
+# looking does not spend a resume: the agent was spawned just now, so it counts as still running
+before="$(md5sum < "$(jd $A)/job.json")"
+out="$(J show $A)"; has "$out" "STAGE: review"; has "$out" "PENDING: review-2"; has "$out" "missing: round-2/review-security.md"
+has "$out" "written: round-2/review-code.md"
+[ "$before" = "$(md5sum < "$(jd $A)/job.json")" ] && ok || bad "job show changed job.json"
+out="$(J next $A)"; first "$out" "WAIT: factory-reviewer-security still running (spawned 0m ago)"; has "$out" "--respawn"
+field $A "j['pending']['spawns']" 1; field $A "j.get('resumes', 0)" 0
+out="$(J next $A --respawn)"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-reviewer-security"
 has "$out" "This is a resume"
 review $A 2 security PASS
 out="$(J next $A)"; first "$out" "ACTION: validate"; has "$out" "precheck --validate $A 2"
@@ -174,8 +181,8 @@ scenario=queue
 J new "zq q one" >/dev/null; J new "zq q two" >/dev/null       # 004, 005: both slots taken
 out="$(J new --mode docs "zq q docs")"; D=007-zq-q-docs
 first "$(sed -n 2p <<<"$out")" "WAIT: queued: 2/2 jobs active"
-J next 005-zq-q-one >/dev/null; J next 005-zq-q-one >/dev/null   # spec-writer never writes
-out="$(J next 005-zq-q-one)"; first "$out" "DONE: needs-human: spec: agent ended 3 times"
+J next 005-zq-q-one --respawn >/dev/null; J next 005-zq-q-one --respawn >/dev/null   # spec-writer never writes
+out="$(J next 005-zq-q-one --respawn)"; first "$out" "DONE: needs-human: spec: agent ended 3 times"
 has "$out" "STARTED: $D"
 field $D "j['stage'], j['mode']" "build docs"
 out="$(J list)"; has "$out" "capacity: 2/2 active"
@@ -293,7 +300,7 @@ out="$(J next "$M2")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: n
 has "$out" "leave auto-merge off"; park "$M2"
 
 M3="$(newjob "zq am full")"; drive "$M3" src/feature.py
-out="$(J next "$M3")"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: sonnet"
+out="$(J next "$M3" --respawn)"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: sonnet"
 merge_decision "$M3"
 out="$(J next "$M3")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: yes"
 python3 - "$(jd "$M3")/job.json" <<'PY'
@@ -686,7 +693,7 @@ first "$(cat "$(jd "$V1")/round-1/validate.md")" "VALIDATE: FAIL"
 has "$(cat "$(jd "$V1")/round-1/validate.md")" "❌ \`bash -c 'test -f ok.txt'\`: exit 1"
 has "$(cat "$(jd "$V1")/round-1/validate.md")" "✅ \`true\`: exit 0"
 field "$V1" "j['stage'], j.get('round')" "build 1"
-out="$(J next "$V1")"; has "$out" "Build round 2."; has "$out" "read round-1/validate.md"
+out="$(J next "$V1" --respawn)"; has "$out" "Build round 2."; has "$out" "read round-1/validate.md"
 mkdir -p "$(jd "$V1")/round-2"; echo ok > "$(wt "$V1")/ok.txt"; git -C "$(wt "$V1")" add -A; git -C "$(wt "$V1")" commit -qm ok
 printf 'Built\n' > "$(jd "$V1")/round-2/build.md"; J next "$V1" >/dev/null; J reviewers "$V1" security,code,audit >/dev/null
 for r in security code audit; do review "$V1" 2 $r PASS; done
@@ -782,7 +789,7 @@ scenario=heavy-fifo
 # ---------- routing: effort per spawn and the builder's escalation ladder ----------
 scenario=routing
 L="$(newjob --mode light "zq ladder")"
-out="$(J next "$L")"; has "$out" "AGENT: factory-spec-writer"; has "$out" "MODEL: sonnet"; has "$out" "EFFORT: medium"
+out="$(J next "$L" --respawn)"; has "$out" "AGENT: factory-spec-writer"; has "$out" "MODEL: sonnet"; has "$out" "EFFORT: medium"
 echo SPEC > "$(jd "$L")/spec.md"
 out="$(J next "$L")"; has "$out" "MODEL: opus"; has "$out" "EFFORT: medium"; lacks "$out" "ESCALATED"   # light builder
 build "$L" 1; J next "$L" >/dev/null
@@ -833,7 +840,7 @@ cp "$T/config.cap" .factory/config.json
 # docs builder: sonnet/low; config.routing overrides per agent (and per mode), escalate false switches the ladder off
 cp .factory/config.json "$T/config.rt"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["routing"]={"escalate": False, "agents": {"factory-builder": {"effort": {"light": "low"}}, "factory-reviewer-code": {"model": "opus", "effort": "low"}}}; json.dump(c, open(".factory/config.json","w"))'
-D2="$(newjob --mode docs "zq rt docs")"; out="$(J next "$D2")"; has "$out" "MODEL: sonnet"; has "$out" "EFFORT: low"; park "$D2"
+D2="$(newjob --mode docs "zq rt docs")"; out="$(J next "$D2" --respawn)"; has "$out" "MODEL: sonnet"; has "$out" "EFFORT: low"; park "$D2"
 L2="$(newjob --mode light "zq rt light")"; echo SPEC > "$(jd "$L2")/spec.md"
 out="$(J next "$L2")"; has "$out" "EFFORT: low"
 build "$L2" 1; J next "$L2" >/dev/null
@@ -879,7 +886,10 @@ python3 -c 'import json; c=json.load(open(".factory/config.json")); c.pop("accep
 AT="$(newjob "zq acc full")"; echo SPEC > "$(jd "$AT")/spec.md"
 out="$(J next "$AT")"; has "$out" "AGENT: factory-acceptance-writer"; has "$out" "MODEL: sonnet"; has "$out" "WRITES: $(jd "$AT")/acceptance.md"
 lacks "$out" "factory-builder"
-out="$(J next "$AT")"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-acceptance-writer"   # no file: respawned
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c.setdefault("limits", {})["respawn_after_min"]=0; json.dump(c, open(".factory/config.json","w"))'
+out="$(J next "$AT")"; first "$out" "ACTION: spawn 1 agent (resume 1/2)"; has "$out" "factory-acceptance-writer"   # no file, respawn_after_min 0: respawned
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["limits"].pop("respawn_after_min"); json.dump(c, open(".factory/config.json","w"))'
+out="$(J show "$AT" --json)"; has "$out" '"spawns": 2' 
 mkdir -p "$(jd "$AT")/acceptance/tests"; echo 'def test_ac1(): assert True' > "$(jd "$AT")/acceptance/tests/test_factory_acceptance.py"
 printf 'ACCEPTANCE: WRITTEN
 Run: python3 -m pytest -q tests/test_factory_acceptance.py

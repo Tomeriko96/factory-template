@@ -22,7 +22,10 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
                                       a bundle issue (label factory:bundle) on its own: it and its members
   job triage plan                     validate the triage plan, print the groups (jobs to start)
   job triage start <k>                start group k of the plan as a job
-  job next <id>                       apply what is due, print the next action
+  job next <id> [--respawn]           apply what is due, print the next action. An agent whose file is
+                                      missing and that was spawned less than limits.respawn_after_min
+                                      (default 45) ago counts as still running: WAIT, no resume spent;
+                                      --respawn = it has returned without its file, spawn it again
   job reviewers <id> <a,b,c>          record round N's reviewer candidates: kept only when the diff
                                       touches their paths (config.reviewer_paths; code and audit always),
                                       round > 1 narrowed by .factory/rereview; then as `next`
@@ -36,7 +39,8 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
   job set <id> pr_url|pr_state|issue_closed|issues <json or text>   (issues: a JSON list, for a bundle made by hand)
-  job list | show <id> | capacity
+  job show <id> [--json]              read-only: stage, round and the pending action (--json: job.json)
+  job list | capacity
   job report [--json]                 from metrics.jsonl: per role runs, first-pass yield, median
                                       duration, verdict mix; per job mode the agent runs per job
 """
@@ -47,6 +51,8 @@ REPO = os.path.dirname(HERE)
 JOBS = os.path.join(HERE, "jobs")
 METRICS = os.path.join(HERE, "metrics.jsonl")
 MAX_ROUNDS, MAX_RESUMES, MAX_SYNCS = 3, 2, 3
+RESPAWN_AFTER_MIN = 45   # limits.respawn_after_min: younger pending agents count as still running
+RESPAWN = False          # `job next --respawn`: the pending agent returned without its file
 TRIAGE = os.path.join(HERE, "run", "triage")
 MODE_RANK = {"docs": 0, "light": 1, "full": 2}
 MODE_LABELS = {"factory:docs": "docs", "factory:light": "light", "factory:full": "full"}
@@ -106,6 +112,14 @@ def config():
 def limits():
     lim = config().get("limits") or {}
     return {"active": int(lim.get("active_jobs") or 3), "open_prs": int(lim.get("open_prs", 5) or 0)}
+
+
+def respawn_after():
+    v = (config().get("limits") or {}).get("respawn_after_min", RESPAWN_AFTER_MIN)
+    try:
+        return max(0.0, float(v))
+    except (TypeError, ValueError):
+        return float(RESPAWN_AFTER_MIN)
 
 
 def remote():
@@ -558,12 +572,23 @@ def reviewer_block(job, n, name):
 def spawn(job, out, key, blocks):
     pend = job.get("pending") or {}
     count = pend.get("spawns", 0) + 1 if pend.get("key") == key else 1
+    if count > 1 and not RESPAWN and isinstance(pend.get("ts"), (int, float)):
+        age = (time.time() - pend["ts"]) / 60
+        if age < respawn_after():
+            names = ", ".join(b[0] for b in blocks)
+            out.main.append(f"WAIT: {names} still running (spawned {int(age)}m ago)")
+            out.main.append(f"NEXT: wait for {'them' if len(blocks) > 1 else 'it'} to return, then "
+                            f".factory/job next {job['id']}; returned without writing "
+                            + ", ".join(os.path.join(jdir(job['id']), b[3]) for b in blocks)
+                            + f": .factory/job next {job['id']} --respawn")
+            return
     if count > MAX_RESUMES + 1:
         set_stage(job, "needs-human", f"{key}: agent ended {count - 1} times without writing its file")
         out.main.append(f"DONE: needs-human: {job['reason']}")
         return
     t0 = (pend.get("t0") if pend.get("key") == key else None) or time.time()
-    job["pending"] = {"key": key, "spawns": count, "at": now(), "t0": t0, "models": {}, "efforts": {}}
+    job["pending"] = {"key": key, "spawns": count, "at": now(), "ts": time.time(), "t0": t0,
+                      "models": {}, "efforts": {}}
     if count > 1:
         job["resumes"] = int(job.get("resumes") or 0) + 1
     many = len(blocks) > 1
@@ -1050,7 +1075,44 @@ def with_job(jid, fn):
 
 
 def cmd_next(args):
+    global RESPAWN
+    RESPAWN = "--respawn" in args[1:]
     return with_job(args[0], step)
+
+
+def cmd_show(args):
+    """Read-only: no lock, no save, no git, no metrics. Prints the state and what is pending."""
+    job = load(args[0] if args else "")
+    if "--json" in args[1:]:
+        return json.dumps(job, indent=2)
+    jd = jdir(job["id"])
+    lines = [f"JOB: {job['id']}", f"STAGE: {job.get('stage')}"
+             + (f" ({job['reason']})" if job.get("reason") else ""),
+             f"ROUND: {int(job.get('round') or 0)}/{budget(job)} · mode {job.get('mode')}"]
+    pend = job.get("pending") or {}
+    if pend:
+        ts = pend.get("ts")
+        age = f"spawned {int((time.time() - ts) / 60)}m ago" if isinstance(ts, (int, float)) else f"spawned {pend.get('at')}"
+        lines.append(f"PENDING: {pend.get('key')} · {', '.join(pend.get('models') or {}) or '?'} · {age}"
+                     + (f" · resume {pend.get('spawns', 1) - 1}/{MAX_RESUMES}" if pend.get("spawns", 1) > 1 else ""))
+        n = str(job.get("round") or 0)
+        want = {"spec": ["spec.md"], "acceptance": ["acceptance.md"]}.get(pend.get("key"))
+        k = str(pend.get("key") or "")
+        if k.startswith("build-"):
+            want = [f"round-{k[6:]}/build.md"]
+        elif k.startswith("review-"):
+            want = [f"round-{k[7:]}/review-{x}.md" for x in (job.get("review_sets") or {}).get(k[7:], [])]
+        elif k.startswith("approve-"):
+            want = ["decision.md"]
+        for w in want or []:
+            lines.append(f"  {'written' if os.path.exists(os.path.join(jd, w)) else 'missing'}: {w}")
+        lines.append(f"NEXT: when the agent{'s have' if len(want or []) > 1 else ' has'} returned: .factory/job next {job['id']}"
+                     f" (returned without its file: --respawn)")
+    elif job.get("stage") in AT_REST:
+        lines.append("NEXT: at rest" + (f"; PR {job['pr_url']}" if job.get("pr_url") else ""))
+    else:
+        lines.append(f"NEXT: .factory/job next {job['id']} (nothing is running for it)")
+    return "\n".join(lines)
 
 
 def glob_hit(name, globs):
@@ -1993,7 +2055,7 @@ def main():
             "triage": (cmd_triage, 1), "report": (cmd_report, 0)}
     try:
         if argv[0] == "show":
-            print(json.dumps(load(argv[1] if len(argv) > 1 else ""), indent=2))
+            print(cmd_show(argv[1:]))
             return 0
         if argv[0] not in cmds:
             raise Fail(f"unknown command {argv[0]!r} (see .factory/job --help)")

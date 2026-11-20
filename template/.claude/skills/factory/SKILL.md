@@ -115,7 +115,9 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
 
 - `MAX_ROUNDS = 3` per run; a `rework` grants 3 more. Then `needs-human`.
 - `MAX_RESUMES = 2`: an agent that returns without its output file is respawned twice
-  (the script re-emits the spawn with a resume note), then `needs-human`.
+  (`job next --respawn` re-emits the spawn with a resume note), then `needs-human`.
+- `limits.respawn_after_min` (default 45): before that, a pending agent without its file
+  counts as still running; `job next` waits instead of spending a resume.
 - `MAX_SYNCS = 3`: base merges per job (see `/factory sync`). Then `needs-human`.
 - `limits.active_jobs` (default 3): jobs in `spec`/`build`/`review`/`approve`/`deliver`
   or syncing at once, per repo; `limits.open_prs` (default 5): jobs at `pr-open` before
@@ -194,7 +196,13 @@ line of its output, act, and call `.factory/job next <id>` again:
   = leave the parameter out, the agent's own), and its `PROMPT:` **verbatim** (it holds the paths block, the port, the
   untrusted marks and the resume note). Wait until all have returned, then `job next`.
   Never write an agent's file yourself, also not when it gave its verdict only in its
-  reply: `job next` respawns it.
+  reply: `job next <id> --respawn` respawns it (cheaply: see the resume note).
+- **Look with `job show <id>`, move with `job next <id>`.** `job show` is read-only (stage,
+  round, the pending agents, which files are written or missing). Run `job next` only when
+  an agent has returned (or after a command that moves the job). A pending agent spawned
+  less than `limits.respawn_after_min` (default 45) minutes ago counts as still running:
+  `job next` prints `WAIT: <agent> still running (spawned <n>m ago)` and spends no resume.
+  When the agent did return without its file, run `job next <id> --respawn`.
 - `ACTION: choose-reviewers` → pick the round's candidates (see **Reviewers**), then
   `.factory/job reviewers <id> <a,b,c>`. From round 2 on it narrows them with
   `.factory/rereview` and keeps in every reviewer whose latest verdict is not PASS.
@@ -212,7 +220,8 @@ line of its output, act, and call `.factory/job next <id>` again:
 - `STARTED: <id>` (a queued job got a slot) → drive that job with `job next <id>` too.
 - `ERROR: …` → nothing changed; report it, never work around it by editing job.json.
 
-`.factory/job list` shows all jobs and capacity; `.factory/job show <id>` the raw state.
+`.factory/job list` shows all jobs and capacity; `.factory/job show <id>` one job and what it
+waits for (`--json`: the raw state).
 
 ## Reviewers
 
@@ -353,7 +362,8 @@ the branch (diverged → `needs-human`), and queues the job when there is no roo
 the next approved round pushes to the same branch, so an open PR/MR updates itself.
 
 ### `/factory resume <id>`
-`.factory/job next <id>` and drive it. The script knows what is missing: an agent file
+`.factory/job show <id>`; when it lists a pending agent that is not running in this session
+(a crashed or cleared session), `.factory/job next <id> --respawn`, else `job next <id>`; drive it. The script knows what is missing: an agent file
 that was never written is spawned again (counted as a resume), a queued job starts when
 there is room, a job at rest says so.
 
@@ -685,8 +695,8 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
   and report the change in one line. Never edit `config.json` without the user.
 - Never edit `job.json` yourself; only `.factory/job` writes it.
 - An agent that returns without its file (also with a verdict only in its reply, seen
-  with ux/ui reviewers): never transcribe it into the file yourself; `job next` respawns
-  it with a resume note, at most `MAX_RESUMES` times.
+  with ux/ui reviewers): never transcribe it into the file yourself; `job next <id> --respawn`
+  respawns it with a resume note, at most `MAX_RESUMES` times.
 - Several jobs may run at the same time (each has its own worktree and ports). Start them
   together only when their files are unlikely to overlap (backend vs frontend, different
   modules); start overlapping ones after the earlier job is delivered, so `/factory sync`

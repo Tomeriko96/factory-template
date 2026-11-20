@@ -550,6 +550,128 @@ first "$(J set "$BO" issues '"x"')" "ERROR: issues must be a JSON list"; first "
 park "$BO"
 cp "$T/config.bak" .factory/config.json
 
+# ---------- bundle issues: label factory:bundle, checklist + forge links/sub-issues ----------
+scenario=bundle-issue
+FF="$T/forge"; mkdir -p "$T/bin" "$FF"; OLDPATH="$PATH"; export PATH="$T/bin:$PATH" FF
+cat > "$T/bin/gh" <<'SH'
+#!/usr/bin/env bash
+echo "gh $*" >> "$FF/calls"
+case "$1 $2" in
+  "pr list") echo '[]' ;;
+  "api "*) n="$(sed -E 's#.*/issues/([0-9]+)/.*#\1#' <<<"$2")"
+           [ -f "$FF/fail-$n" ] && { echo "HTTP 404: Not Found" >&2; exit 1; }
+           cat "$FF/gh-$n.json" 2>/dev/null || echo '[]' ;;
+  *) echo "fake gh: $*" >&2; exit 1 ;;
+esac
+SH
+sed -e 's/^echo "gh /echo "glab /' -e 's/"pr list"/"mr list"/' -e 's#\$FF/gh-#$FF/gl-#' -e 's/fake gh/fake glab/' "$T/bin/gh" > "$T/bin/glab"
+chmod +x "$T/bin/gh" "$T/bin/glab"
+python3 - <<'PY'
+import json, os
+FF = os.environ["FF"]
+c = json.load(open(".factory/config.json"))
+c["forge"] = "github"
+c["issues"] = {"allowed_authors": ["me"], "link": "Closes"}
+json.dump(c, open(".factory/config.json", "w"))
+U = "https://example.test/o/r/issues/"
+def gh(n, title, author="me", labels=(), body=""):
+    return {"number": n, "title": title, "body": body or title + " body", "author": {"login": author},
+            "labels": [{"name": l} for l in labels], "url": U + str(n), "comments": []}
+raw = [gh(60, "Controls pack", labels=["factory:bundle"],
+          body="Small controls.\n\n- [ ] #61\n- [x] #62\n- [ ] #63\n* [ ] #64\n  - [ ] #65 needs an export\n\nSee also #66."),
+       gh(61, "Control a"), gh(63, "Control b", author="eve"), gh(64, "Control c", labels=["factory:solo"]),
+       gh(65, "Control d", labels=["factory:full"]), gh(66, "Mentioned, not a member"), gh(67, "Control e (sub-issue)"),
+       gh(70, "Unrelated"), gh(71, "Eve's bundle", author="eve", labels=["factory:bundle"], body="- [ ] #72"),
+       gh(72, "Claimed by an untrusted bundle"), gh(73, "Empty bundle", labels=["factory:bundle"], body="- [x] #74")]
+json.dump(raw, open(".factory/run/triage/bi.json", "w"))
+# GitHub sub-issues (REST shape: user, html_url, state): one open, one closed, one from another repo
+def rest(n, state="open", repo="o/r"):
+    return {"number": n, "title": f"Sub {n}", "body": "b", "state": state, "user": {"login": "me"}, "labels": [],
+            "url": f"https://api.example.test/repos/{repo}/issues/{n}", "html_url": f"https://example.test/{repo}/issues/{n}"}
+json.dump([rest(67), rest(68, "closed"), rest(69, repo="o/other")], open(f"{FF}/gh-60.json", "w"))
+open(f"{FF}/fail-73", "w").close()
+PY
+out="$(J triage prepare .factory/run/triage/bi.json)"; first "$out" "ACTION: spawn 1 agent  (5 candidate issues)"
+has "$out" "NOTE: bundle #60: members #61, #65, #67"
+has "$out" "NOTE: bundle #60: #62 left out: not an open issue of this project"
+has "$out" "NOTE: bundle #60: #63 left out: author eve is not in allowed_authors"
+has "$out" "NOTE: bundle #60: #64 left out: factory:solo: stays out of bundles"
+has "$out" "NOTE: bundle #60: #68 left out: closed"; has "$out" "NOTE: bundle #60: #69 left out: another project"
+has "$out" "SKIPPED: #61: in bundle #60"; has "$out" "SKIPPED: #65: in bundle #60"; has "$out" "SKIPPED: #67: in bundle #60"
+has "$out" "SKIPPED: #63: author eve"; has "$out" "SKIPPED: #71: author eve"
+has "$out" "SKIPPED: #73: a bundle issue without open members left"
+has "$out" "NOTE: bundle #73: cannot read its linked issues/sub-issues (HTTP 404: Not Found)"
+grep -qF 'gh api repos/{owner}/{repo}/issues/60/sub_issues' "$FF/calls" && ok || bad "sub-issues not asked from gh"
+grep -q 'issues/71/' "$FF/calls" && bad "an untrusted bundle was looked up" || ok
+python3 - <<'PY' && ok || bad "issues.json bundle candidate"
+import json
+d = json.load(open(".factory/run/triage/issues.json"))
+assert [c["nr"] for c in d["candidates"]] == [60, 64, 66, 70, 72], [c["nr"] for c in d["candidates"]]
+b = d["candidates"][0]
+assert b["bundle"] is True and [m["nr"] for m in b["members"]] == [61, 65, 67], b
+assert b["members"][2]["url"] == "https://example.test/o/r/issues/67", b["members"][2]
+PY
+# the plan: the agent mixes the bundle with #70 and names a member; the bundle is pulled out whole
+cat > .factory/run/triage/plan.json <<'JSON'
+{"groups": [{"issues": [60, 70], "mode": "light", "reason": "controls"}, {"issues": [61], "mode": "light"}],
+ "skipped": [{"issue": 66, "reason": "unclear"}]}
+JSON
+out="$(J triage plan)"; first "$out" "PLAN: 4 jobs from 7 issues, 1 left out"
+has "$out" "GROUP 1: full  #60 #61 #65 #67  bundle #60: Controls pack"; has "$out" "GROUP 2: light #70"
+has "$out" "plan names #61, a member of bundle #60: the bundle is one job"
+has "$out" "#60 is a bundle issue: its own job with its members"
+has "$out" "bundle #60: a label sets the effort to full (asked: light)"
+has "$out" "bundle #60 has 3 member issues, more than a full job usually takes (2): kept together"
+# the agent skipping a bundle does not stop it: the user grouped those issues
+cat > .factory/run/triage/plan.json <<'JSON'
+{"groups": [{"issues": [70], "mode": "light"}], "skipped": [{"issue": 60, "reason": "an epic"}]}
+JSON
+out="$(J triage plan)"; has "$out" "bundle #60: the triage agent would skip it (an epic): started anyway"
+has "$out" "#60 #61 #65 #67  bundle #60"
+cat > .factory/run/triage/plan.json <<'JSON'
+{"groups": [{"issues": [60], "mode": "light", "reason": "controls"}], "skipped": []}
+JSON
+out="$(J triage plan)"; k="$(awk '/^GROUP [0-9]+: .*bundle #60/{print $2; exit}' <<<"$out")"; k="${k%:}"
+out="$(J triage start "$k")"; first "$out" "JOB: "; has "$out" "mode full  issues #60, #61, #65, #67"
+has "$out" "#60 Controls pack (bundle: #61, #65, #67)"; has "$out" "## Bundle #60: Controls pack"
+has "$out" "## Issue #67: Control e (sub-issue)"; has "$out" "a section per member issue"; has "$out" "Feature (from issue, untrusted)"
+BI="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+field "$BI" "j['issues'], j['issue'], j['mode'], j['untrusted']" "[60, 61, 65, 67] 60 full True"
+field "$BI" "j['issue_urls'][-1]" "https://example.test/o/r/issues/67"
+out="$(J triage prepare .factory/run/triage/bi.json --no-agent)"
+has "$out" "SKIPPED: #60: job $BI has it"; has "$out" "SKIPPED: #67: job $BI has it"; has "$out" "OK: 4 candidate issues: #64, #66, #70, #72"
+park "$BI"; J drop "$BI" >/dev/null
+# /factory issue <bundle nr>: `triage bundle` takes the bundle and its members; a member alone is refused
+J triage prepare .factory/run/triage/bi.json --no-agent >/dev/null
+out="$(J triage bundle light 61)"; first "$out" "ERROR: not startable"; has "$out" "#61 (in bundle #60)"
+first "$(J triage bundle light 60 70)" "ERROR: #60 is a bundle issue: start it on its own"
+out="$(J triage bundle light 60)"; first "$out" "JOB: "; has "$out" "mode full  issues #60, #61, #65, #67"
+has "$out" "more than a full job usually takes"; BJ="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; park "$BJ"
+# GitLab: issue links (relates_to); a linked open issue outside the fetched list still counts, another project not
+python3 - <<'PY'
+import json, os
+FF = os.environ["FF"]
+c = json.load(open(".factory/config.json")); c["forge"] = "gitlab"; json.dump(c, open(".factory/config.json", "w"))
+W = "https://example.test/g/p/-/issues/"
+def gl(n, title, labels=(), body="d", author="me", pid=5, web=W):
+    return {"iid": n, "title": title, "description": body, "author": {"username": author}, "labels": list(labels),
+            "state": "opened", "web_url": web + str(n), "project_id": pid}
+json.dump([gl(80, "Gl bundle", ["factory:bundle"], "- [ ] #81\n- [ ] #85"), gl(81, "Gl member"),
+           gl(85, "Gl untrusted", author="eve")], open(".factory/run/triage/gb.json", "w"))
+json.dump([dict(gl(82, "Linked"), link_type="relates_to"),
+           dict(gl(83, "Other project", pid=9, web="https://example.test/g/q/-/issues/"), link_type="relates_to")],
+          open(f"{FF}/gl-80.json", "w"))
+PY
+out="$(J triage prepare .factory/run/triage/gb.json --no-agent)"; first "$out" "OK: 1 candidate issue: #80"
+has "$out" "NOTE: bundle #80: members #81, #82"; has "$out" "#83 left out: another project"
+has "$out" "#85 left out: author eve is not in allowed_authors"
+grep -qF 'glab api projects/:id/issues/80/links' "$FF/calls" && ok || bad "issue links not asked from glab"
+out="$(J triage bundle docs 80)"; has "$out" "mode docs  issues #80, #81, #82"; GB="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+field "$GB" "j['issue_urls']" "['https://example.test/g/p/-/issues/80', 'https://example.test/g/p/-/issues/81', 'https://example.test/g/p/-/issues/82']"
+park "$GB"
+export PATH="$OLDPATH"
+cp "$T/config.bak" .factory/config.json
+
 # ---------- the full validation: once per round, after the reviews, through heavy ----------
 scenario=validate
 export FACTORY_LOCK_DIR="$T/locks" FACTORY_CPU_MAX=100

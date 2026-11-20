@@ -18,7 +18,8 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
           [--delivery local|push|pr]   (this job only; default config.delivery.mode)
           (--issue may be repeated: one job for a bundle of small related issues)
   job triage prepare <raw-issues.json> [--no-agent]   filter the forge's open issues, then spawn factory-triage
-  job triage bundle <docs|light|full> <nr>...   one job for issues you chose yourself (after prepare)
+  job triage bundle <docs|light|full> <nr>...   one job for issues you chose yourself (after prepare);
+                                      a bundle issue (label factory:bundle) on its own: it and its members
   job triage plan                     validate the triage plan, print the groups (jobs to start)
   job triage start <k>                start group k of the plan as a job
   job next <id>                       apply what is due, print the next action
@@ -50,6 +51,9 @@ TRIAGE = os.path.join(HERE, "run", "triage")
 MODE_RANK = {"docs": 0, "light": 1, "full": 2}
 MODE_LABELS = {"factory:docs": "docs", "factory:light": "light", "factory:full": "full"}
 SOLO_LABEL = "factory:solo"
+BUNDLE_LABEL = "factory:bundle"
+# a bundle issue lists its members as a checklist in its description: "- [ ] #12" or "- [x] #12"
+CHECKLIST_RE = re.compile(r"^[ \t]*[-*+][ \t]+\[[ xX]\][ \t]+#(\d+)(?![0-9])", re.M)
 DEFAULT_SKIP_LABELS = ["blocked", "wontfix", "factory:in-progress"]
 BUNDLE_MAX, FULL_BUNDLE_MAX, MAX_CANDIDATES, BODY_MAX, COMMENT_MAX = 4, 2, 30, 4000, 1500
 ACTIVE = ("spec", "build", "review", "approve", "deliver")
@@ -1494,6 +1498,7 @@ def norm_issue(raw):
     if not isinstance(nr, int):
         return None
     who = lambda a: str((a.get("login") or a.get("username") or "") if isinstance(a, dict) else a or "")
+    # (the REST shape of a GitHub sub-issue has "user" and "html_url"; "url" is then the API url)
     labels = [str(l.get("name") if isinstance(l, dict) else l) for l in raw.get("labels") or []]
     comments = []
     for c in raw.get("comments") or []:
@@ -1501,9 +1506,50 @@ def norm_issue(raw):
             comments.append({"author": who(c.get("author")), "body": str(c.get("body") or "")})
     return {"nr": nr, "title": str(raw.get("title") or ""),
             "body": str(raw.get("body") if "body" in raw else raw.get("description") or ""),
-            "author": who(raw.get("author")), "labels": labels, "comments": comments,
-            "url": raw.get("url") or raw.get("web_url") or None,
+            "author": who(raw.get("author") or raw.get("user")), "labels": labels, "comments": comments,
+            "url": raw.get("html_url") or raw.get("url") or raw.get("web_url") or None,
+            "project_id": raw.get("project_id"),
             "open": str(raw.get("state") or "open").lower() in ("open", "opened")}
+
+
+def has_label(c, label):
+    return label in [l.lower() for l in c["labels"]]
+
+
+def project_of(c):
+    """The project part of an issue url (".../o/r/issues/5" -> ".../o/r"), else None."""
+    m = re.match(r"^(.*?)/(?:-/)?issues/\d+/?$", str(c.get("url") or ""))
+    return m.group(1) if m else None
+
+
+def same_project(a, b):
+    pa, pb = project_of(a), project_of(b)
+    if pa and pb:
+        return pa == pb
+    if a.get("project_id") is not None and b.get("project_id") is not None:
+        return a["project_id"] == b["project_id"]
+    return True
+
+
+def forge_members(nr):
+    """The issues the forge itself ties to bundle issue nr: GitHub sub-issues, GitLab issue
+    links. Returns (issues, problem); no forge or no CLI gives ([], None)."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        cmd = ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{nr}/sub_issues?per_page=100"]
+    elif forge == "gitlab" and shutil.which("glab"):
+        cmd = ["glab", "api", f"projects/:id/issues/{nr}/links?per_page=100"]
+    else:
+        return [], None
+    r = run(cmd, timeout=60)
+    try:
+        rows = json.loads(r.stdout) if r.returncode == 0 else None
+    except ValueError:
+        rows = None
+    if not isinstance(rows, list):
+        msg = ((r.stderr or r.stdout or "").strip().splitlines() or ["no JSON list"])[0]
+        return [], msg[:120]
+    return [c for c in map(norm_issue, rows) if c], None
 
 
 def open_pr_texts():
@@ -1588,30 +1634,93 @@ def triage_prepare(args):
     ref = f"{rem}/{git('branch', '--show-current') or 'main'}"
     if git("rev-parse", "--verify", "-q", ref) is None:
         ref = "HEAD"
-    cands, skipped, unlabelled = [], [], 0
-    for c in sorted(filter(None, map(norm_issue, raw)), key=lambda c: c["nr"]):
+    NO_LABEL = object()
+
+    def why_not(c, need_label=True):
+        """Why issue c must not start (None: it may)."""
         low = [l.lower() for l in c["labels"]]
-        why = None
         if not c["open"]:
-            why = "not open"
-        elif c["author"].lower() not in allowed:
-            why = f"author {c['author'] or '?'} is not in allowed_authors"
-        elif need and need not in low:
-            unlabelled += 1
-            continue
-        elif skip & set(low):
-            why = "label " + sorted(skip & set(low))[0]
-        elif c["nr"] in taken:
+            return "not open"
+        if c["author"].lower() not in allowed:
+            return f"author {c['author'] or '?'} is not in allowed_authors"
+        if need_label and need and need not in low:
+            return NO_LABEL
+        if skip & set(low):
+            return "label " + sorted(skip & set(low))[0]
+        if c["nr"] in taken:
             j = taken[c["nr"]]
-            why = f"job {j['id']} has it ({j.get('stage')})"
-        else:
-            why = work_exists(c["nr"], prs, branches, ref)
-        if why:
-            skipped.append({"issue": c["nr"], "reason": why})
-            continue
-        c["body"] = c["body"][:BODY_MAX] + (" […]" if len(c["body"]) > BODY_MAX else "")
+            return f"job {j['id']} has it ({j.get('stage')})"
+        return work_exists(c["nr"], prs, branches, ref)
+
+    def trim(c):
+        c = dict(c, body=c["body"][:BODY_MAX] + (" […]" if len(c["body"]) > BODY_MAX else ""))
         c["comments"] = [dict(x, body=x["body"][:COMMENT_MAX]) for x in c["comments"]
                          if x["author"].lower() in allowed][:5]   # never other people's comments
+        return c
+
+    issues = {c["nr"]: c for c in sorted(filter(None, map(norm_issue, raw)), key=lambda c: c["nr"])}
+    reasons = {n: why_not(c) for n, c in issues.items()}
+    claimed, members, member_notes, out = {}, {}, {}, Out()
+    # Bundle issues (label factory:bundle, open, by an allowed author): the user's own grouping.
+    # Their members are skipped as single candidates; the bundle is started as one job.
+    for b, bc in issues.items():
+        if not has_label(bc, BUNDLE_LABEL) or not bc["open"] or bc["author"].lower() not in allowed:
+            continue
+        refs = [int(x) for x in CHECKLIST_RE.findall(bc["body"])]
+        linked, problem = forge_members(b)
+        if problem:
+            out.notes.append(f"NOTE: bundle #{b}: cannot read its linked issues/sub-issues ({problem}): "
+                             "only its checklist counts")
+        known = {}
+        for m in linked:
+            if not same_project(bc, m):
+                member_notes.setdefault(b, []).append(f"#{m['nr']} left out: another project")
+                continue
+            known[m["nr"]] = m
+            refs.append(m["nr"])
+        members[b] = []
+        for m in dict.fromkeys(refs):
+            mc = issues.get(m) or known.get(m)
+            if m == b:
+                continue
+            if mc is None:
+                why = "not an open issue of this project"
+            elif not mc["open"]:
+                why = "closed"
+            elif mc["author"].lower() not in allowed:
+                why = f"author {mc['author'] or '?'} is not in allowed_authors"
+            elif has_label(mc, BUNDLE_LABEL):
+                why = "a bundle itself"
+            elif has_label(mc, SOLO_LABEL):
+                why = f"{SOLO_LABEL}: stays out of bundles, its own job"
+            elif m in claimed:
+                why = f"already in bundle #{claimed[m]}"
+            else:
+                claimed[m] = b
+                why = why_not(mc, need_label=False)   # members need no issues.label: the bundle has it
+                if not why:
+                    members[b].append(mc)
+                    continue
+            member_notes.setdefault(b, []).append(f"#{m} left out: {why}")
+    cands, skipped, unlabelled = [], [], 0
+    for n, c in issues.items():
+        why = reasons[n]
+        if why is None and n in claimed:
+            why = f"in bundle #{claimed[n]}"
+        if why is NO_LABEL:
+            unlabelled += 1
+            continue
+        if why is None and n in members and not members[n]:
+            why = "a bundle issue without open members left (close it?)"
+        if n in members:
+            out.notes += [f"NOTE: bundle #{n}: {x}" for x in member_notes.get(n, [])]
+        if why:
+            skipped.append({"issue": n, "reason": why})
+            continue
+        c = trim(c)
+        if n in members:
+            c.update(bundle=True, members=[trim(m) for m in members[n]])
+            out.notes.append(f"NOTE: bundle #{n}: members " + ", ".join(f"#{m['nr']}" for m in members[n]))
         cands.append(c)
     more = max(0, len(cands) - MAX_CANDIDATES)
     cands = cands[:MAX_CANDIDATES]
@@ -1625,7 +1734,6 @@ def triage_prepare(args):
             pass
     tri_write("issues.json", {"candidates": cands, "skipped": skipped, "bundle_max": cap,
                               "full_bundle_max": full_cap, "at": now()})
-    out = Out()
     out.notes += [f"SKIPPED: #{s['issue']}: {s['reason']}" for s in skipped]
     if unlabelled:
         out.notes.append(f"NOTE: {unlabelled} open issue(s) without the label {cfg['label']!r} left out")
@@ -1659,11 +1767,19 @@ def triage_plan(args):
     if not isinstance(plan, dict):
         raise Fail("plan.json must be a JSON object with groups and skipped")
     cands = {c["nr"]: c for c in data.get("candidates") or []}
+    member_of = {m["nr"]: c["nr"] for c in cands.values() for m in c.get("members") or []}
     cap, full_cap = int(data.get("bundle_max") or BUNDLE_MAX), int(data.get("full_bundle_max") or FULL_BUNDLE_MAX)
     notes, groups, used = [], [], set()
 
+    def add_bundle(b, mode, reason):
+        """A bundle issue: always one job with all its members, never split (the user grouped them)."""
+        group = bundle_group(cands[b], mode, data, notes)
+        groups.append(dict(group, reason=reason or "bundle issue", started=None))
+
     def add(nrs, mode, reason):
         """A group, with the mode and size limits the script (not the agent) decides."""
+        if len(nrs) == 1 and cands[nrs[0]].get("bundle"):
+            return add_bundle(nrs[0], mode, reason)
         effective = [issue_override(cands[n]) or mode for n in nrs]
         final = max(effective, key=MODE_RANK.get)
         if final != mode and len(nrs) == 1:
@@ -1681,7 +1797,9 @@ def triage_plan(args):
             continue
         nrs = []
         for n in g.get("issues") or []:
-            if n not in cands:
+            if n in member_of:
+                notes.append(f"NOTE: plan names #{n}, a member of bundle #{member_of[n]}: the bundle is one job")
+            elif n not in cands:
                 notes.append(f"NOTE: plan names #{n}, which is not a candidate: ignored")
             elif n in used or n in nrs:
                 notes.append(f"NOTE: #{n} is in the plan twice: kept once")
@@ -1692,12 +1810,14 @@ def triage_plan(args):
             notes.append(f"NOTE: group {nrs}: mode {g.get('mode')!r} is not docs|light|full: using full")
         reason = str(g.get("reason") or "")[:200]
         used.update(nrs)
-        solo = [n for n in nrs if SOLO_LABEL in [l.lower() for l in cands[n]["labels"]]]
+        solo = [n for n in nrs if has_label(cands[n], SOLO_LABEL) or cands[n].get("bundle")]
         for n in solo:
             add([n], mode, reason)
         rest = [n for n in nrs if n not in solo]
-        if solo and rest:
-            notes.append(f"NOTE: {', '.join('#' + str(n) for n in solo)} has {SOLO_LABEL}: on its own")
+        if solo and len(nrs) > 1:
+            for n in solo:
+                notes.append(f"NOTE: #{n} is a bundle issue: its own job with its members" if cands[n].get("bundle")
+                             else f"NOTE: #{n} has {SOLO_LABEL}: on its own")
         if rest:
             add(rest, mode, reason)
     skipped = []
@@ -1706,13 +1826,17 @@ def triage_plan(args):
         if n not in cands or n in used:
             continue
         used.add(n)
-        if issue_override(cands[n]):   # a person asked for it by label: that wins over the agent
+        if cands[n].get("bundle"):   # the user grouped these issues: the bundle is started anyway
+            notes.append(f"NOTE: bundle #{n}: the triage agent would skip it ({str(sk.get('reason') or '')[:120]}): "
+                         "started anyway, it is your grouping")
+            add_bundle(n, "full", "bundle issue")
+        elif issue_override(cands[n]):   # a person asked for it by label: that wins over the agent
             add([n], issue_override(cands[n]), "label " + issue_override(cands[n]) + " overrides the triage skip")
         else:
             skipped.append({"issue": n, "reason": str(sk.get("reason") or "")[:200]})
     for n in sorted(set(cands) - used):
         notes.append(f"NOTE: #{n} is not in the plan: its own job")
-        add([n], issue_override(cands[n]) or "full", "not in the triage plan")
+        add([n], "full" if cands[n].get("bundle") else issue_override(cands[n]) or "full", "not in the triage plan")
     for i, g in enumerate(groups, 1):
         g["k"] = i
     tri_write("groups.json", {"groups": groups, "skipped": skipped})
@@ -1722,8 +1846,9 @@ def triage_plan(args):
                     + (f", {len(skipped)} left out" if skipped else ""))
     for g in groups:
         tags = " ".join(f"#{n}" for n in g["issues"])
-        titles = "; ".join(cands[n]["title"][:50] for n in g["issues"])
-        out.main.append(f"GROUP {g['k']}: {g['mode']:<5} {tags}  {titles}" + (f"  [{g['reason']}]" if g["reason"] else ""))
+        titles = "; ".join(cands[n]["title"][:50] for n in g["issues"][:1 if g.get("bundle") else None])
+        out.main.append(f"GROUP {g['k']}: {g['mode']:<5} {tags}  " + (f"bundle #{g['bundle']}: " if g.get("bundle") else "")
+                        + titles + (f"  [{g['reason']}]" if g["reason"] else ""))
     out.main += [f"LEFT-OUT: #{x['issue']}: {x['reason'] or 'no reason given'}" for x in skipped]
     out.notes += notes
     if groups:
@@ -1732,14 +1857,39 @@ def triage_plan(args):
     return out
 
 
+def bundle_group(bc, mode, data, notes):
+    """The one group of bundle issue bc: the bundle first, then its open members. The effort is
+    the highest of the given mode and the labels of the bundle and every member; the size limit
+    only warns, because the user chose the grouping."""
+    nrs = [bc["nr"]] + [m["nr"] for m in bc.get("members") or []]
+    final = max([issue_override(c) or mode for c in [bc] + list(bc.get("members") or [])], key=MODE_RANK.get)
+    size = int(data.get("full_bundle_max") or FULL_BUNDLE_MAX) if final == "full" else int(data.get("bundle_max") or BUNDLE_MAX)
+    if final != mode:
+        notes.append(f"NOTE: bundle #{bc['nr']}: a label sets the effort to {final} (asked: {mode})")
+    if len(nrs) - 1 > size:
+        notes.append(f"NOTE: bundle #{bc['nr']} has {len(nrs) - 1} member issues, more than a {final} job "
+                     f"usually takes ({size}): kept together, it is your grouping")
+    return {"issues": nrs, "mode": final, "bundle": bc["nr"]}
+
+
+def issue_text(c):
+    text = f"{c['title']}\n\n{c['body']}".strip()
+    for cm in c.get("comments") or []:
+        text += f"\n\nComment by {cm['author']}:\n{cm['body']}"
+    return text
+
+
 def group_feature(group, cands):
-    parts = []
-    for n in group["issues"]:
-        c = cands[n]
-        text = f"{c['title']}\n\n{c['body']}".strip()
-        for cm in c.get("comments") or []:
-            text += f"\n\nComment by {cm['author']}:\n{cm['body']}"
-        parts.append((n, c["title"], text))
+    if group.get("bundle"):
+        bc = cands[group["bundle"]]
+        ms = bc.get("members") or []
+        head = f"#{bc['nr']} {bc['title']} (bundle: " + ", ".join(f"#{m['nr']}" for m in ms) + ")"
+        body = [f"This job is bundle issue #{bc['nr']} with its {len(ms)} member issues. Handle every member; "
+                "the spec needs a section per member issue, headed with its `#<nr>`, with that issue's own "
+                "acceptance criteria. The bundle issue only groups them: its text is context."]
+        body += [f"## Bundle #{bc['nr']}: {issue_text(bc)}"] + [f"## Issue #{m['nr']}: {issue_text(m)}" for m in ms]
+        return head + "\n\n" + "\n\n".join(body)
+    parts = [(n, cands[n]["title"], issue_text(cands[n])) for n in group["issues"]]
     if len(parts) == 1:
         n, title, text = parts[0]
         return f"#{n} {text}"
@@ -1748,6 +1898,13 @@ def group_feature(group, cands):
             "needs acceptance criteria per issue, each headed with its `#<nr>`."]
     body += [f"## Issue #{n}: {text}" for n, _, text in parts]
     return head + "\n\n" + "\n\n".join(body)
+
+
+def group_urls(group, cands):
+    by_nr = dict(cands)
+    if group.get("bundle"):
+        by_nr.update({m["nr"]: m for m in cands[group["bundle"]].get("members") or []})
+    return [by_nr[n].get("url") for n in group["issues"]]
 
 
 def triage_start(args):
@@ -1766,8 +1923,7 @@ def triage_start(args):
     if taken & set(group["issues"]):
         raise Fail(f"an issue of group {k} has a job now: run `job triage prepare` again")
     nrs = group["issues"]
-    out = create_job(group_feature(group, cands), group["mode"], nrs,
-                     [cands[n].get("url") for n in nrs], untrusted=True)
+    out = create_job(group_feature(group, cands), group["mode"], nrs, group_urls(group, cands), untrusted=True)
     jid = next((l.split()[1] for l in out.main if l.startswith("JOB: ")), None)
     group["started"] = jid
     tri_write("groups.json", gdata)
@@ -1788,8 +1944,19 @@ def triage_bundle(args):
     cands = {c["nr"]: c for c in data.get("candidates") or []}
     gone = [n for n in nrs if n not in cands]
     if gone:
+        why = {x.get("issue"): x.get("reason") for x in data.get("skipped") or []}
         raise Fail("not startable (author, label, an existing job, PR or commit; see SKIPPED from "
-                   "`triage prepare`): " + ", ".join(f"#{n}" for n in gone))
+                   "`triage prepare`): " + ", ".join(f"#{n}" + (f" ({why[n]})" if why.get(n) else "") for n in gone))
+    bundles = [n for n in nrs if cands[n].get("bundle")]
+    if bundles and len(nrs) > 1:
+        raise Fail(", ".join(f"#{n}" for n in bundles) + " is a bundle issue: start it on its own (its members come with it)")
+    if bundles:
+        notes = []
+        group = bundle_group(cands[bundles[0]], args[0], data, notes)
+        out = create_job(group_feature(group, cands), group["mode"], group["issues"], group_urls(group, cands),
+                         untrusted=True)
+        out.notes += notes
+        return out
     mode = max([args[0]] + [issue_override(cands[n]) or args[0] for n in nrs], key=MODE_RANK.get)
     size = int(data.get("full_bundle_max") or FULL_BUNDLE_MAX) if mode == "full" else int(data.get("bundle_max") or BUNDLE_MAX)
     if len(nrs) > size:

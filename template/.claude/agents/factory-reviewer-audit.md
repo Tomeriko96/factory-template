@@ -91,11 +91,25 @@ quote their code in your review (the next builder reads it): name the test and t
    `cd <Worktree> && trap 'cd <Worktree> && rm -f <each copied file>' EXIT && cp -R <Job>/acceptance/. . && <Repo>/.factory/heavy -- <Run command>`
    (no `--cache`: the tree is dirty while they are there). Never commit them, never `git add`
    them; check with `git status --porcelain` afterwards that nothing of them is left.
-3. Add one row per criterion to the claims table, source `acceptance.md`: ✅ passes;
-   ❌ fails on behaviour (wrong output, missing feature): `[blocking]` like any unmet
-   criterion; ⚠️ fails only because the test guessed an interface the spec did not fix
-   (import error, other name or signature, while the behaviour is there by your own check):
-   `[non-blocking]`, say what the test assumed.
+3. Add one row per criterion to the claims table, source `acceptance.md`: ✅ passes.
+   A failing test means you decide which of two it is:
+   - (a) the code does not meet the criterion (wrong output, missing feature): ❌,
+     `[blocking]` like any unmet criterion. When in doubt, it is (a).
+   - (b) the test's assumption is wrong (it guessed a route, field name, signal, role,
+     representation or environment the criterion does not name) **and** you verified the
+     criterion yourself with independent evidence: your own command and its output, or a
+     probe/test you ran, or the exact code you read (`path:line`) when nothing can be run.
+     Mark the row `⚠️ TEST: <why the test is wrong> · criterion verified by <evidence>`,
+     e.g. `⚠️ TEST: assumed an empty title is a row error, it is a valid draft · criterion
+     verified by probe err-after-skip: RowError(row=5)`. `[non-blocking]`. The precheck does
+     not count it as a deviation for auto-merge, so the same strictness as `⚠️ ENV:`
+     holds: only with that independent evidence of the criterion's behaviour, never for a
+     functional doubt, never because the builder's own test passes (that is not
+     independent unless you re-ran it and read what it asserts). Without the
+     `verified by` part it counts as a plain ⚠️ and keeps the job off auto-merge.
+4. For every (b) row, append the wrong assumption to `<Job>/acceptance-notes.md` (create it;
+   one line per test: `- <test name>: assumed <X>; actual surface: <Y> (<path:line>)`), so
+   later acceptance writers in this repo stop guessing the same way. No test code there.
 
 ## Red-green evidence and debugging
 Adapted from obra/superpowers (test-driven-development, systematic-debugging; MIT).
@@ -150,7 +164,10 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
   when the same check passes under normal conditions (rerun it alone and give that
   result) or the cause is demonstrably load (`heavy status`, `/proc/loadavg`) or network,
   never for a functional doubt. Without a measured load or a network cause it counts as
-  a plain ⚠️. Any other ⚠️ still keeps the job off auto-merge.
+  a plain ⚠️. `⚠️ TEST: <why the test is wrong> · criterion verified by <evidence>` = a
+  hidden acceptance test failed on a wrong assumption and you verified the criterion
+  independently (see Hidden acceptance tests, step 3); same rule: without `verified by`
+  it is a plain ⚠️. Any other ⚠️ still keeps the job off auto-merge.
 - **Findings**: numbered, each `[blocking]` or `[non-blocking]` + `path:line` +
   problem + impact + fix + the table row. `None.` if empty. A ❌ on an acceptance
   criterion or on a claim in build.md is always blocking, except a size or shape limit

@@ -226,6 +226,15 @@ check("Hidden acceptance tests:" in JOB and "`Hidden acceptance tests:`" in text
 check("trap" in (section(texts.get("reviewer-audit", ""), "Hidden acceptance tests") or ""), "audit: acceptance tests not removed in the same call")
 check("Never open" in (section(texts.get("builder", ""), "Hidden acceptance tests") or ""), "builder: may read the hidden tests")
 check("acceptance_tests" in SKILL and "factory-acceptance-writer" in SKILL, "SKILL.md: acceptance tests not documented")
+# A failing hidden test on a wrong assumption: ⚠️ TEST with independent evidence, notes fed back to the writer
+AUD = texts.get("reviewer-audit", "")
+AUD_ACC = section(AUD, "Hidden acceptance tests") or ""
+check("⚠️ TEST:" in AUD_ACC and "criterion verified by" in AUD_ACC and "functional doubt" in AUD_ACC,
+      "audit: the ⚠️ TEST rule (independent evidence, never a functional doubt) is missing")
+check("acceptance-notes.md" in AUD_ACC and "acceptance-notes.md" in AW, "audit/acceptance-writer: acceptance-notes.md loop missing")
+check("Avoid guessing the surface" in AW, "acceptance-writer: the avoid-guessing-the-surface rule is missing")
+PRE = open(os.path.join(ROOT, "template/.factory/precheck")).read()
+check("TEST_MARK" in PRE and "verified" in PRE and "⚠️ TEST:" in SKILL, "precheck/SKILL.md: ⚠️ TEST marker not handled")
 
 # heavy's result line: printed by heavy, refused-when-piped by the guard, quoted by the builder
 HEAVY_SRC = open(os.path.join(T, ".factory", "heavy")).read()

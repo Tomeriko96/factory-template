@@ -243,8 +243,13 @@ from spec.md's numbered acceptance criteria only, through public surfaces, into 
 folder (`acceptance/` and `acceptance.md` with a `Run:` command), never the worktree. The
 builder is not told about them and is instructed not to look. Every round the audit
 reviewer copies them into the worktree, runs them through `heavy`, removes them in the
-same call and reports one row per criterion: a behaviour failure is blocking, a test that
-only guessed an interface wrong is a non-blocking note. `acceptance_tests` in config.json:
+same call and reports one row per criterion: a behaviour failure is blocking; a test whose
+assumption was wrong (a route, field, role or representation the criterion does not name)
+is `⚠️ TEST: <why> · criterion verified by <evidence>` when the audit verified the criterion
+itself, which does not hold auto-merge. The audit writes those wrong assumptions to the job's
+`acceptance-notes.md`, and the writer reads the notes of earlier jobs and asserts only the
+behaviour a criterion names (it skips a criterion with a note rather than invent a detail).
+`acceptance_tests` in config.json:
 missing = `full` jobs only, `true` = `full` and `light`, `false` = off.
 
 ## Skills and engineering discipline
@@ -292,7 +297,10 @@ switched off if a rework had left it on). `yes` needs all of: an approver `MERGE
 `--docs` precheck, never `/factory approve`); precheck without issues and without an audit
 deviation (⚠️; a reviewer may mark an item `⚠️ ENV: <cause, measured load>` when it deviates only
 because of the environment, e.g. a timing check that was slow at load 10 on 4 cores and passes
-alone: that does not block, any other ⚠️ does); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
+alone; or `⚠️ TEST: <why the test is wrong> · criterion verified by <evidence>` when a hidden
+acceptance test failed on a wrong guess about the app's surface and the audit verified the
+criterion with its own evidence: neither blocks, any other ⚠️ does, as does either marker without
+its evidence); no file in CI/pipeline config, dependencies/lockfiles, containers/deploy config,
 schema/migrations or auth, nor in `delivery.auto_merge_never` (your globs, e.g. personal-data
 paths); no `HOLD: <reason>` line from the approver (breaking change, public API, user-visible
 behaviour); and no sync in which an agent resolved conflicts (one reviewer checked it: a human merges that;

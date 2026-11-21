@@ -352,6 +352,15 @@ M10="$(newjob "zq am env bare")"; drive_audit "$M10" src/bare.py "3.4 s | ⚠️
 out="$(J next "$M10")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; has "$(cat "$(jd "$M10")/precheck.md")" "without a measured load"; park "$M10"
 M11="$(newjob "zq am env mixed")"; drive_audit "$M11" src/mixed.py "⚠️ wrong total | ⚠️ ENV: load 9 on 4 cores"
 out="$(J next "$M11")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M11"
+# ⚠️ TEST: a hidden acceptance test with a wrong assumption, criterion verified independently, does not block
+M8T="$(newjob "zq am test")"; drive_audit "$M8T" src/acc.py "test fails | ⚠️ TEST: assumed /prompts/1 is guarded, it is public · criterion verified by curl /prompts/2 → 302 /login"
+out="$(J next "$M8T")"; has "$out" "AUTO-MERGE: yes"; has "$(cat "$(jd "$M8T")/precheck.md")" "test-only"; park "$M8T"
+M9T="$(newjob "zq am test bare")"; drive_audit "$M9T" src/accb.py "test fails | ⚠️ TEST: the test guessed a field name"
+out="$(J next "$M9T")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; has "$(cat "$(jd "$M9T")/precheck.md")" "without 'verified by"; park "$M9T"
+M10T="$(newjob "zq am test mixed")"; drive_audit "$M10T" src/accm.py "⚠️ off by one | ⚠️ TEST: wrong route · criterion verified by probe"
+out="$(J next "$M10T")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M10T"
+M11T="$(newjob "zq am test env")"; drive_audit "$M11T" src/acce.py "⚠️ ENV: load 9 on 4 cores, 1 s alone | ⚠️ TEST: wrong role · criterion verified by src/a.py:12"
+out="$(J next "$M11T")"; has "$out" "AUTO-MERGE: yes"; park "$M11T"
 
 # sync: a clean base merge keeps auto-merge (switched on again after the push); resolved conflicts do not
 M12="$(newjob "zq am sync")"; drive "$M12" src/sync_me.py; merge_decision "$M12"

@@ -30,8 +30,9 @@ Checks (each failing one is listed under Issues):
   - round-N/validate.md (written by --validate) does not say `VALIDATE: FAIL`
   - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
   - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue; a row whose
-    only ⚠️ is `⚠️ ENV: <cause with the measured load, or a network cause>` is environment-only:
-    noted, but no deviation for the auto-merge gate)
+    only ⚠️ marks are `⚠️ ENV: <cause with the measured load, or a network cause>` (environment-only)
+    or `⚠️ TEST: <why the hidden acceptance test is wrong> · criterion verified by <evidence>`
+    (test-only): noted, but no deviation for the auto-merge gate)
   - the diff touches nothing under .factory/ or .claude/
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
   - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
@@ -40,7 +41,8 @@ Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ 
 
 Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>`. The mechanical half
 of the auto-merge gate (.factory/job adds the rest): no issues, no audit deviation (⚠️; an
-`⚠️ ENV:` row with a measured load or network cause is not one), and no
+`⚠️ ENV:` row with a measured load or network cause, or a `⚠️ TEST:` row with a `verified by`
+part, is not one), and no
 file in a class that CI alone does not vouch for (CI/pipeline config, dependencies and
 lockfiles, containers, schema and migrations, auth), plus whatever `delivery.auto_merge_never`
 in config.json lists (globs; put personal-data paths there).
@@ -68,6 +70,10 @@ MAX_FILES, MAX_LINES, MAX_BYTES = 40, 1500, 1_000_000
 # An environment-only deviation in the audit table: `⚠️ ENV: <cause>` up to the end of the cell
 ENV_MARK = re.compile(r"⚠\ufe0f?\s*ENV:([^|]*)")
 ENV_EVIDENCE = re.compile(r"\bload\s*(average\s*)?[:=]?\s*\d|\bnetwork\b|\bDNS\b|\btimeout\b.*\bnetwork", re.I)
+# A hidden acceptance test that failed on a wrong assumption while the audit verified the
+# criterion itself: `⚠️ TEST: <why the test is wrong> · criterion verified by <evidence>`
+TEST_MARK = re.compile(r"⚠\ufe0f?\s*TEST:([^|]*)")
+TEST_EVIDENCE = re.compile(r"\bverified\s+by\b\W*\w", re.I)
 # Files where a green CI is not enough to merge unseen. A glob with a "/" is matched against the
 # whole path (with a leading "/", so "*/auth/*" also matches a top-level auth/), one without
 # against the file name.
@@ -534,13 +540,24 @@ def main():
                     # `⚠️ ENV: <cause, measured load>`: the deviation came from the machine (load,
                     # network), not the change. Only with a measured load or a network cause;
                     # any other ⚠️ in the row still counts.
+                    # `⚠️ TEST: <why> · criterion verified by <evidence>`: a hidden acceptance test
+                    # guessed the surface wrong and the audit verified the criterion independently.
                     envs = ENV_MARK.findall(line)
-                    rest = ENV_MARK.sub("", line)
-                    if envs and "⚠" not in rest and all(ENV_EVIDENCE.search(e) for e in envs):
-                        notes.append("audit environment-only (⚠️ ENV, not a deviation): " + row)
+                    tests = TEST_MARK.findall(line)
+                    rest = TEST_MARK.sub("", ENV_MARK.sub("", line))
+                    bad_env = [e for e in envs if not ENV_EVIDENCE.search(e)]
+                    bad_test = [t for t in tests if not TEST_EVIDENCE.search(t)]
+                    if (envs or tests) and "⚠" not in rest and not bad_env and not bad_test:
+                        kinds = " + ".join(k for k, v in (("ENV", envs), ("TEST", tests)) if v)
+                        notes.append(f"audit {'environment' if not tests else 'test' if not envs else 'environment/test'}"
+                                     f"-only (⚠️ {kinds}, not a deviation): " + row)
                     else:
-                        notes.append("audit deviation: " + row
-                                     + (" (⚠️ ENV without a measured load or network cause)" if envs and "⚠" not in rest else ""))
+                        why_dev = []
+                        if "⚠" not in rest and bad_env:
+                            why_dev.append("⚠️ ENV without a measured load or network cause")
+                        if "⚠" not in rest and bad_test:
+                            why_dev.append("⚠️ TEST without 'verified by <evidence>'")
+                        notes.append("audit deviation: " + row + (f" ({'; '.join(why_dev)})" if why_dev else ""))
 
     files = lines = 0
     commits = "?"

@@ -152,8 +152,10 @@ their worktree-relative paths) and `acceptance.md` (`ACCEPTANCE: WRITTEN` with a
 command and a criterion → test table, or `ACCEPTANCE: NONE <reason>`). The builder is never
 told about them and is instructed not to look. Every round the audit reviewer's prompt
 gets a `Hidden acceptance tests:` line: it copies them into the worktree, runs them through
-`heavy`, removes them in the same call and reports one row per criterion. You never read
-or relay their content.
+`heavy`, removes them in the same call and reports one row per criterion (a test that failed
+only on a wrong assumption, with the criterion verified independently, is `⚠️ TEST: … ·
+criterion verified by …` and goes to the job's `acceptance-notes.md`, which later writers
+read). You never read or relay their content.
 
 ## Routing
 
@@ -191,6 +193,7 @@ in name only (the metrics still record it); the model step works either way.
     job.json                             (written only by .factory/job)
     spec.md
     acceptance.md, acceptance/            (factory-acceptance-writer: hidden tests; only the audit uses them)
+    acceptance-notes.md                   (audit: wrong assumptions of failed hidden tests; later acceptance writers read it)
     round-N/build.md
     round-N/build-blocked-K.md            (a BUILD: BLOCKED that was retried one step up)
     round-N/review-<name>.md
@@ -681,7 +684,9 @@ report the error (the branch is already up).
 `ACTION: deliver` printed `AUTO-MERGE: yes`). `.factory/job` decides: `yes` only for a job that
 got here through an approver `MERGE` (or a clean `--docs` precheck), whose precheck says
 `AUTO-MERGE: yes` (no issues, no audit deviation — an `⚠️ ENV: <cause, measured load>` row,
-caused only by load or network, is not one — no file in CI/pipeline config, dependencies,
+caused only by load or network, is not one, nor a `⚠️ TEST: <why> · criterion verified by
+<evidence>` row, where a hidden acceptance test guessed wrong and the audit verified the
+criterion itself — no file in CI/pipeline config, dependencies,
 containers, schema/migrations, auth or `auto_merge_never`), without an approver `HOLD:` line,
 and whose branch has no sync in which an agent resolved conflicts (a clean sync does not
 count). On `AUTO-MERGE: no (<reasons>)` open the

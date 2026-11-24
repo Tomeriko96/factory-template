@@ -13,6 +13,13 @@
                                         `validate.open_pr`, and waits for that commit's pipeline on the
                                         forge (through .factory/ci); `VALIDATE: ERROR <why>` when the
                                         push, the PR/MR or the pipeline cannot be had (a human looks)
+  .factory/precheck --pr-body <job-id>  write <job>/pr-body.md for delivery: the job's PR text (`## PR` of
+                                        decision.md or build.md; title = its first line) plus one
+                                        `<issues.link> #N` line for every issue of the job it does not
+                                        close yet (a bundle: the bundle issue and every member); an issue
+                                        marked partial (`Refs #N (left: <what>)`) is kept open; the footer
+  .factory/precheck --closes <job-id> [<file>]
+                                        check a PR/MR body: `CLOSES: OK`, or `CLOSES: MISSING #a, #b` (exit 1)
   .factory/precheck --hold <job-id>     only list the files of the job's diff that sit in a class
                                         CI alone does not vouch for (`<class>: <file>` per line);
                                         .factory/job uses it to lift a `light` job to `full`
@@ -37,6 +44,10 @@ Checks (each failing one is listed under Issues):
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
   - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
   - the diff is not huge (> 40 files or > 1500 changed lines) and has no binary or > 1 MB file
+  - a job from issues whose PR text exists already (docs: build.md; a re-run after the approver:
+    decision.md) closes every issue with a closing keyword line, or marks it partial
+    (`Refs #N (left: <what>)`); a note names the missing numbers (delivery adds their lines with
+    --pr-body and checks the body with --closes)
 Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ is still seen.
 
 Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>`. The mechanical half
@@ -463,9 +474,125 @@ def validate_main(job_id, rnd=None):
     return 0
 
 
+# ---------- PR/MR body: one closing line per issue ----------
+FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+KEYWORD_RE = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
+
+
+def job_issues(job):
+    nrs = job.get("issues")
+    if isinstance(nrs, list):
+        return [n for n in nrs if isinstance(n, int) and not isinstance(n, bool)]
+    return [job["issue"]] if isinstance(job.get("issue"), int) else []
+
+
+def issue_link(cfg):
+    word = str(((cfg.get("issues") or {}).get("link")) or "Closes").strip()
+    return word if re.fullmatch(r"[A-Za-z]+", word) else "Closes"
+
+
+def pr_section(path):
+    """(title, body) of the `## PR` section of an agent file (title = its first non-empty line)."""
+    try:
+        text = open(path, errors="replace").read()
+    except OSError:
+        return None, None
+    m = re.search(r"^## PR[ \t]*$", text, re.M)
+    if not m:
+        return None, None
+    lines = text[m.end():].lstrip("\n").splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        return None, None
+    return lines[0].strip().lstrip("#").strip(), "\n".join(lines[1:]).strip()
+
+
+def closing_report(nrs, text, link="Closes"):
+    """(closed, partial, missing) for the issues nrs in a PR/MR body: closed = named on a line with a
+    closing keyword (or with issues.link when that is not a closing word, e.g. Refs for mirrored repos);
+    partial = {nr: note} named `Refs #N` with a `left:` note on the same line; missing = the rest."""
+    closed, partial = [], {}
+    words = KEYWORD_RE if re.fullmatch(KEYWORD_RE, link, re.I) else f"(?:{KEYWORD_RE}|{re.escape(link)})"
+    for line in (text or "").splitlines():
+        for m in re.finditer(rf"\b{words}\b:?[ \t]+((?:#\d+(?:[ \t]*(?:,|and|&)[ \t]*)?)+)", line, re.I):
+            closed += [int(x) for x in re.findall(r"#(\d+)", m.group(1))]
+        left = re.search(r"\bleft:\s*(.+)", line, re.I)
+        if left:
+            for x in re.findall(r"\bRefs?\b:?[ \t]+#(\d+)", line, re.I):
+                partial.setdefault(int(x), "left: " + left.group(1).strip().rstrip(")").strip()[:200])
+    closed_set = set(closed)
+    missing = [n for n in nrs if n not in closed_set and n not in partial]
+    return [n for n in nrs if n in closed_set], {n: v for n, v in partial.items() if n in nrs and n not in closed_set}, missing
+
+
+def pr_body_main(job_id):
+    """`--pr-body <job-id>`: write <job>/pr-body.md from the PR text of the job (its `## PR` section)
+    with one `<issues.link> #N` line per issue it fully fixes (the bundle issue and every member), a
+    partial issue (`Refs #N … left: …`) kept as it is, and the Claude Code footer. Prints the result."""
+    job_dir = os.path.join(HERE, "jobs", job_id)
+    with open(os.path.join(job_dir, "job.json")) as f:
+        job = json.load(f)
+    cfg = load_config()
+    link, nrs = issue_link(cfg), job_issues(job)
+    src = job.get("pr_text")
+    title, body = pr_section(os.path.join(job_dir, src)) if src else (None, None)
+    if title is None:
+        title = re.sub(r"\s+", " ", str(job.get("feature") or job_id).splitlines()[0])[:70]
+        body = "Approved by the user without a full review pass." if job.get("approved_by") else \
+            "No PR text from the factory's agents."
+    closed, partial, missing = closing_report(nrs, body, link)
+    lines = [body.rstrip(), ""]
+    if missing:
+        lines += [f"{link} #{n}" for n in missing] + [""]
+    text = "\n".join(lines).rstrip() + "\n"
+    if FOOTER not in text:
+        text += "\n" + FOOTER + "\n"
+    path = os.path.join(job_dir, "pr-body.md")
+    with open(path, "w") as f:
+        f.write(text)
+    out = [f"PR-BODY: {path}", f"PR-TITLE: {title}"]
+    if nrs:
+        out.append("CLOSING: " + (", ".join(f"#{n}" for n in nrs if n not in partial) or "none"))
+    if missing:
+        out.append("NOTE: the PR text did not close " + ", ".join(f"#{n}" for n in missing)
+                   + f" with a closing keyword: added a `{link} #N` line for each")
+    out += [f"PARTIAL: #{n}: {note}" for n, note in partial.items()]
+    print("\n".join(out))
+    return 0
+
+
+def closes_main(job_id, path):
+    """`--closes <job-id> [<file>]`: check a PR/MR body (default <job>/pr-body.md): exit 1 and name
+    the issues of the job that it neither closes nor marks partial."""
+    job_dir = os.path.join(HERE, "jobs", job_id)
+    with open(os.path.join(job_dir, "job.json")) as f:
+        job = json.load(f)
+    try:
+        text = open(path or os.path.join(job_dir, "pr-body.md"), errors="replace").read()
+    except OSError as e:
+        print(f"CLOSES: MISSING all ({e})")
+        return 1
+    _, partial, missing = closing_report(job_issues(job), text, issue_link(load_config()))
+    if missing:
+        print("CLOSES: MISSING " + ", ".join(f"#{n}" for n in missing)
+              + " (one closing keyword line per issue, e.g. `Closes #N`; partial work: `Refs #N (left: <what>)`)")
+        return 1
+    print("CLOSES: OK" + (" (partial: " + ", ".join(f"#{n}" for n in partial) + ")" if partial else ""))
+    return 0
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "--pr-body":
+        if len(sys.argv) != 3:
+            sys.exit(__doc__)
+        sys.exit(pr_body_main(sys.argv[2]))
+    if sys.argv[1] == "--closes":
+        if len(sys.argv) not in (3, 4):
+            sys.exit(__doc__)
+        sys.exit(closes_main(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None))
     if sys.argv[1] == "--validate":
         if len(sys.argv) not in (3, 4):
             sys.exit(__doc__)
@@ -605,6 +732,18 @@ def main():
         commits = (git("rev-list", "--count", f"{base}..{branch}", cwd=wt) or "?").strip()
     else:
         issues.append("worktree, base or branch missing in job.json / on disk")
+
+    nrs = job_issues(job)
+    pr_src = os.path.join(rdir, "build.md") if docs_mode else os.path.join(job_dir, "decision.md")
+    if nrs and os.path.exists(pr_src):
+        _, body = pr_section(pr_src)
+        if body is not None:
+            _, partial, missing = closing_report(nrs, body, issue_link(load_config()))
+            if missing:   # a note, not an issue: delivery adds the lines (--pr-body) and checks them (--closes)
+                notes.append("closing lines: the PR text does not close " + ", ".join(f"#{n}" for n in missing)
+                             + " (one `Closes #N` line per issue it fixes; partial work: `Refs #N (left: <what>)`); "
+                             "delivery adds them (precheck --pr-body)")
+            notes += [f"partial: #{n} stays open after the merge ({v})" for n, v in partial.items()]
 
     if not_docs:
         issues.append("not documentation: " + ", ".join(not_docs[:8]) + (" …" if len(not_docs) > 8 else ""))

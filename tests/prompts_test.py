@@ -262,6 +262,27 @@ for n, t in texts.items():
 check("RESUME_HEAD" in JOB and "wrote no {file}; write it now from your previous" in JOB
       and "LAST_STEP" in JOB, "job: resume prompt head / last-step line missing")
 
+# glab: `-F` is --output-format (a table), JSON is `--output json` (issue #4)
+for path in glob.glob(os.path.join(T, "**", "*"), recursive=True) + glob.glob(os.path.join(T, ".*", "**", "*"), recursive=True):
+    if os.path.isfile(path):
+        check("-F json" not in open(path, errors="replace").read() and '"-F", "json"' not in open(path, errors="replace").read(),
+              f"{os.path.relpath(path, ROOT)}: glab -F json (use --output json)")
+check("glab issue list --per-page 100 --output json" in SKILL and "GITLAB_ISSUE_LIST" in JOB
+      and "glab issue list --per-page 100 --output json" in JOB, "glab issue list command differs between SKILL.md and job")
+
+# Closing keywords (issue #5): the approver writes them, delivery adds the missing ones, the skill uses pr-body.md
+PRECHECK = open(os.path.join(T, ".factory", "precheck")).read()
+check("Closes #<nr>" in texts.get("approver", "") and "left: <what" in texts.get("approver", ""),
+      "approver: no closing-line rule (Closes #<nr>, Refs #<nr> (left: …))")
+check("--pr-body" in PRECHECK and "--closes" in PRECHECK and '"--pr-body"' in JOB and '"--closes"' in JOB
+      and "PR-BODY:" in SKILL and "close-issues" in SKILL and "close-issues" in JOB,
+      "closing lines: precheck --pr-body/--closes, job and SKILL.md out of step")
+
+# Syncs first, requeue (issue #6); hourly infra retry scheduled in the background (F)
+check("job prs" in SKILL and "requeue" in SKILL and '"requeue"' in JOB and '"prs"' in JOB, "SKILL.md/job: prs or requeue missing")
+check("Waiting on infrastructure" in SKILL and "sleep 3600" in SKILL and "run_in_background" in SKILL,
+      "SKILL.md: no background hourly retry for infrastructure waits")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

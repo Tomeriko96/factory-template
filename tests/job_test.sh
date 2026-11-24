@@ -737,13 +737,35 @@ out="$(J reviewers "$P1" $ALL)"; has "$out" "NOTE: reviewers round 1: code, audi
 has "$out" "security: skipped (only tests/docs changed)"; has "$out" "code: always"; lacks "$out" "factory-reviewer-security"
 field "$P1" "j['review_sets']['1']" "['code', 'audit']"; park "$P1"
 P2="$(newjob "zq rp backend")"; tobuilt "$P2" src/api.py
-out="$(J reviewers "$P2" $ALL)"; has "$out" "reviewers round 1: security, code, audit, privacy ("
+out="$(J reviewers "$P2" $ALL)"; has "$out" "reviewers round 1: security, code, audit ("
 has "$out" "security: src/api.py"; has "$out" "ux: skipped (no UI path changed)"; has "$out" "llm-safety: skipped (no matching path changed)"
-has "$out" "privacy: src/api.py"; park "$P2"          # no privacy paths and no auto_merge_never: any code change
+has "$out" "privacy: skipped (no matching path changed)"; park "$P2"   # no privacy paths: the personal-data names
+# a personal-data name with a real change: privacy; a line or two there: skipped (limits.review_min_lines 3)
+P2b="$(newjob "zq rp users")"; echo SPEC > "$(jd "$P2b")/spec.md"; J next "$P2b" >/dev/null
+mkdir -p "$(jd "$P2b")/round-1" "$(wt "$P2b")/src"; printf 'a\nb\nc\n' > "$(wt "$P2b")/src/users.py"
+git -C "$(wt "$P2b")" add -A; git -C "$(wt "$P2b")" commit -qm r1; printf 'Built\n' > "$(jd "$P2b")/round-1/build.md"; J next "$P2b" >/dev/null
+out="$(J reviewers "$P2b" $ALL)"; has "$out" "privacy: src/users.py"; park "$P2b"
+P2c="$(newjob "zq rp etl tiny")"; tobuilt "$P2c" src/etl/load.py
+out="$(J reviewers "$P2c" security,code,audit,data-quality)"
+has "$out" "data-quality: skipped (only 1 changed line in its paths (src/etl/load.py), under limits.review_min_lines 3)"
+lacks "$out" "factory-reviewer-data-quality"; park "$P2c"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c.setdefault("limits",{})["review_min_lines"]=0; json.dump(c, open(".factory/config.json","w"))'
+P2d="$(newjob "zq rp etl tiny off")"; tobuilt "$P2d" src/etl/load.py
+has "$(J reviewers "$P2d" security,code,audit,data-quality)" "data-quality: src/etl/load.py"; park "$P2d"
+P2e="$(newjob "zq rp no data")"; tobuilt "$P2e" src/web.py
+has "$(J reviewers "$P2e" security,code,audit,data-quality)" "data-quality: skipped (no matching path changed)"; park "$P2e"
+cp "$T/config.bak" .factory/config.json
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["reviewer_paths"]={"privacy": ["data/**"]}; json.dump(c, open(".factory/config.json","w"))'
 P3="$(newjob "zq rp prompt")"; tobuilt "$P3" src/prompts/system.md
 out="$(J reviewers "$P3" $ALL)"; has "$out" "reviewers round 1: security, code, audit, llm-safety ("
 has "$out" "llm-safety: src/prompts/system.md"; has "$out" "privacy: skipped (no matching path changed)"; park "$P3"
+P3b="$(newjob "zq rp llm r2")"; tobuilt "$P3b" src/prompts/system.md
+J reviewers "$P3b" security,code,audit,llm-safety >/dev/null
+for r in security llm-safety audit; do review "$P3b" 1 $r PASS; done; review "$P3b" 1 code CHANGES
+J next "$P3b" >/dev/null; mkdir -p "$(jd "$P3b")/round-2"; printf '1\n2\n3\n4\n' > "$(wt "$P3b")/src_api.py"
+git -C "$(wt "$P3b")" add -A; git -C "$(wt "$P3b")" commit -qm r2; printf 'Built\n' > "$(jd "$P3b")/round-2/build.md"; J next "$P3b" >/dev/null
+out="$(J reviewers "$P3b" security,code,audit,llm-safety)"
+has "$out" "llm-safety: skipped (no matching path changed since round 1)"; park "$P3b"
 P4="$(newjob "zq rp front")"; tobuilt "$P4" frontend/src/App.tsx
 out="$(J reviewers "$P4" $ALL)"; has "$out" "ux: frontend/src/App.tsx"; has "$out" "ui: frontend/src/App.tsx"
 field "$P4" "j['review_sets']['1']" "['security', 'code', 'ux', 'ui', 'audit']"
@@ -1397,6 +1419,102 @@ command grep -qF "finish running jobs" "$R/.factory/paused" && ok || bad "second
 out="$(J unpause)"; first "$out" "DONE: unpaused"; has "$out" "STARTED: $PQ left the queue"
 missing "$R/.factory/paused"; first "$(J unpause)" "DONE: not paused"
 out="$(J next "$PQ")"; has "$out" "AGENT: factory-spec-writer"; park "$PQ"
+
+# ---------- requeue (#6): a job at spec goes back to the queue with its state kept ----------
+scenario=requeue
+cp .factory/config.json "$T/config.rq"
+RQ1="$(newjob "zq rq one")"; RQ2="$(newjob "zq rq two")"     # both at spec: 2/2 active
+out="$(J new "zq rq three")"; RQ3="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; has "$out" "WAIT: queued: 2/2 jobs active"
+echo SPEC > "$(jd "$RQ1")/spec.md"                          # the spec-writer finished: state to keep
+out="$(J requeue "$RQ1" "a sync goes first")"; first "$out" "DONE: queued ($RQ1 requeued"
+has "$out" "STARTED: $RQ3 left the queue"                    # the earlier queued job takes the freed slot
+field "$RQ1" "j['stage'], j['resume_stage']" "queued spec"; exists "$(jd "$RQ1")/spec.md"
+first "$(J next "$RQ1")" "WAIT: queued: 2/2 jobs active"
+echo SPEC > "$(jd "$RQ2")/spec.md"; J next "$RQ2" >/dev/null; build "$RQ2" 1; J next "$RQ2" >/dev/null
+first "$(J requeue "$RQ2")" "ERROR: $RQ2 is at review, round 1: only a queued job"
+park "$RQ2"; out="$(J next "$RQ1")"; has "$out" "AGENT: factory-builder"; has "$out" "Build round 1."   # spec kept
+# queue order: a job requeued later waits behind one queued earlier, also when asked by id
+RQ4="$(newjob "zq rq four")"; RQ5="$(newjob "zq rq five")"; RQ6="$(newjob "zq rq six")"
+J requeue "$RQ5" >/dev/null; park "$RQ1"; field "$RQ4" "j['stage']" spec
+park "$RQ3"; field "$RQ6" "j['stage']" spec; field "$RQ5" "j['stage']" queued   # the requeued job comes last
+for j in "$RQ3" "$RQ4" "$RQ5" "$RQ6"; do park "$j"; done
+
+# ---------- forge: syncs need no slot (#6), closing lines (#5), post-merge closing (#5), reuse (E), raw.json (#4) ----------
+scenario=forge-close
+FF="$T/forge2"; mkdir -p "$T/bin2" "$FF"; OLDPATH2="$PATH"; export PATH="$T/bin2:$PATH" FF
+cat > "$T/bin2/glab" <<'SH'
+#!/usr/bin/env bash
+echo "glab $*" >> "$FF/calls"
+if [ "$1" = api ] && [ "$2" = -X ]; then
+  n="$(sed -E 's#.*/issues/([0-9]+).*#\1#' <<<"$4")"
+  case "$3 $*" in
+    "PUT "*state_event=close*) echo '{"state": "closed"}' > "$FF/issue-$n.json" ;;
+  esac
+  echo '{}'; exit 0
+fi
+case "$1 $2" in
+  "api projects/:id/merge_requests/"*) cat "$FF/mr-${2##*/}.json" ;;
+  "api projects/:id/issues/"*) cat "$FF/issue-${2##*/}.json" 2>/dev/null || { echo "404" >&2; exit 1; } ;;
+  "mr list") echo '[]' ;;
+  *) echo "fake glab: $*" >&2; exit 1 ;;
+esac
+SH
+sed -e 's/^echo "glab /echo "gh /' -e 's/fake glab/fake gh/' "$T/bin2/glab" > "$T/bin2/gh"
+chmod +x "$T/bin2/glab" "$T/bin2/gh"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="gitlab"; c["issues"]={"allowed_authors": ["me"], "link": "Closes"}; json.dump(c, open(".factory/config.json","w"))'
+# the bundle MR of the evidence: "Refs" for the fixed issues, one issue honestly partial
+out="$(J new --mode docs --delivery pr --issue 501 --issue 502 --issue 503 "zq close bundle")"; FC="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+echo "more" >> "$(wt "$FC")/README.md"; git -C "$(wt "$FC")" commit -qam docs; mkdir -p "$(jd "$FC")/round-1"
+printf 'BUILD: DONE\n\n## PR\ndocs: bundle fix\n\nSummary.\n\nRefs #501, #502. The issues are closed by hand after the merge.\nRefs #503 (left: the CSV export)\n' > "$(jd "$FC")/round-1/build.md"
+out="$(J next "$FC")"; first "$out" "ACTION: deliver"; has "$out" "MODE: pr"
+has "$out" "PR-BODY: $(jd "$FC")/pr-body.md"; has "$out" "PR-TITLE: docs: bundle fix"; has "$out" "CLOSING: #501, #502"
+has "$out" "PARTIAL: #503: left: the CSV export"; has "$out" "did not close #501, #502"; lacks "$out" "CLOSES: MISSING"
+body="$(cat "$(jd "$FC")/pr-body.md")"; has "$body" "Closes #501"; has "$body" "Closes #502"; lacks "$body" "Closes #503"
+has "$body" "Generated with [Claude Code]"
+has "$(cat "$(jd "$FC")/precheck.md")" "the PR text does not close #501, #502"
+field "$FC" "j['partial_issues']" "{'503': 'left: the CSV export'}"
+first "$("$R/.factory/precheck" --closes "$FC")" "CLOSES: OK (partial: #503)"
+printf 'Fix it\n\nRefs #501\n' > "$T/body.md"
+out="$("$R/.factory/precheck" --closes "$FC" "$T/body.md")" && bad "--closes passed a body without closing lines" || ok
+first "$out" "CLOSES: MISSING #501, #502, #503"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="github"; json.dump(c, open(".factory/config.json","w"))'
+out="$("$R/.factory/precheck" --pr-body "$FC")"; has "$out" "CLOSING: #501, #502"; has "$(cat "$(jd "$FC")/pr-body.md")" "Closes #502"
+printf 'Fixes #501, #502 and #503\n' > "$T/body.md"; first "$("$R/.factory/precheck" --closes "$FC" "$T/body.md")" "CLOSES: OK"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="gitlab"; json.dump(c, open(".factory/config.json","w"))'
+git -C "$(wt "$FC")" push -q origin "factory/$FC"
+J delivered "$FC" pr-open --pr-url "https://gitlab.test/o/r/-/merge_requests/71" >/dev/null
+# E: an issue that has a job is never started twice
+first "$(J new --issue 502 "zq close again")" "ERROR: #502 already is in job $FC (pr-open"
+FN="$(newjob --issue 601 "zq reuse me")"; J fail "$FN" "parked" >/dev/null
+before="$(ls "$R/.factory/jobs" | wc -l)"
+out="$(J new --issue 601 "zq reuse me again")"; first "$out" "REUSED: $FN already has #601 (needs-human)"; has "$out" "DONE: needs-human"
+[ "$(ls "$R/.factory/jobs" | wc -l)" = "$before" ] && ok || bad "a second job was created for #601"
+first "$(J new --issue 601 --issue 602 "zq reuse wider")" "ERROR: #601 is in job $FN (needs-human) with #601"
+# #6: two jobs hold both slots, the conflicting MR still syncs at once
+B1="$(newjob "zq slot one")"; B2="$(newjob "zq slot two")"
+echo '{"iid": 71, "state": "opened", "has_conflicts": true, "detailed_merge_status": "conflict", "web_url": "u", "source_branch": "b", "target_branch": "main", "source_project_id": 1, "target_project_id": 1}' > "$FF/mr-71.json"
+out="$(J prs)"; first "$out" "ACTION: sync 1 PR/MR first"; has "$out" "SYNC: $FC https://gitlab.test/o/r/-/merge_requests/71 conflict"
+has "$out" "RUN: .factory/job sync $FC"; field "$FC" "j['pr_state']['merge']" conflict
+out="$(J sync "$FC")"; has "$out" "AGENT: factory-builder"; has "$out" "Sync 1."; lacks "$out" "WAIT"
+first "$(J new "zq slot three")" "JOB:"; has "$(J list)" "queued"     # a new job waits behind the sync
+mkdir -p "$(jd "$FC")/sync-1"; echo 'SYNC: CLEAN' > "$(jd "$FC")/sync-1/build.md"; J next "$FC" >/dev/null
+echo 'VERDICT: PASS' > "$(jd "$FC")/sync-1/review-code.md"; first "$(J next "$FC")" "ACTION: push"
+first "$(J sync-done "$FC")" "DONE: pr-open (sync 1 pushed)"
+# merged: the forge left #501 open (Refs), #502 was closed, #503 is partial
+echo '{"iid": 71, "state": "merged", "merge_commit_sha": "abc123def4567890", "web_url": "u", "source_branch": "b", "target_branch": "main", "source_project_id": 1, "target_project_id": 1}' > "$FF/mr-71.json"
+echo '{"state": "opened"}' > "$FF/issue-501.json"; echo '{"state": "closed"}' > "$FF/issue-502.json"; echo '{"state": "opened"}' > "$FF/issue-503.json"
+out="$(J prs)"; first "$out" "DONE: 1 open PR/MR checked: no sync needed"; has "$out" "MERGED: $FC"
+has "$out" "CLOSED: #501 (job $FC"; has "$out" "CLOSED: #502 (already closed"; has "$out" "LEFT-OPEN: #503 ($FC): partial, left: the CSV export"
+grep -qF "body=Fixed in !71 (abc123def456)" "$FF/calls" && ok || bad "no 'Fixed in !71 (sha)' comment"
+grep -qF "issues/503" <(grep -- "-X" "$FF/calls") && bad "partial #503 was closed" || ok
+field "$FC" "j['stage'], sorted(j['issue_closed'])" "merged ['501', '502']"
+out="$(J close-issues "$FC")"; has "$out" "LEFT-OPEN: #503"; lacks "$out" "CLOSED: #501"   # nothing twice
+# #4: a table instead of JSON fails clearly and names the command
+printf 'Showing 2 open issues\n!501  docs\n' > .factory/run/triage/table.json
+out="$(J triage prepare .factory/run/triage/table.json)"; first "$out" "ERROR: .factory/run/triage/table.json is not valid JSON"
+has "$out" "glab issue list --per-page 100 --output json"
+for j in "$FN" "$B1" "$B2" $(ls "$R/.factory/jobs" | grep -- '-zq-slot-three$'); do park "$j"; done
+export PATH="$OLDPATH2"; cp "$T/config.rq" .factory/config.json
 
 # ---------- input checks and concurrency ----------
 scenario=input

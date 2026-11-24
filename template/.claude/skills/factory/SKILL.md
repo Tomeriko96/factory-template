@@ -1,6 +1,6 @@
 ---
 name: factory
-description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|drop|deliver <id>", "/factory adopt <pr|mr nr>", "/factory pause|unpause", "/factory status" and "/factory setup".
+description: Local software-factory loop — spec → build → parallel reviews → approve → local merge or escalate. Use for "/factory <feature>", "/factory --light <feature>", "/factory issue <nr>", "/factory next", "/factory approve|rework|resume|requeue|drop|deliver <id>", "/factory adopt <pr|mr nr>", "/factory pause|unpause", "/factory status" and "/factory setup".
 effort: medium
 ---
 
@@ -140,7 +140,10 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
 - `MAX_SYNCS = 3`: base merges per job (see `/factory sync`). Then `needs-human`.
 - `limits.active_jobs` (default 3): jobs in `spec`/`build`/`review`/`approve`/`deliver`
   or syncing at once, per repo; `limits.open_prs` (default 5): jobs at `pr-open` before
-  new jobs wait. More are `queued`. The machine-wide guard is `.factory/heavy` (Resources).
+  new jobs wait. More are `queued`, and start in queue order (`job requeue` puts a job at the
+  end). A **sync needs no free slot**: it keeps an open PR/MR mergeable and goes before new work
+  (a running sync still counts, so no queued job starts beside it); `limits.active_syncs`
+  (default 2) syncs run at once. The machine-wide guard is `.factory/heavy` (Resources).
 - Ports for job `NNN-…`: builder `port_base + 10·NNN`; ux `+1`, ui `+2`, audit `+3`.
 
 ## Hidden acceptance tests
@@ -293,9 +296,17 @@ worktree) concerns, and prints why each was chosen or skipped (`NOTE: reviewer p
 - `llm-safety`: only when prompt, agent or LLM code changes (default globs `*prompt*`,
   `*agent*`, `*llm*`, `*/prompts/*`, `*/agents/*`, `*/llm/*`; a prompt in `.md` outside
   `docs/` counts as code).
+- `data-quality`: only for pipelines, ETL, SQL and data files (default globs `*/data/*`, `*/etl/*`,
+  `*/pipelines/*`, `*transform*`, `*ingest*`, `*.sql`, `*/dbt/*`, `*.csv`, `*.parquet`, …).
 - `privacy`: only when a path in `reviewer_paths.privacy` changes, else the
-  `delivery.auto_merge_never` globs; with neither set, on any code change.
-- Any other reviewer: on any code change, unless `reviewer_paths` names its globs.
+  `delivery.auto_merge_never` globs; with neither set, files whose names handle personal data
+  (`*user*`, `*person*`, `*student*`, `*account*`, `*consent*`, `*export*`, `*/auth/*`, `*logging*`, …).
+- Any other reviewer (methodology, …): on any code change, unless `reviewer_paths` names its globs.
+- **Specialists** (everyone but code, audit and security): from round 2 on only when their paths
+  changed since the last round (or they objected), and not for a change of one or two lines in their
+  paths (`limits.review_min_lines`, default 3; a number, or `{"<reviewer>": n, "default": n}`; `0` = off;
+  ux/ui only when named; any change to prompt text counts in full for llm-safety). Measured on one day:
+  26 specialist runs on sonnet blocked nothing; the two blocking findings came from audit and security.
 
 `config.reviewer_paths` (optional) overrides the globs per reviewer, e.g.
 `{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"], "ui": ["web/**"]}`.
@@ -351,7 +362,13 @@ It looks at all open issues of the allowed authors that are not `blocked`, so ma
 related issues become a few jobs instead of many, each with the effort it deserves
 (`docs`, `light` or `full`):
 
+0. **Syncs first.** `.factory/job prs` asks the forge about every open PR/MR of a job: merged ones
+   become `merged` and their issues are closed (see **Closing issues**), and `ACTION: sync` lists the
+   ones that conflict with or are behind the base: run `.factory/job sync <id>` for each and drive it
+   (see `/factory sync`) before you start anything new. A sync needs no job slot.
 1. `mkdir -p .factory/run/triage`, then fetch the open issues into `raw.json` there (commands under **Issues**).
+   `triage prepare` refuses a file that is not JSON (`ERROR: … is not valid JSON`): fetch it again with
+   the command it names; never edit the file by hand.
 2. `.factory/job triage prepare .factory/run/triage/raw.json`. The script filters mechanically
    (author, `skip_labels`, issues that already have a job, an open PR/MR, a branch or a commit) and
    prints `SKIPPED:` lines. `DONE: no issues to start` → report the skips in one line and stop.
@@ -387,7 +404,11 @@ a single `--issue`: then only the first issue is recorded and closed. A bundle t
 anyway is repaired with `.factory/job set <id> issues '[<nr>, <nr>, …]'`.
 
 One number:
-See **Issues**. `--force` skips the already-done check. Then `/factory <feature>` with
+See **Issues**. `--force` skips the already-done check. An issue that already has a live job is never
+started twice: `job new --issue <nr>` (and `triage bundle`) prints `REUSED: <id>` and continues that job
+when it is unfinished (queued, running or `needs-human`), and refuses with the job's id when it has a
+PR/MR (`/factory rework <id>`) or holds a different set of issues (widen it while it is queued with
+`job set <id> issues '[…]'`). Never drop a job to start the same issue again: `requeue` it. Then `/factory <feature>` with
 `feature` = the issue text and `--issue <nr> --issue-url <url>` (the script marks the job
 untrusted, so every prompt carries the untrusted label). The mode is the issue's label
 `factory:docs|light|full` if it has one, else full: an explicit `/factory issue` is not triaged.
@@ -425,6 +446,13 @@ Only for `needs-human` or `queued` jobs; refused when the job has an open PR/MR 
 first). Its issue is free for `/factory next` again. A needs-human job that was never built (round 0)
 has nothing to approve: `status` and the board offer `drop` (or `resume`) for it, not `approve`.
 
+### `/factory requeue <id> ["<reason>"]`
+`.factory/job requeue <id>`: a job that has not started real work (`queued`, or at `spec` before its
+first build) goes to the end of the queue with its state kept (spec.md, acceptance tests, worktree);
+its slot goes to the next queued job. Use it to change the order of the queue ("merge first") or to
+make room; never `drop` a job and start it again for that (that made jobs 003/026 and 004/023 of one
+repo: two jobs per issue). A running build or review is not requeued: let it finish.
+
 ### `/factory pause ["<reason>"]` / `/factory unpause`
 "Finish what runs, start nothing new": `.factory/job pause "<reason>"` writes `.factory/paused`.
 While paused no queued job starts (`job next` on it prints `WAIT: queued: the factory is paused …`,
@@ -435,8 +463,10 @@ and starts queued jobs while there is room: drive every `STARTED:` job with `job
 and `job list` show `PAUSED`.
 
 ### `/factory sync [<id>]`
-Keeps open PRs/MRs mergeable. For `<id>`, or for every job at stage `pr-open`: ask the
-forge whether the PR/MR still merges into `base`.
+Keeps open PRs/MRs mergeable. `.factory/job prs [<id>]` does the asking for every job at `pr-open`
+(or one): `MERGED:` lines (the job is marked merged and its issues closed), `CLOSED:` (closed
+without merge: the job went to `needs-human`), `UNKNOWN:` (ask again later), and `ACTION: sync` with
+one `SYNC:`/`RUN:` pair per PR/MR that conflicts with or is behind the base. What it asks the forge:
 
 - `gitlab`: `glab api "projects/:id/merge_requests/<iid>"` → conflict when
   `has_conflicts` is true or `detailed_merge_status` is `conflict` or `need_rebase`.
@@ -446,12 +476,13 @@ forge whether the PR/MR still merges into `base`.
   `mergeable` is `CONFLICTING` (`mergeStateStatus` `DIRTY`); `BEHIND` counts only if the
   repo requires up-to-date branches.
 
-PR/MR already merged → `.factory/job pr-merged <id>` (then **Closing issues**); closed
+PR/MR already merged → `.factory/job pr-merged <id>`, then `.factory/job close-issues <id>` (`job prs` does both); closed
 without merge → `.factory/job fail <id> "PR/MR closed without merge"`. Report it and skip
 it. No conflict → nothing to do. Conflict → `.factory/job sync <id>` and drive it:
 
-1. The script checks the sync budget (`MAX_SYNCS`, then `needs-human`) and capacity (no
-   room → `WAIT: sync postponed`, retried on the next `status`/`sync`), recreates the
+1. The script checks the sync budget (`MAX_SYNCS`, then `needs-human`) and `limits.active_syncs`
+   (default 2 at once; more → `WAIT: sync postponed`, retried on the next `status`/`sync`/`next`; a
+   sync never waits for a job slot), recreates the
    worktree and takes commits others pushed to the branch (diverged → `needs-human`).
 2. It spawns a sonnet `factory-builder` with `Sync <n>`: it merges `<remote>/<base>` into
    the job branch (a merge commit: never rebase, never force-push), resolves the
@@ -506,15 +537,15 @@ forgets the adoption (the PR/MR and its branch stay). A later conflict on it is 
 ### `/factory` (no argument) / `/factory status`
 `.factory/job list` (per job: id, mode, stage, round/budget, reviews, reason or PR).
 For jobs at `pr-open`, first run
-`/factory sync` for them (check and, on a conflict, the fix: the sonnet builder merges
-`base`; a sync that finds no room is "postponed"). For those jobs also read the CI state and record it with
+`/factory sync` for them (`.factory/job prs`, then on a conflict the fix: the sonnet builder merges
+`base`; a sync beyond `limits.active_syncs` is "postponed"). For those jobs also read the CI state and record it with
 `.factory/job set <id> pr_state '{"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
 "merge": "<mergeable|conflict|blocked|unknown>"}'` (`gitlab`: `head_pipeline.status` and
 `detailed_merge_status` from the same MR call; `github`: `gh pr view <nr> --json
 statusCheckRollup,mergeStateStatus`) and report one line: "N PRs/MRs open, oldest Xh, Y
 failing, Z waiting on CI". Run `job next` for every `queued` job (it starts when there is
-room). Run `.factory/job adoptable` and mention any `ADOPTABLE:` PR/MR (see `/factory adopt`). Never retry or skip a failing pipeline; report it. Then run **Closing issues** for every job at `merged` that
-has an `issue` and no `issue_closed` yet. Mention `.factory/watch` for a live board the
+room). Run `.factory/job adoptable` and mention any `ADOPTABLE:` PR/MR (see `/factory adopt`). Never retry or skip a failing pipeline; report it. `job prs` also catches up **Closing issues** for every job at `merged` whose issues are not all
+closed yet. Mention `.factory/watch` for a live board the
 user can keep open (interactive: what needs them, what runs, open PRs with CI; enter opens a
 job; `factory-watch` shows every repo). Do not run it yourself: `job list` is your view.
 `/factory status report` (or when the user asks how the agents perform): run `.factory/job report`
@@ -539,8 +570,8 @@ Take only comments by `allowed_authors`. Pass the text to the spec-writer as dat
   (author = `author.login`, also per comment). List for `next` (all open issues; add
   `--label <issues.label>` only when that is set): `gh issue list --state open --limit 200
   --json number,title,body,author,labels,url,comments > .factory/run/triage/raw.json`.
-- `gitlab`: `glab issue view <nr> -F json` (author = `author.username`, also per note).
-  List for `next`: `glab issue list --per-page 100 -F json > .factory/run/triage/raw.json`
+- `gitlab`: `glab issue view <nr> --output json` (author = `author.username`, also per note).
+  List for `next`: `glab issue list --per-page 100 --output json > .factory/run/triage/raw.json`
   (add `--label <issues.label>` only when that is set). Use `iid`, not `id`.
 
 `feature` = `#<nr> <title>` + blank line + body + allowed comments.
@@ -586,6 +617,13 @@ review text. In `pr` mode the PR/MR body gets `<issues.link> #<nr>` for **every*
 (`"issues"`, else `"issue"`); otherwise give the user those lines. Commits reference the issue with `Refs #<nr>` only.
 
 ### Closing issues
+**Script:** `.factory/job close-issues <id>` (also run by `job prs` for every merged job) does all
+of the below: per issue it asks the forge, leaves a closed one as `already closed`, closes one the
+forge left open with the comment `Fixed in !N (<sha>)` (GitHub `#N`) and verifies it, keeps a
+partial one open (`LEFT-OPEN: #N: partial, left: …`) and one another unfinished job still works on,
+and records `issue_closed`. Report its `CLOSED:`/`LEFT-OPEN:` lines in one line; an `ERROR-ISSUE:`
+line is retried on the next run. The rules it applies, for reference:
+
 Unless `issues.close_on_merge` is `false`, the factory closes a job's issue once the forge
 confirms its PR/MR is merged. It runs when a merge is noticed (`/factory sync`, also
 `/loop 10m /factory sync`; the check at the end of delivery; `/factory status`) and for any
@@ -600,7 +638,7 @@ Do this for **each** issue of the job (`"issues"` for a bundle, else `"issue"`);
 2. The forge says the PR/MR is merged, into the job's `base`: `gitlab`:
    `glab api "projects/:id/merge_requests/<iid>"` → `state` is `merged`; `github`:
    `gh pr view <nr> --json state,baseRefName` → `MERGED`. Closed without merge never counts.
-3. The issue is still open (`glab issue view <nr> -F json` → `state` `opened`; `gh issue
+3. The issue is still open (`glab issue view <nr> --output json` → `state` `opened`; `gh issue
    view <nr> --json state` → `OPEN`). Already closed (e.g. by `Closes #<nr>`) →
    `.factory/job set <id> issue_closed "already closed"` (a bundle: see below).
 4. No other job with the same issue (in `issue` or `issues`) is still in progress (stage `queued`, `spec`,
@@ -655,10 +693,16 @@ commit sha and that pushing is up to the user.
    and its sha.
 
 ### `pr`
-Steps 1–2 of `push`, then open the PR/MR from the `## PR` section of the `PR-TEXT:` file
-(title on its first line, body below). Write the body to
-`<Job>/pr-body.md`, append `<issues.link> #<nr>` if the job came from an issue, and end it
-with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+Steps 1–2 of `push`, then open the PR/MR with the `PR-TITLE:` line as its title and the
+`PR-BODY:` file (`<Job>/pr-body.md`) as its description, **as it is**. The script wrote it
+(`.factory/precheck --pr-body`): the `## PR` section of the PR text plus one `<issues.link> #<nr>`
+line (`Closes #N`) for every issue the job fixes (a bundle: the bundle issue and every member;
+`CLOSING:` lists them) and the Claude Code footer. An issue the approver marked partial (`Refs #N
+(left: <what>)`, `PARTIAL:`) stays open after the merge. Never replace the closing lines by `Refs`
+or a promise to close the issues by hand: two bundle MRs did that and left 8 issues open. If you
+must write a body yourself (no `PR-BODY:` line, `/factory deliver <id> pr` of a pushed job), run
+`.factory/precheck --pr-body <id>` first, or check your file with `.factory/precheck --closes <id>
+<file>` (`CLOSES: MISSING #…` = add those lines).
 
 When `ACTION: deliver` prints a `PR: <url> is already open` line (the CI validation opened it),
 push the branch again (a no-op when nothing changed), keep that PR/MR, replace its title and
@@ -762,8 +806,9 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
    priority next to each heavy command.
 
 `rework`, `resume` and `sync` move a job back into `build`/`review`: the script applies
-the same capacity check (a rework without room is queued; a sync without room is
-"postponed" and retried on the next `status`/`sync`), and every spawn has the load gate.
+the same capacity check (a rework without room is queued; a sync needs no job slot, only room
+under `limits.active_syncs`, else it is "postponed" and retried on the next `status`/`sync`/`next`),
+and every spawn has the load gate.
 
 These rules are not left to the agents' good will: every factory agent has a `PreToolUse`
 hook, `.factory/guard`, that refuses a test, build, install or type-check command which is
@@ -802,8 +847,17 @@ make sure each agent prompt keeps the paths block (the worktree path is part of 
 - **Waiting.** To wait, use `.factory/heavy wait <ticket>` (blocks up to ~9 minutes; again on
   exit 124), `.factory/heavy gate`, or the Bash tool's `timeout` (up to 600000 ms); a spawned
   agent reports back by itself. Never `sleep N` or polling loops (`until …; do sleep …`):
-  they are refused and burn turns. The Monitor and TaskStop tools do not exist in subagents:
+  they are refused and burn turns (the one exception: the background hourly retry under
+  **Waiting on infrastructure**). The Monitor and TaskStop tools do not exist in subagents:
   never tell an agent to use them.
+- **Waiting on infrastructure.** A CI job that fails on infrastructure (registry quota, runner,
+  network, a missing CI variable) and not on the change, or a forge that is down or read-only, is
+  not a rework and not a failed job: say so in one line and retry at most once an hour. Schedule
+  that retry yourself so you do not sit idle: start `sleep 3600` with the Bash tool's
+  `run_in_background` (one per cause, never a foreground sleep or a polling loop); its completion
+  notification wakes you, then retry the pipeline or the push once (`.factory/job prs` /
+  `/factory sync` for the PR/MR state) and schedule the next one if it still fails. Keep the work
+  committed locally while the forge is down; push once it is back.
 - **Quiet notifications.** A background notification (a task or agent finished, a watch woke
   you) that changes no job state gets a reply of at most one word ("waiting"), or none; never
   a status line that repeats the last one. Post a status line only on a state change (built,

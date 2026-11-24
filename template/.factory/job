@@ -33,13 +33,20 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job pr-merged <id>                  the forge confirmed the PR/MR is merged
   job approve <id>                    a human approves a needs-human job: deliver it
   job rework <id> [--untrusted] "<note>"
-  job sync <id>                       start (or continue) a base merge of a pr-open job
+  job sync <id>                       start (or continue) a base merge of a pr-open job (needs no job slot:
+                                      at most limits.active_syncs, default 2, at once)
   job sync-done <id>                  the synced branch is pushed
   job adopt <pr|mr nr>                adopt an open PR/MR made outside the factory (allowed author, same
                                       repo): a minimal pr-open job on its own branch, only so its merge
                                       conflicts can be patched (job sync: merge, targeted tests, push)
   job adoptable                       open PRs/MRs by allowed authors with a merge conflict and no job
                                       (config adopt_conflicting: true adopts them)
+  job requeue <id> ["<reason>"]       put a queued job, or one at spec before round 1, at the end of the queue
+                                      (state kept: spec.md, acceptance tests, worktree); frees its slot
+  job prs [<id>]                      ask the forge about every pr-open job: merged -> merged + close-issues;
+                                      conflict or behind the base -> ACTION: sync (syncs go before new jobs)
+  job close-issues <id>               after a merge: close the job's issues the forge left open ("Fixed in
+                                      !N (<sha>)"); a partial issue (Refs #N, left: ...) stays open, reported
   job fail <id> "<reason>"            -> needs-human
   job drop <id> ["<reason>"]          clear a needs-human or queued job that is not wanted any more:
                                       -> superseded, worktree and unpushed branch removed (refuses a job with an open PR/MR)
@@ -70,8 +77,13 @@ BUNDLE_LABEL = "factory:bundle"
 # a bundle issue lists its members as a checklist in its description: "- [ ] #12" or "- [x] #12"
 CHECKLIST_RE = re.compile(r"^[ \t]*[-*+][ \t]+\[[ xX]\][ \t]+#(\d+)(?![0-9])", re.M)
 DEFAULT_SKIP_LABELS = ["blocked", "wontfix", "factory:in-progress"]
+# How the orchestrator fetches the open issues for `triage prepare` (SKILL.md, Issues). glab: `--output json`
+# (`-O json`); `-F` is --output-format (details|ids|urls) and prints the text table.
+GITLAB_ISSUE_LIST = "glab issue list --per-page 100 --output json"
+GITHUB_ISSUE_LIST = "gh issue list --state open --limit 200 --json number,title,body,author,labels,url,comments"
 BUNDLE_MAX, FULL_BUNDLE_MAX, MAX_CANDIDATES, BODY_MAX, COMMENT_MAX = 4, 2, 30, 4000, 1500
 ACTIVE = ("spec", "build", "review", "approve", "deliver")
+ACTIVE_SYNCS = 2   # limits.active_syncs: syncs of open PRs/MRs at once (they need no job slot)
 AT_REST = ("needs-human", "merged", "pushed", "pr-open", "superseded")
 NEEDS_WORKTREE = ("spec", "build", "review", "approve", "deliver")
 ID_RE = re.compile(r"^\d{3}-[a-z0-9]+(-[a-z0-9]+)*$")
@@ -89,6 +101,16 @@ PAGE_GLOBS = ["*/pages/*", "*/routes/*", "*/views/*", "*/app/**/page.*", "*/temp
               "*/templates/**/*.html", "*/screens/*"]
 UI_REVIEW_SPEC_RE = re.compile(r"^[ \t>*-]*UI review:\s*full\b|\bfull (exploratory )?UI review\b", re.I | re.M)
 LLM_GLOBS = ["*prompt*", "*agent*", "*llm*", "*/prompts/*", "*/agents/*", "*/agent/*", "*/llm/*"]
+# data-quality: pipelines, ETL, SQL, data files and data packages (reviewer_paths["data-quality"] overrides)
+DATA_GLOBS = ["*/data/*", "*/etl/*", "*/pipeline/*", "*/pipelines/*", "*/transform*/*", "*/ingest*/*", "*/dbt/*",
+              "*/sql/*", "*.sql", "*etl*", "*transform*", "*ingest*", "*.csv", "*.parquet", "*/inst/extdata/*"]
+# privacy without reviewer_paths.privacy or delivery.auto_merge_never: names that handle personal data
+PERSONAL_GLOBS = ["*user*", "*person*", "*persoon*", "*student*", "*leerling*", "*profile*", "*account*",
+                  "*privacy*", "*gdpr*", "*avg*", "*consent*", "*gegevens*", "*bsn*", "*pgn*", "*onderwijsnummer*",
+                  "*retention*", "*anonym*", "*pseudonym*", "*export*", "*/auth/*", "*login*", "*session*",
+                  "*logging*", "*audit_log*"]
+PROMPT_TEXT = (".md", ".txt", ".j2", ".jinja", ".jinja2", ".prompt", ".yaml", ".yml", ".toml", ".json")
+REVIEW_MIN_LINES = 3   # limits.review_min_lines: a specialist skips a smaller change in its area
 # Routing: model and effort per spawn (see route) and the builder's escalation ladder
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 MODELS = ("haiku", "sonnet", "opus")
@@ -446,6 +468,39 @@ def room(job, jobs, prs_count=True):
     return None
 
 
+def sync_room(job, jobs):
+    """None when job may start a sync, else why not. A sync does not need a job slot: it keeps an open
+    PR/MR mergeable and goes before new work (limits.active_jobs counts it, so no queued job starts
+    while it runs). Only limits.active_syncs (default 2) syncs run at once."""
+    cap = max(1, int((config().get("limits") or {}).get("active_syncs") or ACTIVE_SYNCS))
+    act = [j for j in jobs if j.get("id") != job["id"] and j.get("syncing")]
+    if len(act) >= cap:
+        return f"{len(act)}/{cap} syncs running ({', '.join(j['id'] for j in act)}; limits.active_syncs)"
+    return None
+
+
+def queue_key(j):
+    """Queued jobs start in this order: when they (re-)entered the queue, then by number."""
+    ts = j.get("queued_ts")
+    if not isinstance(ts, (int, float)):
+        try:
+            ts = time.mktime(time.strptime(str(j.get("started") or "")[:19], "%Y-%m-%dT%H:%M:%S"))
+        except ValueError:
+            ts = 0.0
+    return (ts, j.get("id", ""))
+
+
+def ahead_in_queue(job, jobs):
+    """Why a queued job must let earlier queued jobs take the free slots first (None: its turn)."""
+    lim = limits()
+    others = [j for j in jobs if j.get("id") != job["id"]]
+    free = lim["active"] - len([j for j in others if j.get("stage") in ACTIVE or j.get("syncing")])
+    earlier = [j for j in others if j.get("stage") == "queued" and queue_key(j) < queue_key(job) and not room(j, jobs)]
+    if earlier and len(earlier) >= free:
+        return f"behind {', '.join(j['id'] for j in earlier[:3])} in the queue"
+    return None
+
+
 PAUSE = os.path.join(HERE, "paused")
 
 
@@ -471,7 +526,7 @@ def promote(out):
     if paused() is not None:
         return
     jobs = all_jobs()
-    for j in jobs:
+    for j in sorted(jobs, key=queue_key):
         if j.get("stage") != "queued" or room(j, jobs):
             continue
         set_stage(j, j.pop("resume_stage", None) or first_stage(j))
@@ -957,6 +1012,35 @@ def auto_merge_gate(job):
     return (not why), why
 
 
+def pr_body(job, out):
+    """Write <Job>/pr-body.md (precheck --pr-body: the PR text plus one closing line per issue the job
+    fixes) and check it (precheck --closes). Records the partial issues; returns the lines to print."""
+    pc = os.path.join(HERE, "precheck")
+    save(job)   # precheck reads job.json (pr_text, issues) from disk
+    r = run([pc, "--pr-body", job["id"]])
+    lines = (r.stdout or "").splitlines()
+    if r.returncode != 0 or not lines or not lines[0].startswith("PR-BODY: "):
+        out.notes.append("NOTE: precheck --pr-body failed: " + ((r.stderr or r.stdout or "").strip()[:200] or "no output")
+                         + "; write the body yourself with one `Closes #N` line per issue")
+        return []
+    partial = {}
+    for l in lines:
+        m = re.match(r"PARTIAL: #(\d+): (.*)", l)
+        if m:
+            partial[m.group(1)] = m.group(2)
+    if partial:
+        job["partial_issues"] = partial
+    else:
+        job.pop("partial_issues", None)
+    out.notes += [l for l in lines if l.startswith("NOTE: ")]
+    c = run([pc, "--closes", job["id"]])
+    keep = [l for l in lines if l.startswith(("PR-BODY: ", "PR-TITLE: ", "CLOSING: ", "PARTIAL: "))]
+    keep[0] += "   (use it as the PR/MR description as it is: it closes the job's issues)"
+    if c.returncode != 0:
+        keep.append((c.stdout or "CLOSES: MISSING").strip())
+    return keep
+
+
 def sync_conflicts(job):
     """Syncs in which an agent resolved conflicts (a clean base merge does not count). A job.json
     from before this was recorded counts every sync as one with conflicts."""
@@ -1026,7 +1110,8 @@ def step(job, out, start=None):
             if p is not None:
                 out.main.append(f"WAIT: queued: {pause_text(p)}")
                 return
-            why = room(job, all_jobs())
+            jobs = all_jobs()
+            why = room(job, jobs) or ahead_in_queue(job, jobs)
             if why:
                 out.main.append(f"WAIT: queued: {why}")
                 return
@@ -1259,6 +1344,8 @@ def step(job, out, start=None):
                                 "description from PR-TEXT"
                                 + (", and mark it ready (delivery.draft is false)" if vpr.get("draft")
                                    and (config().get("delivery") or {}).get("draft", True) is False else ""))
+            if mode == "pr":
+                out.main += pr_body(job, out)
             out.main += [
                          "PR-TEXT: " + (os.path.join(jd, text) + " (its ## PR section)" if text else
                                         "none: write a minimal body (feature + \"approved by the user "
@@ -1359,6 +1446,10 @@ def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delive
         raise Fail("the main checkout has a detached HEAD: check out the base branch first")
     out = Out()
     with Lock():
+        if issues:
+            held = existing_job(issues, all_jobs())
+            if held:
+                return reuse(held, issues, out)
         nums = [int(x[:3]) for x in os.listdir(JOBS) if ID_RE.match(x)]
         n = max(nums, default=0) + 1
         title = feature.splitlines()[0]
@@ -1387,6 +1478,41 @@ def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delive
                         + (f"  issues {', '.join('#' + str(i) for i in issues)}" if len(issues) > 1 else ""))
         step(job, out)
         save(job)
+    return out
+
+
+UNFINISHED = ("queued",) + ACTIVE + ("needs-human",)
+
+
+def existing_job(nrs, jobs):
+    """The live job (not merged or superseded) that already has one of the issues nrs, or None.
+    Before this, `/factory issue` and `triage bundle` made a second job for an issue whose job was
+    dropped and started again by hand; a live job is now continued, never doubled."""
+    want = set(nrs)
+    for j in sorted(jobs, key=lambda j: j["id"]):
+        if j.get("stage") not in ("merged", "superseded") and want & set(job_issues(j)):
+            return j
+    return None
+
+
+def reuse(job, nrs, out):
+    """Continue job (it has some of the issues nrs) instead of creating a second one; under the lock."""
+    have, want = set(job_issues(job)), set(nrs)
+    tags = ", ".join(f"#{n}" for n in sorted(want & have))
+    if job.get("stage") not in UNFINISHED:
+        raise Fail(f"{tags} already {'is' if len(want & have) == 1 else 'are'} in job {job['id']} ({job.get('stage')}"
+                   + (f", {job['pr_url']}" if job.get("pr_url") else "") + "): /factory rework "
+                   f"{job['id']} \"<note>\" changes it; no second job")
+    if not want <= have:
+        raise Fail(f"{tags} {'is' if len(want & have) == 1 else 'are'} in job {job['id']} ({job.get('stage')}) with "
+                   + ", ".join(f"#{n}" for n in job_issues(job)) + "; this asks for "
+                   + ", ".join(f"#{n}" for n in nrs) + f". Widen it while it is queued (.factory/job set {job['id']} "
+                   f"issues '[…]'), or drop it (.factory/job drop {job['id']}) and start again; no second job")
+    out.main.append(f"REUSED: {job['id']} already has " + ", ".join(f"#{n}" for n in nrs)
+                    + f" ({job.get('stage')}): continuing it, no second job")
+    step(job, out)
+    save(job)
+    promote(out)
     return out
 
 
@@ -1503,12 +1629,38 @@ def reviewer_globs():
     own = {k: [g for g in v if isinstance(g, str)] for k, v in (cfg.get("reviewer_paths") or {}).items()
            if isinstance(v, list)}
     ui = ui_paths() or UI_GLOBS
-    globs = {"ux": ui, "ui": ui, "llm-safety": LLM_GLOBS}
+    globs = {"ux": ui, "ui": ui, "llm-safety": LLM_GLOBS, "data-quality": DATA_GLOBS, "privacy": PERSONAL_GLOBS}
     never = [g for g in ((cfg.get("delivery") or {}).get("auto_merge_never") or []) if isinstance(g, str)]
     if never:
         globs["privacy"] = never
     globs.update(own)
     return globs
+
+
+def review_min_lines(name):
+    """limits.review_min_lines: a number for the specialists except ux/ui, or {"<reviewer>": n, "default": n}
+    (ux/ui only when named); 0 = off."""
+    v = (config().get("limits") or {}).get("review_min_lines", REVIEW_MIN_LINES)
+    ui = name in ("ux", "ui")   # their light review already is cheap: off for them unless named
+    if isinstance(v, dict):
+        v = v.get(name, 0 if ui else v.get("default", REVIEW_MIN_LINES))
+    elif ui:
+        return 0
+    try:
+        return max(0, int(v))
+    except (TypeError, ValueError):
+        return REVIEW_MIN_LINES
+
+
+def changed_lines(wt, rng):
+    """path -> added + deleted lines of a diff range (a binary file counts as a large change)."""
+    r = run(["git", "diff", "--numstat", "--no-renames", *rng], cwd=wt)
+    got = {}
+    for line in (r.stdout or "").splitlines() if r.returncode == 0 else []:
+        parts = line.split("\t", 2)
+        if len(parts) == 3:
+            got[parts[2]] = 10 ** 6 if "-" in parts[:2] else int(parts[0]) + int(parts[1])
+    return got
 
 
 def select_reviewers(job, n, cand):
@@ -1532,6 +1684,21 @@ def select_reviewers(job, n, cand):
         found = [x for x in paths if glob_hit(x, gl)]
         return found and (found[0] + (f" (+{len(found) - 1})" if len(found) > 1 else ""))
 
+    lines_all = changed_lines(wt, [f"{base}...HEAD"])
+    lines_recent = changed_lines(wt, [head, "HEAD"]) if head else lines_all
+
+    def small(x, found):
+        """Why a specialist skips a change this small in its area (None: it runs)."""
+        least = review_min_lines(x)
+        stat = lines_recent if head else lines_all
+        # prompt text is behaviour for the model: any change to it counts in full for llm-safety
+        size = sum(max(least, stat.get(y, 0)) if x == "llm-safety" and y.lower().endswith(PROMPT_TEXT) else stat.get(y, 0)
+                   for y in found)
+        if least and size < least:
+            return f"only {size} changed line{'s' if size != 1 else ''} in its paths ({', '.join(found[:2])}), " \
+                   f"under limits.review_min_lines {least}"
+        return None
+
     for x in cand:
         if x in ALWAYS_REVIEW:
             chosen.append(x)
@@ -1541,20 +1708,24 @@ def select_reviewers(job, n, cand):
             why.append(f"{x}: skipped (only tests/docs changed)")
             continue
         gl = globs.get(x)
-        if x in ("ux", "ui"):
-            # round 2+: only when UI files changed since the last round (a reviewer that objected is kept in anyway)
-            f = hit([y for y in recent if not SIDE_RE.search(y)], gl)
-            reason = f or ("no UI path changed" + (f" since round {n - 1}" if head else ""))
-        elif x == "security":
+        if x == "security":
             # CI, dependencies, containers, schema, auth always; else any code change (or the configured paths)
             f = (held and held[0]) or (hit(code, gl) if gl else code[0])
             reason = f or "no matching path changed"
-        elif gl:
-            f = hit(code, gl)
-            reason = f or "no matching path changed"
         else:
-            f = code[0]
-            reason = f
+            # A specialist (ux, ui, llm-safety, privacy, data-quality, methodology, ...): only when the diff
+            # touches its paths (none configured: any code change), from round 2 on only when those changed
+            # since the last round (one that objected is kept in by the caller), and not for a change of a
+            # line or two there (limits.review_min_lines)
+            pool = [y for y in recent if not SIDE_RE.search(y)] if x in ("ux", "ui") else \
+                ([y for y in code if y in recent] if head else code)
+            found = [y for y in pool if glob_hit(y, gl)] if gl else list(pool)
+            f = found and (found[0] + (f" (+{len(found) - 1})" if len(found) > 1 else ""))
+            reason = f or ("no UI path changed" if x in ("ux", "ui") else "no matching path changed") \
+                + (f" since round {n - 1}" if head else "")
+            tiny = f and small(x, found)
+            if tiny:
+                f, reason = None, tiny
         if f:
             chosen.append(x)
             why.append(f"{x}: {reason}")
@@ -1626,11 +1797,10 @@ def cmd_pr_merged(args):
     def fn(job, out):
         if job.get("stage") not in ("pr-open", "needs-human", "pushed"):
             raise Fail(f"{job['id']} is at {job.get('stage')}")
-        job.pop("syncing", None)
-        job["delivery"] = dict(job.get("delivery") or {}, mode="pr", merged=now())
-        set_stage(job, "merged")
-        cleanup(job, out, remove_worktree=True)
-        out.main += ["DONE: merged", "NEXT: Closing issues (if the job has an issue)"]
+        mark_merged(job, out)
+        out.main.append("DONE: merged")
+        if job_issues(job):
+            out.main.append(f"NEXT: .factory/job close-issues {job['id']} (closes what the forge left open)")
     return with_job(args[0], fn)
 
 
@@ -1697,7 +1867,7 @@ def cmd_sync(args):
             if int(sync.get("count") or 0) >= MAX_SYNCS:
                 set_stage(job, "needs-human", f"sync limit reached ({MAX_SYNCS}); base keeps conflicting")
                 return step(job, out, "pr-open")
-            why = room(job, all_jobs(), prs_count=False)
+            why = sync_room(job, all_jobs())
             if why:
                 out.main.append(f"WAIT: sync postponed: {why}")
                 return
@@ -1761,6 +1931,32 @@ def cmd_drop(args):
         if not pushed and git("rev-parse", "--verify", "-q", f"refs/heads/{job['branch']}"):
             if git("branch", "-d", job["branch"]) is None:
                 out.notes.append(f"NOTE: branch {job['branch']} kept (git branch -d refused: it has commits that are not merged)")
+    return with_job(args[0], fn)
+
+
+def cmd_requeue(args):
+    """Put a job that has not started real work (queued, or at spec before round 1) back at the end of the
+    queue, with its state kept (spec.md, acceptance tests, worktree). Frees its slot for a sync or an
+    earlier job; it starts again when there is room and its turn comes."""
+    reason = " ".join(args[1:]).strip()[:200]
+
+    def fn(job, out):
+        s = job.get("stage")
+        if job.get("adopted") or s not in ("queued", "spec") or int(job.get("round") or 0) > 0:
+            raise Fail(f"{job['id']} is at {s}" + (f", round {job.get('round')}" if int(job.get("round") or 0) else "")
+                       + ": only a queued job, or one at spec before its first build, can be requeued "
+                       "(a running build or review: let it finish, or `job fail` it)")
+        pend = job.pop("pending", None)
+        if s == "spec":
+            job["resume_stage"] = "spec"
+        job["queued_at"], job["queued_ts"] = now(), time.time()
+        job.setdefault("history", []).append({"stage": "queued", "at": now(),
+                                              "event": "requeued" + (f": {reason}" if reason else "")})
+        job["stage"] = "queued"
+        out.main.append(f"DONE: queued ({job['id']} requeued at the end of the queue; its state is kept)")
+        if pend:
+            out.notes.append(f"NOTE: {pend.get('key')} was pending: let that agent finish or stop it; its file is "
+                             "used when the job starts again")
     return with_job(args[0], fn)
 
 
@@ -1973,17 +2169,22 @@ def norm_pr(x):
                 "body": str(x.get("description") or ""), "author": who(x.get("author")),
                 "branch": x.get("source_branch"), "base": x.get("target_branch"),
                 "fork": x.get("source_project_id") != x.get("target_project_id"),
-                "state": {"opened": "open"}.get(str(x.get("state")), str(x.get("state") or "")), "conflict": conflict}
+                "state": {"opened": "open"}.get(str(x.get("state")), str(x.get("state") or "")), "conflict": conflict,
+                "behind": dms == "need_rebase",
+                "sha": x.get("merge_commit_sha") or x.get("squash_commit_sha") or None}
     m = str(x.get("mergeable") or "").upper()
     conflict = True if m == "CONFLICTING" or str(x.get("mergeStateStatus") or "").upper() == "DIRTY" else \
         None if m in ("UNKNOWN", "") else False
     return {"nr": x.get("number"), "url": x.get("url"), "title": str(x.get("title") or ""),
             "body": str(x.get("body") or ""), "author": who(x.get("author")),
             "branch": x.get("headRefName"), "base": x.get("baseRefName"), "fork": bool(x.get("isCrossRepository")),
-            "state": str(x.get("state") or "").lower(), "conflict": conflict}
+            "state": str(x.get("state") or "").lower(), "conflict": conflict,
+            "behind": str(x.get("mergeStateStatus") or "").upper() == "BEHIND",
+            "sha": (x.get("mergeCommit") or {}).get("oid") if isinstance(x.get("mergeCommit"), dict) else None}
 
 
 GH_PR_FIELDS = "number,url,title,body,author,headRefName,baseRefName,isCrossRepository,state,mergeable,mergeStateStatus"
+GH_PR_VIEW_FIELDS = GH_PR_FIELDS + ",mergeCommit"
 
 
 def forge_json(cmd):
@@ -2000,7 +2201,7 @@ def forge_pr(nr):
     """(pr, error) for PR/MR nr of this repo, from gh or glab."""
     forge = config().get("forge")
     if forge == "github" and shutil.which("gh"):
-        x, err = forge_json(["gh", "pr", "view", str(nr), "--json", GH_PR_FIELDS])
+        x, err = forge_json(["gh", "pr", "view", str(nr), "--json", GH_PR_VIEW_FIELDS])
     elif forge == "gitlab" and shutil.which("glab"):
         x, err = forge_json(["glab", "api", f"projects/:id/merge_requests/{nr}"])
     else:
@@ -2014,12 +2215,192 @@ def forge_open_prs():
     if forge == "github" and shutil.which("gh"):
         rows, err = forge_json(["gh", "pr", "list", "--state", "open", "--limit", "100", "--json", GH_PR_FIELDS])
     elif forge == "gitlab" and shutil.which("glab"):
-        rows, err = forge_json(["glab", "mr", "list", "--per-page", "100", "-F", "json"])
+        rows, err = forge_json(["glab", "mr", "list", "--per-page", "100", "--output", "json"])
     else:
         return [], f"no forge CLI for config.forge {forge!r}"
     if not isinstance(rows, list):
         return [], err or "no JSON list"
     return [p for p in map(norm_pr, rows) if p], None
+
+
+PR_NR_RE = re.compile(r"/(?:pull|merge_requests)/(\d+)")
+
+
+def pr_number(job):
+    """The job's PR/MR number: pr_number (adopted) or the number in pr_url."""
+    if isinstance(job.get("pr_number"), int):
+        return job["pr_number"]
+    m = PR_NR_RE.search(str(job.get("pr_url") or ""))
+    return int(m.group(1)) if m else None
+
+
+def forge_issue_state(nr):
+    """("open"|"closed", None) or (None, error) for issue nr of this repo."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        x, err = forge_json(["gh", "issue", "view", str(nr), "--json", "state"])
+    elif forge == "gitlab" and shutil.which("glab"):
+        x, err = forge_json(["glab", "api", f"projects/:id/issues/{nr}"])
+    else:
+        return None, f"no forge CLI for config.forge {forge!r}"
+    st = str((x or {}).get("state") or "").lower() if isinstance(x, dict) else ""
+    return ({"opened": "open"}.get(st, st), None) if st else (None, err or "no state")
+
+
+def forge_close_issue(nr, comment):
+    """Comment on issue nr and close it; None when done, else the error."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        cmds = [["gh", "issue", "close", str(nr), "--reason", "completed", "--comment", comment]]
+    elif forge == "gitlab" and shutil.which("glab"):
+        cmds = [["glab", "api", "-X", "POST", f"projects/:id/issues/{nr}/notes", "-f", f"body={comment}"],
+                ["glab", "api", "-X", "PUT", f"projects/:id/issues/{nr}", "-f", "state_event=close"]]
+    else:
+        return f"no forge CLI for config.forge {config().get('forge')!r}"
+    for cmd in cmds:
+        r = run(cmd, timeout=60)
+        if r.returncode != 0:
+            return ((r.stderr or r.stdout or "").strip().splitlines() or ["failed"])[0][:160]
+    return None
+
+
+def closed_map(job):
+    """issue_closed as {"<nr>": "<ISO8601 or reason>"} (a single job stores a plain string)."""
+    v = job.get("issue_closed")
+    if isinstance(v, dict):
+        return {str(k): x for k, x in v.items()}
+    nrs = job_issues(job)
+    return {str(nrs[0]): v} if v and len(nrs) == 1 else {}
+
+
+def close_issues(job, jobs, out):
+    """After the forge confirmed the merge: close every issue of the job that the forge left open
+    (closing keywords missing or ignored), with a "Fixed in !N (<sha>)" comment. An issue the PR/MR
+    body marked partial (`Refs #N` with a `left:` note) stays open and is reported; so is an issue
+    another unfinished job still works on. Changes job (issue_closed); the caller saves it."""
+    nrs = job_issues(job)
+    if not nrs:
+        return
+    if (config().get("issues") or {}).get("close_on_merge") is False:
+        out.notes.append(f"NOTE: {job['id']}: issues.close_on_merge is false: closing #"
+                         + ", #".join(map(str, nrs)) + " is left to you")
+        return
+    if job.get("stage") != "merged" or not job.get("pr_url"):
+        out.notes.append(f"NOTE: {job['id']}: not merged through a PR/MR: its issues stay as they are")
+        return
+    done = closed_map(job)
+    partial = {str(k): v for k, v in (job.get("partial_issues") or {}).items()}
+    nr_pr = pr_number(job)
+    ref = ("!" if config().get("forge") == "gitlab" else "#") + str(nr_pr or "?")
+    sha = (job.get("merge_sha") or "")[:12]
+    busy = {n: j["id"] for j in jobs if j.get("id") != job["id"]
+            and j.get("stage") in ("queued",) + ACTIVE + ("pr-open",) for n in job_issues(j)}
+    for n in nrs:
+        if str(n) in done:
+            continue
+        if str(n) in partial:
+            out.main.append(f"LEFT-OPEN: #{n} ({job['id']}): partial, {partial[str(n)]}")
+            continue
+        if n in busy:
+            out.main.append(f"LEFT-OPEN: #{n} ({job['id']}): job {busy[n]} still works on it")
+            continue
+        st, err = forge_issue_state(n)
+        if st == "closed":
+            done[str(n)] = "already closed"
+            out.main.append(f"CLOSED: #{n} (already closed by the forge)")
+            continue
+        if st != "open":
+            out.main.append(f"ERROR-ISSUE: #{n}: the forge did not say whether it is open ({err}); tried again next time")
+            continue
+        comment = f"Fixed in {ref}" + (f" ({sha})" if sha else "") + (f": {job['pr_url']}" if job.get("pr_url") else "")
+        err = forge_close_issue(n, comment)
+        if err is None:
+            st, _ = forge_issue_state(n)
+            err = None if st == "closed" else f"still {st or 'unknown'} after closing"
+        if err:
+            out.main.append(f"ERROR-ISSUE: #{n}: closing failed ({err}); tried again next time")
+            continue
+        done[str(n)] = now()
+        out.main.append(f"CLOSED: #{n} (job {job['id']}, {job['pr_url']}; the forge had left it open)")
+    job["issue_closed"] = done if len(nrs) > 1 else (done.get(str(nrs[0])) or None)
+
+
+def cmd_close_issues(args):
+    def fn(job, out):
+        close_issues(job, all_jobs(), out)
+        if not out.main:
+            out.main.append(f"DONE: {job['id']}: nothing to close")
+        else:
+            out.main.insert(0, f"DONE: {job['id']}: issues checked")
+    return with_job(args[0], fn)
+
+
+def mark_merged(job, out, sha=None):
+    job.pop("syncing", None)
+    job["delivery"] = dict(job.get("delivery") or {}, mode="pr", merged=now())
+    if sha:
+        job["merge_sha"] = sha
+    set_stage(job, "merged")
+    cleanup(job, out, remove_worktree=True)
+
+
+def cmd_prs(args):
+    """Ask the forge about every pr-open job (or one): merged, closed, conflicting or behind."""
+    want = args[0] if args else None
+    jobs = [j for j in all_jobs() if (want is None or j["id"] == want)]
+    if want and not jobs:
+        raise Fail(f"no job {want}")
+    seen = {}
+    for j in jobs:   # forge calls outside the lock
+        if j.get("stage") == "pr-open" and pr_number(j):
+            seen[j["id"]] = forge_pr(pr_number(j))
+    out, syncs, other = Out(), [], []
+    with Lock():
+        jobs = all_jobs()
+        for j in jobs:
+            if j["id"] in seen and j.get("stage") == "pr-open":
+                pr, err = seen[j["id"]]
+                tag = f"{j['id']} ({j.get('pr_url') or pr_number(j)})"
+                if not pr:
+                    other.append(f"UNKNOWN: {tag}: the forge did not answer ({err})")
+                    continue
+                if pr["state"] == "merged":
+                    mark_merged(j, out, pr.get("sha"))
+                    other.append(f"MERGED: {tag}")
+                elif pr["state"] != "open":
+                    j.pop("syncing", None)
+                    set_stage(j, "needs-human", f"PR/MR {pr['state']} without merge")
+                    other.append(f"CLOSED: {tag}: {pr['state']} without merge -> needs-human")
+                else:
+                    merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
+                    if pr.get("behind") and not pr["conflict"]:
+                        merge = "behind"
+                    j["pr_state"] = dict(j.get("pr_state") or {}, at=now(), merge=merge)
+                    if j.get("syncing"):
+                        other.append(f"SYNCING: {tag}: a sync is running: .factory/job next {j['id']}")
+                    elif merge in ("conflict", "behind"):
+                        syncs.append(j)
+                    elif merge == "unknown":
+                        other.append(f"UNKNOWN: {tag}: the forge is still checking mergeability; again in a minute")
+                save(j)
+            if j.get("stage") == "merged" and job_issues(j) and \
+                    len(closed_map(j)) < len(job_issues(j)) and (want is None or j["id"] == want):
+                sub = Out()
+                close_issues(j, jobs, sub)
+                save(j)
+                other += sub.main
+                out.notes += sub.notes
+        promote(out)
+    if syncs:
+        out.main.append(f"ACTION: sync {len(syncs)} PR/MR{'s' if len(syncs) > 1 else ''} first (before any new job; "
+                        "a sync needs no job slot)")
+        for j in syncs:
+            out.main += [f"SYNC: {j['id']} {j.get('pr_url') or ''} {j['pr_state']['merge']}".rstrip(),
+                         f"RUN: .factory/job sync {j['id']}   (then drive it as in /factory sync)"]
+    else:
+        out.main.append(f"DONE: {len(seen)} open PR/MR{'s' if len(seen) != 1 else ''} checked: no sync needed")
+    out.main += other
+    return out
 
 
 def allowed_authors():
@@ -2175,7 +2556,7 @@ def cmd_adoptable(args):
 # the script validates that plan (limits, label overrides) before any job is started.
 
 def norm_issue(raw):
-    """One issue as GitHub (`gh issue list --json`) or GitLab (`glab issue list -F json`) gives it."""
+    """One issue as GitHub (`gh issue list --json`) or GitLab (`glab issue list --output json`) gives it."""
     if not isinstance(raw, dict):
         return None
     nr = raw.get("number", raw.get("iid"))
@@ -2244,7 +2625,7 @@ def open_pr_texts():
         cmd = ["gh", "pr", "list", "--state", "open", "--limit", "200",
                "--json", "number,title,body,headRefName,url"]
     elif forge == "gitlab" and shutil.which("glab"):
-        cmd = ["glab", "mr", "list", "--per-page", "100", "-F", "json"]
+        cmd = ["glab", "mr", "list", "--per-page", "100", "--output", "json"]
     else:
         return []
     r = run(cmd, timeout=60)
@@ -2296,13 +2677,20 @@ def triage_prepare(args):
     cfg = config().get("issues")
     if not cfg:
         raise Fail("issue mode is off (config.issues is null)")
+    fetch = (GITLAB_ISSUE_LIST if config().get("forge") == "gitlab" else GITHUB_ISSUE_LIST) + f" > {args[0]}"
     try:
         with open(args[0]) as f:
-            raw = json.load(f)
-    except (OSError, ValueError) as e:
+            text = f.read()
+    except OSError as e:
         raise Fail(f"cannot read {args[0]}: {e}")
+    try:
+        raw = json.loads(text)
+    except ValueError as e:
+        first = (text.strip().splitlines() or ["(empty)"])[0][:80]
+        raise Fail(f"{args[0]} is not valid JSON ({e}; it starts with {first!r}): fetch it again with "
+                   f"`{fetch}` (glab needs `--output json`: its `-F` is --output-format and prints a table)")
     if not isinstance(raw, list):
-        raise Fail(f"{args[0]} must hold the JSON list the forge CLI printed")
+        raise Fail(f"{args[0]} must hold the JSON list the forge CLI printed (`{fetch}`)")
     allowed = {str(a).lower() for a in cfg.get("allowed_authors") or []}
     need = (cfg.get("label") or "").lower() or None
     skip = {str(l).lower() for l in (cfg["skip_labels"] if "skip_labels" in cfg else DEFAULT_SKIP_LABELS)}
@@ -2333,7 +2721,8 @@ def triage_prepare(args):
             return "label " + sorted(skip & set(low))[0]
         if c["nr"] in taken:
             j = taken[c["nr"]]
-            return f"job {j['id']} has it ({j.get('stage')})"
+            return f"job {j['id']} has it ({j.get('stage')})" + (
+                f": continue it (.factory/job next {j['id']}), no second job" if j.get("stage") in UNFINISHED else "")
         return work_exists(c["nr"], prs, branches, ref)
 
     def trim(c):
@@ -2627,6 +3016,11 @@ def triage_bundle(args):
     data = tri_read("issues.json")
     cands = {c["nr"]: c for c in data.get("candidates") or []}
     gone = [n for n in nrs if n not in cands]
+    held = existing_job(nrs, all_jobs()) if gone else None
+    if held and set(nrs) <= set(job_issues(held)) or held and set(gone) & set(job_issues(held)):
+        out = Out()
+        with Lock():
+            return reuse(load(held["id"]), nrs, out)
     if gone:
         why = {x.get("issue"): x.get("reason") for x in data.get("skipped") or []}
         raise Fail("not startable (author, label, an existing job, PR or commit; see SKIPPED from "
@@ -2675,7 +3069,8 @@ def main():
             "rework": (cmd_rework, 2), "sync": (cmd_sync, 1), "sync-done": (cmd_sync_done, 1),
             "fail": (cmd_fail, 2), "drop": (cmd_drop, 1), "set": (cmd_set, 3), "list": (cmd_list, 0), "capacity": (cmd_list, 0),
             "triage": (cmd_triage, 1), "report": (cmd_report, 0), "adopt": (cmd_adopt, 1),
-            "adoptable": (cmd_adoptable, 0), "pause": (cmd_pause, 0), "unpause": (cmd_unpause, 0)}
+            "adoptable": (cmd_adoptable, 0), "pause": (cmd_pause, 0), "unpause": (cmd_unpause, 0),
+            "requeue": (cmd_requeue, 1), "prs": (cmd_prs, 0), "close-issues": (cmd_close_issues, 1)}
     try:
         if argv[0] == "show":
             print(cmd_show(argv[1:]))

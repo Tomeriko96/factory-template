@@ -28,7 +28,7 @@ the judgement sits in pinned agents):
 /factory next [--yes]           triage ALL open, non-blocked issues of trusted authors: bundles small related
                                 ones into one job, picks docs/light/full per job, shows the plan, then starts
                                 (without config.issues: the first item of .factory/backlog.md)
-/factory approve|rework|resume|drop|deliver <id>
+/factory approve|rework|resume|requeue|drop|deliver <id>
 /factory adopt <pr|mr nr>       patch the merge conflict of a PR/MR made outside the factory
                                 (allowed author, same repo): merge the target in, targeted tests, push
 /factory pause | unpause        finish running jobs, start nothing new: the queue holds (new jobs only queue);
@@ -94,7 +94,8 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 
 | Guard | What it does |
 |---|---|
-| `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start when one leaves those stages. |
+| `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start in queue order when one leaves those stages. `job requeue <id>` puts a job that is queued or still at `spec` at the end of the queue, its state kept. |
+| `limits.active_syncs` (default 2) | A sync of an open PR/MR needs **no** job slot (open MRs waited hours behind jobs that had not started): `job sync` only waits when this many syncs run. A running sync still counts against `active_jobs`, so no new job starts beside it, and `/factory next` runs pending syncs (`job prs`) before it starts anything. |
 | `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it. Each command has a weight (the cores it may use: 3 for Node, browser and build tools, 1 for pytest and the like); the weights running at once on the whole machine (all repos, all sessions) stay within 75% of the cores, and the CPU must not be busier than 90%, measured over a second, not from the lagging load average. It runs at low priority and sets `FACTORY_CPUS` to the weight. `heavy status` shows who holds capacity. |
 | `heavy --priority high\|normal\|low` | Default normal (env `FACTORY_HEAVY_PRIORITY`). Waiters are recorded in the lock dir; a waiter only takes a free slot when no waiter of a higher priority, and no older waiter of the same priority, is queued (FIFO within a priority: freed slots drain until a big command fits; a waiter whose pid is gone is ignored). The precheck's full validation and the builder run at high, audits and timing/measurement runs at low. `heavy status` and `.factory/watch` show the priority. |
 | `heavy --background` / `heavy wait` | For commands that may outlast a tool call (a queue, a long suite): `--background` returns a ticket at once, `heavy wait <ticket>` blocks up to 9 minutes and prints the result and exit code (124 = call again). Foreground calls give up after 9 minutes with exit 75 and say so, so a queue can no longer eat an agent's tool call. |
@@ -124,8 +125,15 @@ behaviour), a suspect file at most twice, base comparisons only for the claim co
   (and always for CI, dependencies, containers, schema, auth); `ux`/`ui` only when the diff
   matches the repo's "UI paths" (they start a server and a browser per round, and gave
   `CHANGES` in 0 of 65 reviews; in round 2+ only if they objected or UI files changed);
-  `llm-safety` only for prompt/agent/LLM paths; `privacy` only for its paths (fallback:
-  `delivery.auto_merge_never`); a tests/docs-only diff gets `code` + `audit`. Override the
+  `llm-safety` only for prompt/agent/LLM paths; `data-quality` only for pipelines, ETL, SQL and
+  data files; `privacy` only for its paths (fallback: `delivery.auto_merge_never`, then file names
+  that handle personal data such as `*user*`, `*student*`, `*/auth/*`); a tests/docs-only diff gets
+  `code` + `audit`. These specialists also sit out round 2+ unless their paths changed since the
+  last round (or they objected), and a change of one or two lines in their paths
+  (`limits.review_min_lines`, default 3, `0` = off; ux/ui only when named; prompt text always counts):
+  on one day 26 sonnet specialist runs (ui, ux, data-quality, llm-safety, privacy) blocked nothing,
+  some for a two-line type fix in a dependency bump; the only blocking findings came from audit
+  and security, which stay as they were. Override the
   globs per reviewer with `reviewer_paths` in `config.json`, e.g.
   `{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"]}`.
 - **Targeted tests during the build, the full suite once:** builders and reviewers ran whole
@@ -323,13 +331,22 @@ forge that keeps failing is `VALIDATE: ERROR` and `needs-human`. Delivery reuses
 PR/MR (title and body replaced, marked ready when it was a draft and `delivery.draft` is false).
 Targeted tests during build and review are unchanged.
 
-Once the forge confirms a job's PR/MR is merged, the factory closes the issue the job came
-from (`issues.close_on_merge`, default `true`; `false` leaves that to you), and no other
-one. This also catches up older merged jobs on `status`/`sync`. Review comments go back in
+**Closing lines.** The PR/MR description is written by the script (`.factory/precheck --pr-body`
+→ `<job>/pr-body.md`): the approver's `## PR` section plus one `Closes #N` line (`issues.link`) for
+every issue of the job it does not close yet, the bundle issue and every member included. Only an
+issue marked partial (`Refs #N (left: <what>)`) stays without one. Two bundle MRs had gone out with
+"Refs …, closed by hand after the merge" and left 8 issues open. `precheck --closes <id> [<file>]`
+checks a body.
+
+Once the forge confirms a job's PR/MR is merged, `.factory/job close-issues <id>` (run by
+`job prs`) checks each issue of the job and closes the ones the forge left open, with the comment
+`Fixed in !N (<sha>)`, or reports the one left open on purpose (`LEFT-OPEN: #N: partial, left: …`)
+(`issues.close_on_merge`, default `true`; `false` leaves that to you); it closes no other
+issue. This also catches up older merged jobs on `status`/`sync`. Review comments go back in
 with `/factory rework <id> "<comments>"`; the next approved round pushes to the same branch,
 so the PR/MR updates.
 
-`/factory sync [<id>]` keeps open PRs/MRs mergeable: it asks the forge whether each still
+`/factory sync [<id>]` keeps open PRs/MRs mergeable: `.factory/job prs` asks the forge whether each still
 merges into the base branch (also at the end of delivery, on every `status` and whenever a
 merge is noticed, since each merge can make the other open PRs conflict), and on a
 conflict has a sonnet builder merge the base into the job branch (`SYNC: CLEAN` when git
@@ -401,7 +418,11 @@ label in `issues.skip_labels` (default `blocked`, `wontfix`, `factory:in-progres
 needed (an old config that still has `issues.label` keeps requiring it; remove the key to take all). Steps:
 
 1. `.factory/job triage prepare` filters mechanically: author, skip labels, issues that already have a job,
-   an open PR/MR, a remote branch or a commit referencing them.
+   an open PR/MR, a remote branch or a commit referencing them. The orchestrator fetches the issues with
+   `gh issue list … --json …` or `glab issue list --per-page 100 --output json` (glab's `-F` is
+   `--output-format` and prints a table); a file that is not JSON is refused with that command in the error.
+   An issue whose job is still unfinished is continued, never started twice (`REUSED: <id>` from
+   `job new --issue`/`triage bundle`).
 2. The **factory-triage** agent (sonnet, medium, no Bash) is the *issue audit*: per issue the effort
    (`docs`: documentation only, no spec/reviewers/approver; `light`: small and local, code review only; `full`:
    everything else), issues it should skip (questions, epics, unclear), and which small related issues belong in
@@ -454,7 +475,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 651 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 723 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 65 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |

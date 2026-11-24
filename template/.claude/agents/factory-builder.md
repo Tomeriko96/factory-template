@@ -168,7 +168,7 @@ Commit as usual. Write `round-1/build.md` with first line `BUILD: DONE` (or `BUI
 <reason>`), then: Summary, Changes (one line per file),
 Validation (real output), and a `## PR` section for the PR/MR in English (title line
 ≤ 70 chars in the repo's commit convention, then Summary, Validation and "Leftovers: None."
-or the open points; no code or secrets). The orchestrator checks the diff mechanically and
+or the open points, then one `Closes #<nr>` line per issue of the job; no code or secrets). The orchestrator checks the diff mechanically and
 delivers; nobody reviews it by hand, so keep the claims small and true.
 
 ## Sync mode (prompt says `Sync <n>`)

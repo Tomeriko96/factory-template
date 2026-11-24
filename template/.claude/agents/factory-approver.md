@@ -83,7 +83,16 @@ English:
 
 ## Leftovers
 <non-blocking findings, or "None.">
+
+Closes #<nr>
 ```
+
+One closing line per issue the job fully fixes, each on its own line: `Closes #<nr>` for the job's
+issue, and for a bundle the bundle issue and **every** member (the `#<nr>` sections of spec.md). An
+issue the job fixes only in part (only with MERGE when the spec allows it): `Refs #<nr> (left: <what
+is not done>)` instead, so it stays open. Never `Refs` for a fixed issue and never "closed by hand
+after the merge": the forge closes issues only on a closing keyword, and the delivery script adds a
+`Closes` line for every issue your section neither closes nor marks partial.
 
 No code, diffs, raw data, personal data or secrets in this section.
 

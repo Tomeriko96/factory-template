@@ -158,6 +158,15 @@ def limits():
     return {"active": int(lim.get("active_jobs") or 3), "open_prs": int(lim.get("open_prs", 5) or 0)}
 
 
+def max_syncs():
+    """limits.max_syncs: base merges per job before needs-human (0 or absent = MAX_SYNCS)."""
+    try:
+        v = int((config().get("limits") or {}).get("max_syncs") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    return v if v > 0 else MAX_SYNCS
+
+
 def respawn_after():
     v = (config().get("limits") or {}).get("respawn_after_min", RESPAWN_AFTER_MIN)
     try:
@@ -1864,8 +1873,9 @@ def cmd_sync(args):
             raise Fail(f"{job['id']} is at {job.get('stage')}: sync is for pr-open jobs")
         if not job.get("syncing"):
             sync = job.setdefault("sync", {"count": 0, "conflicts": 0, "last": None})
-            if int(sync.get("count") or 0) >= MAX_SYNCS:
-                set_stage(job, "needs-human", f"sync limit reached ({MAX_SYNCS}); base keeps conflicting")
+            cap = max_syncs()
+            if int(sync.get("count") or 0) >= cap:
+                set_stage(job, "needs-human", f"sync limit reached ({cap}, limits.max_syncs); base keeps conflicting")
                 return step(job, out, "pr-open")
             why = sync_room(job, all_jobs())
             if why:

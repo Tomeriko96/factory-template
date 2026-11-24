@@ -96,6 +96,7 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 |---|---|
 | `limits.active_jobs` (default 3) | Jobs of one repo in `spec`/`build`/`review`/`approve` at once. More are `queued` and start in queue order when one leaves those stages. `job requeue <id>` puts a job that is queued or still at `spec` at the end of the queue, its state kept. |
 | `limits.active_syncs` (default 2) | A sync of an open PR/MR needs **no** job slot (open MRs waited hours behind jobs that had not started): `job sync` only waits when this many syncs run. A running sync still counts against `active_jobs`, so no new job starts beside it, and `/factory next` runs pending syncs (`job prs`) before it starts anything. |
+| `limits.max_syncs` (default 3; 0 or absent = default) | Base merges per job before it goes to `needs-human` ("sync limit reached"). Raise it in a repo where every merge conflicts in a shared file, so open PRs/MRs do not wait hours for a human. |
 | `.factory/heavy -- <cmd>` | Every test, build, lint and install of every agent goes through it. Each command has a weight (the cores it may use: 3 for Node, browser and build tools, 1 for pytest and the like); the weights running at once on the whole machine (all repos, all sessions) stay within 75% of the cores, and the CPU must not be busier than 90%, measured over a second, not from the lagging load average. It runs at low priority and sets `FACTORY_CPUS` to the weight. `heavy status` shows who holds capacity. |
 | `heavy --priority high\|normal\|low` | Default normal (env `FACTORY_HEAVY_PRIORITY`). Waiters are recorded in the lock dir; a waiter only takes a free slot when no waiter of a higher priority, and no older waiter of the same priority, is queued (FIFO within a priority: freed slots drain until a big command fits; a waiter whose pid is gone is ignored). The precheck's full validation and the builder run at high, audits and timing/measurement runs at low. `heavy status` and `.factory/watch` show the priority. |
 | `heavy --background` / `heavy wait` | For commands that may outlast a tool call (a queue, a long suite): `--background` returns a ticket at once, `heavy wait <ticket>` blocks up to 9 minutes and prints the result and exit code (124 = call again). Foreground calls give up after 9 minutes with exit 75 and say so, so a queue can no longer eat an agent's tool call. |
@@ -355,7 +356,7 @@ checked with `git merge-tree`) (a merge commit, never a
 rebase or force-push), runs the validation, lets the code reviewer check the merge and
 pushes. A conflict that needs a decision (the base already fixes the same thing, both
 sides change the same behaviour, validation fails) is never resolved by picking a side:
-the job goes to `needs-human` with the reason. At most `MAX_SYNCS` (3) times per job.
+the job goes to `needs-human` with the reason. At most `limits.max_syncs` (default 3) times per job.
 `/loop 10m /factory sync` watches continuously.
 
 `/factory adopt <pr|mr nr>` (script: `.factory/job adopt <nr>`): merge conflicts are always
@@ -373,7 +374,7 @@ cover the conflicted files (targeted, through `heavy`; no full validation), and 
 pushed to the same branch (never force). No spec, acceptance tests, review rounds, approver or
 code review of the merge; `rework` and `approve` are refused. The auto-merge rule is the same:
 after an agent resolved conflicts a human merges (auto-merge off), a clean merge leaves the
-PR/MR's auto-merge setting as it is. A later conflict is patched again (`MAX_SYNCS` still
+PR/MR's auto-merge setting as it is. A later conflict is patched again (`limits.max_syncs` still
 holds); `job drop <id>` forgets the adoption and leaves the PR/MR and its branch alone.
 `.factory/job adoptable` lists open PRs/MRs by allowed authors in this repo that have a merge
 conflict and no job (`/factory next` and `status` run it; the board shows them as
@@ -475,7 +476,7 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 723 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget and resume limits; the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 725 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget, resume and sync limits (`limits.max_syncs`); the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 65 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |

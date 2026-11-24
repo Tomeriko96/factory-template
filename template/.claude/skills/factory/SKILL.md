@@ -137,7 +137,8 @@ Enforced by `.factory/job` (see **Job state**); listed so you can explain them.
   (`job next --respawn` re-emits the spawn with a resume note), then `needs-human`.
 - `limits.respawn_after_min` (default 45): before that, a pending agent without its file
   counts as still running; `job next` waits instead of spending a resume.
-- `MAX_SYNCS = 3`: base merges per job (see `/factory sync`). Then `needs-human`.
+- `limits.max_syncs` (default 3, `MAX_SYNCS`; 0 or absent = default): base merges per job (see
+  `/factory sync`). Then `needs-human`.
 - `limits.active_jobs` (default 3): jobs in `spec`/`build`/`review`/`approve`/`deliver`
   or syncing at once, per repo; `limits.open_prs` (default 5): jobs at `pr-open` before
   new jobs wait. More are `queued`, and start in queue order (`job requeue` puts a job at the
@@ -480,7 +481,7 @@ PR/MR already merged → `.factory/job pr-merged <id>`, then `.factory/job close
 without merge → `.factory/job fail <id> "PR/MR closed without merge"`. Report it and skip
 it. No conflict → nothing to do. Conflict → `.factory/job sync <id>` and drive it:
 
-1. The script checks the sync budget (`MAX_SYNCS`, then `needs-human`) and `limits.active_syncs`
+1. The script checks the sync budget (`limits.max_syncs`, then `needs-human`) and `limits.active_syncs`
    (default 2 at once; more → `WAIT: sync postponed`, retried on the next `status`/`sync`/`next`; a
    sync never waits for a job slot), recreates the
    worktree and takes commits others pushed to the branch (diverged → `needs-human`).

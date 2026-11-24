@@ -1166,12 +1166,20 @@ out="$(J next "$AD")"; first "$out" "ACTION: push"; has "$out" "SYNC: clean (no 
 has "$out" "AUTO-MERGE: no (an agent resolved merge conflicts"   # the first sync's resolution still stands
 git -C "$(wt "$AD")" push -q origin feat/682-fix-thing; J sync-done "$AD" >/dev/null
 field "$AD" "j['sync']['count'], j['sync']['conflicts']" "2 1"
+# limits.max_syncs sets the budget: at 2 the third sync goes to needs-human
+cp .factory/config.json "$T/config.ms"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["limits"]=dict(c.get("limits") or {}, max_syncs=2); json.dump(c, open(".factory/config.json","w"))'
+first "$(J sync "$AD")" "DONE: needs-human: sync limit reached (2, limits.max_syncs)"
+cp "$T/config.ms" .factory/config.json
 # a sync that needs a human: the adopted job can be synced again from needs-human, never approved
 ghpr 682 feat/682-fix-thing me CONFLICTING
 J sync "$AD" >/dev/null; mkdir -p "$(jd "$AD")/sync-3"; echo 'SYNC: NEEDS-HUMAN both change the greeting' > "$(jd "$AD")/sync-3/build.md"
 out="$(J next "$AD")"; first "$out" "DONE: needs-human: sync 3: the merge needs a decision"; has "$out" "NEXT: .factory/job sync $AD patches the conflict again"
 first "$(J approve "$AD")" "ERROR: $AD is an adopted PR/MR: nothing to approve"
-first "$(J sync "$AD")" "DONE: needs-human: sync limit reached"   # MAX_SYNCS still holds
+first "$(J sync "$AD")" "DONE: needs-human: sync limit reached (3, limits.max_syncs)"   # MAX_SYNCS still holds
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["limits"]=dict(c.get("limits") or {}, max_syncs=0); json.dump(c, open(".factory/config.json","w"))'
+first "$(J sync "$AD")" "DONE: needs-human: sync limit reached (3,"   # limits.max_syncs 0 = the default 3
+cp "$T/config.ms" .factory/config.json
 first "$(J drop "$AD" "fixed by hand")" "DONE: superseded"
 git rev-parse -q --verify feat/682-fix-thing >/dev/null && ok || bad "drop deleted the adopted branch"
 # a clean first sync of an adopted PR keeps auto-merge as it is (the gate has no approver to ask for)

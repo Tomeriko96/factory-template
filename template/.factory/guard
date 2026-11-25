@@ -145,6 +145,8 @@ def classify(w, depth=0):
         return None
     if first in FACTORY:
         return None
+    if first == "serve-with":   # the servers are not wrapped (as with serve start); the command after -- is
+        return classify(args[args.index("--") + 1:], depth + 1) if "--" in args else None
     if first == "shoot":
         return ".factory/shoot"
     if first == "pre-push.sh":

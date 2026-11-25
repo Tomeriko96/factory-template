@@ -174,7 +174,10 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   that group); it must (1) start a single
   process tree on `{port}` only, (2) talk only to services on that same port, never to
   a fixed dev-proxy port, (3) never stop or signal other processes (no `pkill`,
-  no `make stop`), (4) never write into the worktree (no build, no install). Prefer the
+  no `make stop`), (4) never write into the worktree (no build, no install), (5) share no
+  fixed names or paths with a parallel run (a Docker container name, a database file, a
+  socket: put `{port}` in them). For a command that needs the app only while it runs, agents
+  use `.factory/serve-with` (or `shoot --serve`), which stops it again in every case. Prefer the
   production-like path (backend serving the built frontend) over a dev server with a
   proxy. If no such command exists without a code change, say so in repo.md and to the
   user (that code change is a good first factory job); until then use `"reviewers"`

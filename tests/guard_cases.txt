@@ -211,5 +211,12 @@ A kill $!
 A kill -TERM "$pid"
 A .factory/heavy cancel h1a2b3
 A .factory/serve stop 5110
+# serve-with: the servers are not wrapped (like serve start), the command after -- is checked
+A .factory/serve-with --server "npm run dev -- --port {port}" --port auto -- .factory/heavy --priority low -- .factory/shoot http://localhost:{port} --out x
+R .factory/serve-with --server "npm run dev" --port 5110 -- .factory/shoot http://localhost:5110 --out x
+R /abs/.factory/serve-with --server "python3 -m http.server {port}" --port auto --ready / -- npx playwright test
+A .factory/serve-with --server "python3 -m http.server {port}" --port auto -- curl -sf http://127.0.0.1:{port}/
+A .factory/heavy --priority low -- .factory/shoot 'http://localhost:{port}' --serve 'npm run dev -- --port {port}' --out x
+R .factory/shoot 'http://localhost:{port}' --serve 'npm run dev -- --port {port}' --out x
 A pgrep -af vite
 A pkill --version

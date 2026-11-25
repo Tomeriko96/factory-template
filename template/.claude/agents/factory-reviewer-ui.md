@@ -78,6 +78,10 @@ are its blocking findings resolved?
 3. **Look at every screenshot** with Read (it is an image) and read `shots/ui/shoot.json`:
    `console_errors`, `page_errors`, `overflow_x` and the `axe` violations.
 4. Stop it: `<Repo>/.factory/serve stop <port>`. Never stop processes another way.
+Steps 1, 2 and 4 in one call, when the screenshots are all you need: `.factory/shoot`'s
+`--serve` starts the app through `.factory/serve-with`, shoots, and always stops it again (also
+when the app or the shot fails):
+`<Repo>/.factory/heavy --priority low -- <Repo>/.factory/shoot http://localhost:<port> --serve '<Serve command>' --serve-port <port> --serve-cwd <Worktree> --serve-ready <ready path> --out <Job>/round-N/shots/ui --path <p> … --widths 1280,375 --axe`
 
 ## Full review (`UI review: full`)
 1. Start the app as in the light review.

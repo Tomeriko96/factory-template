@@ -51,6 +51,12 @@ try:
         check(f"/.claude/skills/{s}/" in exclude, f"{s}: no exclude line")
         check(sh(["git", "check-ignore", "-q", f".claude/skills/{s}/SKILL.md"], r, env).returncode == 0,
               f"{s}: not ignored by git")
+    cmds = sorted(os.listdir(os.path.join(ROOT, "template", ".claude", "skills", "factory", "commands")))
+    check(cmds and all(os.path.exists(os.path.join(r, ".claude", "skills", "factory", "commands", c)) for c in cmds),
+          "factory: commands/*.md (read on demand by SKILL.md) not installed")
+    check(os.access(os.path.join(r, ".factory", "serve-with"), os.X_OK), ".factory/serve-with not installed executable")
+    check(os.path.exists(os.path.join(ROOT, "template", ".claude", "skills", "factory", "commands", "sync.md")),
+          "template: commands/sync.md missing")
     check(os.path.exists(os.path.join(r, ".claude", "skills", "frontend-design", "LICENSE.txt")),
           "frontend-design: LICENSE.txt not installed with it")
     st = sh(["git", "status", "--porcelain", "--untracked-files=all"], r, env).stdout

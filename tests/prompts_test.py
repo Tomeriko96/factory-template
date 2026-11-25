@@ -10,7 +10,11 @@ import glob, hashlib, os, re, sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = os.path.join(ROOT, "template")
 AGENTS = sorted(glob.glob(os.path.join(T, ".claude", "agents", "factory-*.md")))
-SKILL = open(os.path.join(T, ".claude", "skills", "factory", "SKILL.md")).read()
+SKILL_DIR = os.path.join(T, ".claude", "skills", "factory")
+# SKILL.md is read on every /factory turn; commands/*.md only when its pointer line applies.
+SKILL_CORE = open(os.path.join(SKILL_DIR, "SKILL.md")).read()
+CMD_FILES = {os.path.basename(p)[:-3]: open(p).read() for p in sorted(glob.glob(os.path.join(SKILL_DIR, "commands", "*.md")))}
+SKILL = SKILL_CORE + "\n" + "\n".join(CMD_FILES.values())   # the whole skill, for the contract checks
 JOB = open(os.path.join(T, ".factory", "job")).read()
 # Reviewers whose "## Heavy commands" section must be the same text
 SAME_HEAVY = [["reviewer-code", "reviewer-data-quality", "reviewer-llm-safety", "reviewer-methodology",
@@ -117,12 +121,12 @@ check("validate.mode" in SKILL and "`validate`" in SKILL, "SKILL.md: config.vali
 
 # Pause: the script's commands, SKILL.md's command section and the board agree
 check('"pause": (cmd_pause' in JOB and '"unpause": (cmd_unpause' in JOB and "### `/factory pause" in SKILL
-      and "job pause" in JOB.split('"""', 2)[1] and "/factory pause|unpause" in SKILL.split("---", 2)[1],
+      and "job pause" in JOB.split('"""', 2)[1] and "/factory pause|unpause" in SKILL_CORE.split("---", 2)[1],
       "pause/unpause: not in job, its usage text and SKILL.md")
 check("PAUSED" in open(os.path.join(T, ".factory", "watch")).read(), "watch: no PAUSED flag")
 
 # Triage and bundles: what the script prints and reads is what SKILL.md and the agent describe
-SKILL_FRONT = SKILL.split("---", 2)[1]
+SKILL_FRONT = SKILL_CORE.split("---", 2)[1]
 check(re.search(r"^effort: (low|medium|high)$", SKILL_FRONT, re.M), "SKILL.md: effort not pinned in the frontmatter")
 for sub in ("triage prepare", "triage plan", "triage start"):
     check(f"job {sub}" in SKILL, f"SKILL.md does not explain `job {sub}`")
@@ -245,14 +249,14 @@ check("heavy: exit={rc} log=" in HEAVY_SRC and "heavy: exit=<n> log=<path>" in t
       "heavy result line: not printed by heavy, guarded, or quoted in build.md")
 
 # Waiting: heavy wait or a Bash timeout, never sleep loops; Monitor/TaskStop do not exist in subagents
-for n, t in list(texts.items()) + [("SKILL.md", SKILL)]:
-    w = section(t, "Waiting") if n != "SKILL.md" else SKILL
+for n, t in list(texts.items()) + [("SKILL.md", SKILL_CORE)]:
+    w = section(t, "Waiting") if n != "SKILL.md" else SKILL_CORE
     check(w and "heavy wait <ticket>" in w and "sleep" in w and "Monitor" in w and "TaskStop" in w
           and "timeout" in w, f"{n}: no waiting rule (heavy wait / timeout, no sleep, no Monitor/TaskStop)")
 _waits = {section(t, "Waiting") for t in texts.values()}
 check(len(_waits) == 1, "'## Waiting' differs between agents")
 
-check("Quiet notifications" in SKILL and "at most one word" in SKILL, "SKILL.md: no quiet-notification rule")
+check("Quiet notifications" in SKILL_CORE and "at most one word" in SKILL, "SKILL.md: no quiet-notification rule")
 
 # Every agent's output file is its last, explicit step (an approver once gave MERGE only in its reply)
 for n, t in texts.items():
@@ -280,8 +284,48 @@ check("--pr-body" in PRECHECK and "--closes" in PRECHECK and '"--pr-body"' in JO
 
 # Syncs first, requeue (issue #6); hourly infra retry scheduled in the background (F)
 check("job prs" in SKILL and "requeue" in SKILL and '"requeue"' in JOB and '"prs"' in JOB, "SKILL.md/job: prs or requeue missing")
-check("Waiting on infrastructure" in SKILL and "sleep 3600" in SKILL and "run_in_background" in SKILL,
+check("Waiting on infrastructure" in SKILL_CORE and "sleep 3600" in SKILL_CORE and "run_in_background" in SKILL_CORE,
       "SKILL.md: no background hourly retry for infrastructure waits")
+
+# The SKILL.md split: a lean core, one pointer line per commands/ file, hard rules stay in the core
+check(len(SKILL_CORE.encode()) <= 40000, f"SKILL.md is {len(SKILL_CORE.encode())} bytes: keep it lean (move rarely used text to commands/)")
+check(len(CMD_FILES) >= 10, f"commands/: {len(CMD_FILES)} files")
+for cname in CMD_FILES:
+    check(re.search(rf"^- For .+: read `commands/{re.escape(cname)}\.md` first\.$", SKILL_CORE, re.M),
+          f"SKILL.md: no pointer line for commands/{cname}.md")
+for ref in set(re.findall(r"commands/([a-z-]+)\.md", SKILL)):
+    check(ref in CMD_FILES, f"commands/{ref}.md is referenced but does not exist")
+CORE_FLAT = " ".join(SKILL_CORE.split())
+for rule in ("is the **only** writer of `job.json`", "Never edit `job.json` yourself", "**Trust rule (mandatory):**",
+             "`.factory/heavy gate`", "`.factory/guard`", "`pkill`/`killall`", "never force-push",
+             "Never put code, diffs, raw data, personal data or secrets in a PR/MR body",
+             "add `--untrusted` when the note holds text by anyone but the user",
+             "Never resolve a sync conflict by picking a side", "never `fail` or `drop` jobs to stop the queue",
+             "never drop and restart a job for that", "Never reopen an issue", "never close on a closed-without-merge",
+             "never ask the forge to delete the branch", "Never read or relay the hidden acceptance tests",
+             "Never run two builders in the same worktree", "Never edit files in the worktree yourself",
+             "`AUTO-MERGE: no (<reasons>)`", ".factory/serve-with --server"):
+    check(rule in CORE_FLAT, f"SKILL.md core lost a hard rule or guard reference: {rule!r}")
+# every factory script and agent the skill names exists
+DATA = {"config", "repo", "backlog", "metrics", "paused", "run", "jobs", "cache", "VERSION"}
+for script in set(re.findall(r"\.factory/([A-Za-z-]+)", SKILL)) - DATA:
+    check(os.path.exists(os.path.join(T, ".factory", script)), f"skill names .factory/{script}, which does not exist")
+for agent in set(re.findall(r"\bfactory-([a-z][a-z-]*[a-z])", SKILL)) - {"watch", "init", "template", "reviewer-x"}:
+    check(os.path.exists(os.path.join(T, ".claude", "agents", f"factory-{agent}.md")), f"skill names agent factory-{agent}, which does not exist")
+
+# serve-with: installed, behind shoot --serve, named in the ui/ux prompts
+check("serve-with" in INSTALL.split("SCRIPTS=(", 1)[1].split(")", 1)[0], "install does not copy .factory/serve-with")
+check("serve-with" in SHOOT and "def serve_argv" in SHOOT, "shoot: --serve does not go through serve-with")
+for g in ("reviewer-ui", "reviewer-ux"):
+    check("--serve '<Serve command>'" in texts.get(g, "") and ".factory/serve-with" in texts.get(g, ""), f"{g}: shoot --serve / serve-with not described")
+
+# Silent-failure checklist in the code reviewer: our own words, short (loaded on every code review)
+SF = section(texts.get("reviewer-code", ""), "Silent failures") or ""
+check(SF and len(SF.strip().splitlines()) <= 16, f"reviewer-code: '## Silent failures' missing or longer than 16 lines")
+for word in ("except", "or {}", "subprocess", "retries", "warnings", "|| true", "error path", "path:line", "failure scenario"):
+    check(word in SF, f"reviewer-code Silent failures: lacks {word!r}")
+for src in ("webapp-testing", "pr-review-toolkit", "no code"):
+    check(src in NOTICE, f"NOTICE: {src} missing")
 
 for f in fails:
     print("FAIL", f)

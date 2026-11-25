@@ -1,7 +1,7 @@
 factory-template
 ================
 
-This repository vendors or adapts material from the following projects.
+This repository vendors or adapts material from, or takes ideas from, the following projects.
 
 1. anthropics/skills — frontend-design
    https://github.com/anthropics/skills (skills/frontend-design)
@@ -27,3 +27,19 @@ This repository vendors or adapts material from the following projects.
    the following conditions: The above copyright notice and this permission notice shall
    be included in all copies or substantial portions of the Software. THE SOFTWARE IS
    PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+
+3. anthropics/skills — webapp-testing (its with_server.py helper)
+   https://github.com/anthropics/skills (skills/webapp-testing)
+   Licence: Apache License 2.0
+   Inspiration only, no code copied: the idea of a helper that starts the app's servers,
+   waits until they answer, runs a command and always stops them. Our own implementation
+   is template/.factory/serve-with (also behind `.factory/shoot --serve`).
+
+4. anthropics/claude-plugins-official — pr-review-toolkit (its silent-failure-hunter agent)
+   https://github.com/anthropics/claude-plugins-official (plugins/pr-review-toolkit)
+   Licence: Apache License 2.0
+   Inspiration only, no code or text copied: the idea of reviewing a diff for errors that
+   vanish instead of failing. Our own short checklist is the "Silent failures" section of
+   template/.claude/agents/factory-reviewer-code.md.
+
+Neither is installed, vendored or loaded at runtime: the factory ships only its own files.

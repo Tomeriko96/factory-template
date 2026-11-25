@@ -27,7 +27,7 @@ SKILLS=(factory)
 for d in "$SRC"/.claude/skills/*/; do
   n="$(basename "$d")"; [ "$n" = factory ] || SKILLS+=("$n")
 done
-SCRIPTS=(shoot serve watch heavy guard precheck rereview ci forgecheck job)
+SCRIPTS=(shoot serve serve-with watch heavy guard precheck rereview ci forgecheck job)
 
 die() { echo "factory: $*" >&2; exit 1; }
 

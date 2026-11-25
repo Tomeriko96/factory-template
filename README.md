@@ -71,14 +71,15 @@ and re-run `factory-init` in each repo.
 `.git/info/exclude` (not `.gitignore`, so not even that is committed):
 
 ```text
-.claude/skills/factory/      SKILL.md (orchestrator) + setup.md (/factory setup)
+.claude/skills/factory/      SKILL.md (orchestrator, read every /factory turn) + setup.md (/factory setup)
+                             + commands/*.md (rarely used commands and reference, read only when needed)
 .claude/skills/frontend-design/  vendored from anthropics/skills (Apache-2.0, see NOTICE); every skill
                              directory under template/.claude/skills/ gets its own exclude line, and one
                              the repo tracks itself is left alone
 .claude/agents/factory-*.md  triage, spec-writer, acceptance-writer, builder, approver,
                              reviewer-{security,code,ux,ui,audit,privacy,methodology,llm-safety,data-quality}
 .factory/                    config.json + repo.md (written by setup), backlog.md, job, shoot, serve,
-                             heavy, guard, precheck, rereview, watch, ci, forgecheck, VERSION, jobs/, run/,
+                             serve-with, heavy, guard, precheck, rereview, watch, ci, forgecheck, VERSION, jobs/, run/,
                              cache/, metrics.jsonl
 .claude/settings.local.json  one PreToolUse hook entry (guard), merged into your file if you have one
 ```
@@ -279,6 +280,11 @@ missing = `full` jobs only, `true` = `full` and `light`, `false` = off.
   finding against the code and disputes wrong ones with evidence. The audit checks the
   red-green evidence; the code and audit reviewers check test quality (no tests of mock
   behaviour, no test-only code in production).
+- **Ideas from Anthropic's public collections, our own code** (Apache-2.0 sources, nothing copied,
+  nothing installed or loaded from a marketplace at runtime, so an upstream change or a prompt
+  injection there cannot reach a job): `.factory/serve-with` (idea: webapp-testing's server
+  helper) and the code reviewer's "Silent failures" checklist (idea: pr-review-toolkit's
+  silent-failure-hunter).
 - **Optional skills**, used only when the session has them: `gate` (a red SonarCloud/CodeQL
   gate), `check-style` (code reviewer), `write-issue` (issues the orchestrator opens).
 
@@ -459,7 +465,23 @@ afterwards with `git check-ignore` that git really ignores them.
   (`.factory/shoot`: screenshots + overflow, a11y and console checks). Servers are
   started and stopped only through `.factory/serve` (own process group per port,
   refuses a busy port, waits for readiness), so parallel reviewers never test or kill
-  each other's server.
+  each other's server. A command that needs the app only while it runs (a shoot run, a
+  Playwright flow, a discovery check) uses `.factory/serve-with --server "<cmd>" --port auto
+  -- <command>` or `shoot --serve "<cmd>"`: it starts one or more servers, waits until each
+  port answers, runs the command and always stops them again (process-group kill, also on a
+  failure or Ctrl-C), with unique ports, names (`{name}`) and temporary dirs (`{tmp}`), so two
+  jobs never share a container name or a database file (an app smoke job with fixed Docker
+  container names and no cleanup once broke parallel runs).
+- **Lean orchestrator prompt.** SKILL.md is re-read on every `/factory` turn, and those re-reads are
+  the main token cost. It holds the core loop and every hard rule (37 KB, down from 66 KB in
+  v0.15.0); rarely used commands (`rework`, `resume`, `drop`, `requeue`, `pause`, `sync`, `adopt`)
+  and reference text (config keys, routing, layout, reviewer paths, bundle and triage rules,
+  closing rules, auto-merge commands, resources) live in `commands/<name>.md`, each named by
+  one "read `commands/<name>.md` first" line.
+- **Silent failures.** `reviewer-code` checks the diff for errors that vanish instead of failing:
+  swallowed exceptions, fallbacks that hide a failed lookup, unchecked exit codes, retries without
+  a final error, `|| true` in scripts and CI, and untested error paths; each finding names
+  `path:line` and the failure scenario. Our own checklist; the idea is credited in NOTICE.
 - **Severity.** Findings are `[blocking]` or `[non-blocking]`; only blocking findings
   trigger another round. Non-blocking ones end up as Leftovers in `decision.md`.
 - **Everything in English.** Artifacts, reports and commit messages.
@@ -550,13 +572,14 @@ Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml
 | Suite | Checks | What |
 |---|---|---|
 | `bash tests/job_test.sh` | 818 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget, resume and sync limits (`limits.max_syncs`); the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; infra failures in CI (OOMKilled retried once, `VALIDATE: INFRA` without a rework round, a code failure never retried, GitLab `failure_reason`, `.factory/ci` on a `pr-open` MR); `job prs` for unfinished jobs with an MR (resume after an infra failure once the pipeline is green, a merged MR at `needs-human`); effort labels (`easy`, `good first issue`, `effort.labels`, the floor); `delivery.auto_merge_held` on and off; input checks |
-| `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
+| `python3 -I tests/guard_test.py` | 211 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`), `serve-with` included |
 | `python3 -I tests/watch_test.py` | 65 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |
 | `python3 -I tests/ci_infra_test.py` | 17 | the infra classifier on recorded CI log snippets (OOMKilled after green tests, system failure, exit 137, registry push after green and after red tests, lint and test failures, a GitHub runner shutdown), per job and per pipeline |
 | `python3 -I tests/release_test.py` | 5 | every `(vX.Y.Z)` in a commit subject has its tag (on a throwaway repo and on this one) |
-| `python3 -I tests/install_test.py` | 19 | install, exclusion of every template skill, re-install, remove, a repo that tracks its own copy of a skill |
-| `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE) |
+| `python3 -I tests/install_test.py` | 22 | install, exclusion of every template skill, the skill's `commands/` files and `serve-with`, re-install, remove, a repo that tracks its own copy of a skill |
+| `python3 -I tests/serve_with_test.py` | 22 | `.factory/serve-with`: two `http.server`s (a fixed free port and `auto`) fetched by one command, then both process groups and ports gone; the same after a failing command, a dying server, a busy port and SIGINT; two parallel runs with their own ports, names and temporary dirs; `shoot --serve` builds the serve-with call |
+| `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE); SKILL.md at most 40 KB with a pointer line per `commands/` file, its hard rules and guard references, and every `.factory/` script and agent the skill names existing; the code reviewer's Silent failures checklist |
 
 The guard was also checked in a real subagent run in a trusted project (`pytest` refused,
 `echo` allowed, also in bypass mode).

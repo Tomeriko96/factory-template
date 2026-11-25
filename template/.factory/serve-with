@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Run a command while one or more servers are up, and always take the servers down again.
+
+  .factory/serve-with [--timeout 120] [--keep-tmp] \\
+      --server "<shell command>" --port <N|auto> [--cwd <dir>] [--env K=V]… [--ready /path] [--cleanup "<cmd>"] \\
+      [--server … --port …]… -- <command…>
+
+Per server (its options follow its --server): the shell command runs in its own process group,
+with PORT=<port> in its environment and its output in <tmp>/server-<i>.log. `--port auto` takes a
+free port; a fixed port that is already in use is refused (you would test someone else's server).
+serve-with waits until each port answers: `--ready /path` = an HTTP GET below 500 on 127.0.0.1 or
+::1, default = a TCP connect; `--timeout` (seconds, default 120) is for all servers together.
+Then it runs <command…> and exits with its exit code.
+
+Teardown always runs, also when a server never comes up, the command fails, or serve-with gets
+Ctrl-C (SIGINT), SIGTERM or SIGHUP: every server's process group gets TERM, KILL after 10 s,
+then its `--cleanup` command runs (e.g. `docker rm -f {name}`), then the temporary dir is removed
+(`--keep-tmp` keeps it and prints where).
+
+Every run is unique, so two jobs can run it in parallel: no fixed names, ports or paths. Placeholders
+in the server command, --cwd, --env, --cleanup and <command…>:
+  {port}            this server's port (in <command…>: the first server's)
+  {port1} {port2} … the port of server 1, 2, …
+  {tmp}             a fresh temporary directory for this run (databases, sockets, logs)
+  {name}            a unique name for this run, e.g. for `docker run --name {name}-db`
+The command also gets SERVE_WITH_PORTS ("p1 p2 …"), SERVE_WITH_PORT_<i>, SERVE_WITH_TMP and
+SERVE_WITH_NAME in its environment.
+
+Exit codes: the command's; 2 bad usage; 3 a server did not start (its log tail is printed);
+4 the command passed but a port was still in use after the teardown; 130/143 interrupted.
+
+Example (the ui/ux reviewers' screenshots, port chosen freely):
+  .factory/serve-with --server "npm run dev -- --port {port}" --port auto --cwd <Worktree> --ready / \\
+      -- .factory/heavy --priority low -- .factory/shoot http://localhost:{port} --out <dir> --axe
+"""
+import os, secrets, shlex, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.error, urllib.request
+
+HOSTS = (("127.0.0.1", socket.AF_INET, "127.0.0.1"), ("::1", socket.AF_INET6, "[::1]"))
+
+
+class Interrupted(Exception):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+def say(msg):
+    print(f"serve-with: {msg}", file=sys.stderr, flush=True)
+
+
+def usage(msg):
+    say(msg)
+    say("usage: serve-with --server \"<cmd>\" --port N|auto [--cwd D] [--env K=V] [--ready /path] "
+        "[--cleanup \"<cmd>\"] [--server …] -- <command…>   (see the header of this script)")
+    sys.exit(2)
+
+
+def parse(argv):
+    if "--" not in argv:
+        usage("no command: put it after --")
+    cut = argv.index("--")
+    opts, command = argv[:cut], argv[cut + 1:]
+    if not command:
+        usage("no command after --")
+    servers, glob = [], {"timeout": 120.0, "keep_tmp": False}
+    i = 0
+    while i < len(opts):
+        o = opts[i]
+        if o == "--keep-tmp":
+            glob["keep_tmp"] = True
+            i += 1
+            continue
+        if o in ("-h", "--help"):
+            print(__doc__)
+            sys.exit(0)
+        if i + 1 >= len(opts):
+            usage(f"{o} needs a value")
+        v = opts[i + 1]
+        i += 2
+        if o == "--timeout":
+            try:
+                glob["timeout"] = float(v)
+            except ValueError:
+                usage(f"--timeout {v}: not a number")
+        elif o == "--server":
+            servers.append({"cmd": v, "port": None, "cwd": None, "env": [], "ready": None, "cleanup": None})
+        elif o in ("--port", "--cwd", "--env", "--ready", "--cleanup"):
+            if not servers:
+                usage(f"{o} before the first --server")
+            s = servers[-1]
+            if o == "--env":
+                if "=" not in v:
+                    usage(f"--env {v}: not K=V")
+                s["env"].append(v)
+            elif o == "--port":
+                if v != "auto" and not (v.isdigit() and 0 < int(v) < 65536):
+                    usage(f"--port {v}: a port number or auto")
+                s["port"] = v
+            else:
+                s[o[2:]] = v
+        else:
+            usage(f"unknown option {o}")
+    if not servers:
+        usage("no --server given")
+    for n, s in enumerate(servers, 1):
+        if s["port"] is None:
+            usage(f"server {n} ({s['cmd']}): no --port")
+    return servers, glob, command
+
+
+def in_use(port):
+    for host, fam, _ in HOSTS:
+        try:
+            with socket.socket(fam) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((host, port)) == 0:
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def free_port(taken):
+    for _ in range(50):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in taken and not in_use(port):
+            return port
+    raise OSError("no free port found")
+
+
+def answers(port, path):
+    if path is None:
+        return in_use(port)
+    for _, _, url_host in HOSTS:
+        try:
+            with urllib.request.urlopen(f"http://{url_host}:{port}{path}", timeout=2) as r:
+                if r.status < 500:
+                    return True
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                return True
+        except Exception:  # not up yet: refused, reset, timeout
+            pass
+    return False
+
+
+def alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def kill_group(proc):
+    """TERM the process group, KILL after 10 s; reap the leader. True when the group is gone."""
+    for sig, wait in ((signal.SIGTERM, 10), (signal.SIGKILL, 3)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        end = time.time() + wait
+        while time.time() < end:
+            proc.poll()   # reap the leader, or the group never looks gone
+            if not alive(proc.pid):
+                break
+            time.sleep(0.1)
+        if not alive(proc.pid):
+            break
+    proc.poll()
+    return not alive(proc.pid)
+
+
+def tail(path, n=20):
+    try:
+        with open(path, errors="replace") as f:
+            return "".join(f.readlines()[-n:])
+    except OSError:
+        return ""
+
+
+def main():
+    servers, glob, command = parse(sys.argv[1:])
+    run_id = f"sw-{os.getpid()}-{secrets.token_hex(3)}"
+    tmp = tempfile.mkdtemp(prefix=f"factory-{run_id}-")
+    procs, logs, rc = [], [], 0
+
+    def on_signal(signum, _frame):
+        raise Interrupted(signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
+
+    child, ports = None, []
+
+    def fill(text, own=None):
+        text = text.replace("{tmp}", tmp).replace("{name}", run_id)
+        for n, p in enumerate(ports, 1):
+            text = text.replace(f"{{port{n}}}", str(p))
+        return text.replace("{port}", str(own if own is not None else ports[0]))
+
+    try:
+        taken = set()
+        for s in servers:
+            port = free_port(taken) if s["port"] == "auto" else int(s["port"])
+            if s["port"] != "auto" and in_use(port):
+                say(f"port {port} is already in use by another process; pick another or use --port auto")
+                rc = 3
+                return rc
+            taken.add(port)
+            s["port"] = port
+        ports[:] = [s["port"] for s in servers]
+
+        for n, s in enumerate(servers, 1):
+            env = dict(os.environ, PORT=str(s["port"]))
+            for kv in s["env"]:
+                k, v = fill(kv, s["port"]).split("=", 1)
+                env[k] = v
+            log = os.path.join(tmp, f"server-{n}.log")
+            logs.append(log)
+            with open(log, "w") as f:
+                procs.append(subprocess.Popen(["/bin/sh", "-c", fill(s["cmd"], s["port"])],
+                                              cwd=fill(s["cwd"], s["port"]) if s["cwd"] else None,
+                                              env=env, stdout=f, stderr=subprocess.STDOUT,
+                                              stdin=subprocess.DEVNULL, start_new_session=True))
+        end = time.time() + glob["timeout"]
+        pending = list(range(len(servers)))
+        while pending:
+            for i in list(pending):
+                s, p = servers[i], procs[i]
+                if p.poll() is not None:
+                    say(f"server {i + 1} ({s['cmd']}) exited with {p.returncode} before port {s['port']} "
+                        f"answered\n--- {logs[i]} (tail)\n{tail(logs[i])}")
+                    rc = 3
+                    return rc
+                if answers(s["port"], s["ready"]):
+                    say(f"server {i + 1} ready on port {s['port']} (pgid {p.pid})")
+                    pending.remove(i)
+            if pending and time.time() > end:
+                i = pending[0]
+                say(f"server {i + 1} ({servers[i]['cmd']}) not ready on port {servers[i]['port']} after "
+                    f"{glob['timeout']:g}s\n--- {logs[i]} (tail)\n{tail(logs[i])}")
+                rc = 3
+                return rc
+            if pending:
+                time.sleep(0.2)
+
+        env = dict(os.environ, SERVE_WITH_PORTS=" ".join(map(str, ports)), SERVE_WITH_TMP=tmp,
+                   SERVE_WITH_NAME=run_id)
+        for n, p in enumerate(ports, 1):
+            env[f"SERVE_WITH_PORT_{n}"] = str(p)
+        cmd = [fill(c) for c in command]
+        say("run: " + " ".join(shlex.quote(c) for c in cmd))
+        child = subprocess.Popen(cmd, env=env, start_new_session=True)
+        rc = child.wait()
+        child = None
+        return rc
+    except Interrupted as e:
+        say(f"interrupted ({signal.Signals(e.signum).name}): tearing down")
+        rc = 128 + e.signum
+        return rc
+    except OSError as e:
+        say(f"error: {e}")
+        rc = 3
+        return rc
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)   # the teardown must finish
+        if child is not None:
+            kill_group(child)
+        left = []
+        for i, p in enumerate(procs):
+            if not kill_group(p):
+                left.append(f"pgid {p.pid}")
+            s = servers[i]
+            if s["cleanup"]:
+                c = subprocess.run(["/bin/sh", "-c", fill(s["cleanup"], s["port"])],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                if c.returncode != 0:
+                    say(f"cleanup of server {i + 1} exited with {c.returncode}: {c.stderr.strip()[:300]}")
+        time.sleep(0.2)
+        left += [f"port {s['port']}" for s in servers[:len(procs)] if isinstance(s["port"], int) and in_use(s["port"])]
+        if left:
+            say("after the teardown still in use: " + ", ".join(left))
+            if rc == 0:
+                rc = 4
+        if glob["keep_tmp"]:
+            say(f"kept {tmp}")
+        else:
+            shutil.rmtree(tmp, ignore_errors=True)
+        say(f"servers stopped (exit {rc})")
+        sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

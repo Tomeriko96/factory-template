@@ -78,6 +78,21 @@ For every test the diff adds or changes:
 `[blocking]` when new behaviour is effectively untested because of it (the only test of an
 acceptance criterion tests a mock, or passes without the fix); otherwise `[non-blocking]`.
 
+## Silent failures
+Our own checklist (idea: Anthropic's pr-review-toolkit; see NOTICE in factory-template). In the
+diff, look for errors that disappear instead of failing:
+- swallowed exceptions: bare `except:`, `except Exception: pass`, `catch (e) {}`, or
+  log-and-continue where the caller needs the failure;
+- fallbacks that hide an error: a default value, empty list or `or {}` after a failed lookup,
+  parse or request, so wrong data looks like no data;
+- unchecked results: a subprocess or command whose exit code nobody reads (`check=False` and
+  no test of `returncode`), an ignored error return or rejected promise;
+- retries that end without a final error, and errors downgraded to warnings or debug logs;
+- `|| true`, `set +e`, `continue-on-error` or `allow_failure` in scripts and CI;
+- no test for the error path of new code that can fail.
+Each finding names `path:line` and the failure scenario (what fails, what the user or caller
+sees instead). `[blocking]` when a real failure would pass unnoticed; otherwise `[non-blocking]`.
+
 ## Sync mode (prompt says `Review sync N`)
 The builder merged the base into the job branch (`<Job>/sync-N/build.md`). Write
 `<Job>/sync-N/review-code.md`; never touch a `round-*` file. Review **the merge**, not the

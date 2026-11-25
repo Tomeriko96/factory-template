@@ -335,7 +335,8 @@ Targeted tests during build and review are unchanged.
 **Closing lines.** The PR/MR description is written by the script (`.factory/precheck --pr-body`
 → `<job>/pr-body.md`): the approver's `## PR` section plus one `Closes #N` line (`issues.link`) for
 every issue of the job it does not close yet, the bundle issue and every member included. Only an
-issue marked partial (`Refs #N (left: <what>)`) stays without one. Two bundle MRs had gone out with
+issue named only with `Refs #N` (best with `(left: <what>)`) counts as partial: it gets no closing
+line and stays open after the merge (`LEFT-OPEN`). Two bundle MRs had gone out with
 "Refs …, closed by hand after the merge" and left 8 issues open. `precheck --closes <id> [<file>]`
 checks a body.
 

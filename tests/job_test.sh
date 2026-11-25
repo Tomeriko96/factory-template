@@ -1253,7 +1253,7 @@ case "$1 $2" in
   "pr list") cat "$FF/prlist.json" 2>/dev/null || echo '[]' ;;
   "pr create") echo "Creating pull request"; echo "https://github.example/o/r/pull/41" ;;
   "run view") printf 'setup ok\n\033[31mFAILED tests/test_x.py::test_y - AssertionError\033[0m\n' ;;
-  "api "*check-runs*) cat "$FF/checks.json" 2>/dev/null || echo '{"check_runs": []}' ;;
+  "api "*check-runs*) sha="${2#*commits/}"; sha="${sha%%/*}"; if [ -f "$FF/checks-$sha.json" ]; then cat "$FF/checks-$sha.json"; else cat "$FF/checks.json" 2>/dev/null || echo '{"check_runs": []}'; fi ;;
   "api "*/status) echo '{"statuses": []}' ;;
   *) echo "fake gh: $*" >&2; exit 1 ;;
 esac
@@ -1356,6 +1356,20 @@ out="$("$R/.factory/precheck" --validate "$C5")"; first "$out" "VALIDATE: FAIL";
 has "$out" "E   assert 2 == 3"; has "$out" "Pipeline: https://gitlab.example/g/p/-/pipelines/900"
 has "$out" "PR: https://gitlab.example/g/p/-/merge_requests/52 (draft"
 park "$C5"
+# a merged-results pipeline (other sha) created after the push counts, also with a UTC offset; one from before the push does not
+C6="$(newjob "zq vci gitlab merged")"; tovalidate "$C6" src/c6.py
+echo '{"iid": 52, "state": "opened", "head_pipeline": {"id": 901, "sha": "0000000", "status": "success", "created_at": "2000-01-01T01:00:00.000+01:00"}}' > "$FF/mr52.json"
+first "$("$R/.factory/precheck" --validate "$C6")" "VALIDATE: PENDING the CI pipeline is none"   # an old pipeline with an offset time is still old
+future="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone(d.timedelta(hours=2)))+d.timedelta(minutes=5)).isoformat())')"
+printf '{"iid": 52, "state": "opened", "head_pipeline": {"id": 902, "sha": "0000000", "status": "success", "created_at": "%s"}}' "$future" > "$FF/mr52.json"
+first "$("$R/.factory/precheck" --validate "$C6")" "VALIDATE: PASS"
+park "$C6"
+# GitHub: check runs of the previous head (other sha) are never read as the result of the pushed head
+vcfg github true '{"mode": "ci", "open_pr": false}'; checks pass
+C7="$(newjob "zq vci github stale")"; tovalidate "$C7" src/c7.py
+python3 -c 'import json,sys; print(json.dumps({"check_runs": []}))' > "$FF/checks-$(git -C "$(wt "$C7")" rev-parse HEAD).json"
+first "$("$R/.factory/precheck" --validate "$C7")" "VALIDATE: PENDING the CI pipeline is none"
+park "$C7"; rm -f "$FF"/checks-*.json
 sed -i '/^- Validate/,$d' .factory/repo.md
 unset FACTORY_VALIDATE_BUDGET FACTORY_CI_POLL
 export PATH="$OLDPATH"
@@ -1471,23 +1485,23 @@ sed -e 's/^echo "glab /echo "gh /' -e 's/fake glab/fake gh/' "$T/bin2/glab" > "$
 chmod +x "$T/bin2/glab" "$T/bin2/gh"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="gitlab"; c["issues"]={"allowed_authors": ["me"], "link": "Closes"}; json.dump(c, open(".factory/config.json","w"))'
 # the bundle MR of the evidence: "Refs" for the fixed issues, one issue honestly partial
-out="$(J new --mode docs --delivery pr --issue 501 --issue 502 --issue 503 "zq close bundle")"; FC="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+out="$(J new --mode docs --delivery pr --issue 501 --issue 502 --issue 503 --issue 504 "zq close bundle")"; FC="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
 echo "more" >> "$(wt "$FC")/README.md"; git -C "$(wt "$FC")" commit -qam docs; mkdir -p "$(jd "$FC")/round-1"
-printf 'BUILD: DONE\n\n## PR\ndocs: bundle fix\n\nSummary.\n\nRefs #501, #502. The issues are closed by hand after the merge.\nRefs #503 (left: the CSV export)\n' > "$(jd "$FC")/round-1/build.md"
+printf 'BUILD: DONE\n\n## PR\ndocs: bundle fix\n\nSummary.\n\nRefs #501, #502. The issues are closed by hand after the merge.\nRefs #503 (left: the CSV export)\nRefs #504\n' > "$(jd "$FC")/round-1/build.md"
 out="$(J next "$FC")"; first "$out" "ACTION: deliver"; has "$out" "MODE: pr"
 has "$out" "PR-BODY: $(jd "$FC")/pr-body.md"; has "$out" "PR-TITLE: docs: bundle fix"; has "$out" "CLOSING: #501, #502"
-has "$out" "PARTIAL: #503: left: the CSV export"; has "$out" "did not close #501, #502"; lacks "$out" "CLOSES: MISSING"
-body="$(cat "$(jd "$FC")/pr-body.md")"; has "$body" "Closes #501"; has "$body" "Closes #502"; lacks "$body" "Closes #503"
+has "$out" "PARTIAL: #503: left: the CSV export"; has "$out" "PARTIAL: #504: refs only"; has "$out" "did not close #501, #502"; lacks "$out" "CLOSES: MISSING"
+body="$(cat "$(jd "$FC")/pr-body.md")"; has "$body" "Closes #501"; has "$body" "Closes #502"; lacks "$body" "Closes #503"; lacks "$body" "Closes #504"
 has "$body" "Generated with [Claude Code]"
 has "$(cat "$(jd "$FC")/precheck.md")" "the PR text does not close #501, #502"
-field "$FC" "j['partial_issues']" "{'503': 'left: the CSV export'}"
-first "$("$R/.factory/precheck" --closes "$FC")" "CLOSES: OK (partial: #503)"
+field "$FC" "j['partial_issues']" "{'503': 'left: the CSV export', '504': 'refs only: no closing keyword, no \`left:\` note'}"
+first "$("$R/.factory/precheck" --closes "$FC")" "CLOSES: OK (partial: #503, #504)"
 printf 'Fix it\n\nRefs #501\n' > "$T/body.md"
 out="$("$R/.factory/precheck" --closes "$FC" "$T/body.md")" && bad "--closes passed a body without closing lines" || ok
-first "$out" "CLOSES: MISSING #501, #502, #503"
+first "$out" "CLOSES: MISSING #502, #503, #504"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="github"; json.dump(c, open(".factory/config.json","w"))'
 out="$("$R/.factory/precheck" --pr-body "$FC")"; has "$out" "CLOSING: #501, #502"; has "$(cat "$(jd "$FC")/pr-body.md")" "Closes #502"
-printf 'Fixes #501, #502 and #503\n' > "$T/body.md"; first "$("$R/.factory/precheck" --closes "$FC" "$T/body.md")" "CLOSES: OK"
+printf 'Fixes #501, #502, #503 and #504\n' > "$T/body.md"; first "$("$R/.factory/precheck" --closes "$FC" "$T/body.md")" "CLOSES: OK"
 python3 -c 'import json; c=json.load(open(".factory/config.json")); c["forge"]="gitlab"; json.dump(c, open(".factory/config.json","w"))'
 git -C "$(wt "$FC")" push -q origin "factory/$FC"
 J delivered "$FC" pr-open --pr-url "https://gitlab.test/o/r/-/merge_requests/71" >/dev/null
@@ -1510,11 +1524,13 @@ echo 'VERDICT: PASS' > "$(jd "$FC")/sync-1/review-code.md"; first "$(J next "$FC
 first "$(J sync-done "$FC")" "DONE: pr-open (sync 1 pushed)"
 # merged: the forge left #501 open (Refs), #502 was closed, #503 is partial
 echo '{"iid": 71, "state": "merged", "merge_commit_sha": "abc123def4567890", "web_url": "u", "source_branch": "b", "target_branch": "main", "source_project_id": 1, "target_project_id": 1}' > "$FF/mr-71.json"
-echo '{"state": "opened"}' > "$FF/issue-501.json"; echo '{"state": "closed"}' > "$FF/issue-502.json"; echo '{"state": "opened"}' > "$FF/issue-503.json"
+echo '{"state": "opened"}' > "$FF/issue-501.json"; echo '{"state": "closed"}' > "$FF/issue-502.json"; echo '{"state": "opened"}' > "$FF/issue-503.json"; echo '{"state": "opened"}' > "$FF/issue-504.json"
 out="$(J prs)"; first "$out" "DONE: 1 open PR/MR checked: no sync needed"; has "$out" "MERGED: $FC"
 has "$out" "CLOSED: #501 (job $FC"; has "$out" "CLOSED: #502 (already closed"; has "$out" "LEFT-OPEN: #503 ($FC): partial, left: the CSV export"
+has "$out" "LEFT-OPEN: #504 ($FC): partial, refs only"
 grep -qF "body=Fixed in !71 (abc123def456)" "$FF/calls" && ok || bad "no 'Fixed in !71 (sha)' comment"
 grep -qF "issues/503" <(grep -- "-X" "$FF/calls") && bad "partial #503 was closed" || ok
+grep -qF "issues/504" <(grep -- "-X" "$FF/calls") && bad "Refs-only #504 was closed" || ok
 field "$FC" "j['stage'], sorted(j['issue_closed'])" "merged ['501', '502']"
 out="$(J close-issues "$FC")"; has "$out" "LEFT-OPEN: #503"; lacks "$out" "CLOSED: #501"   # nothing twice
 # #4: a table instead of JSON fails clearly and names the command

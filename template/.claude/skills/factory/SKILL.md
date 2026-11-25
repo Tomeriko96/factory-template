@@ -698,8 +698,8 @@ Steps 1–2 of `push`, then open the PR/MR with the `PR-TITLE:` line as its titl
 `PR-BODY:` file (`<Job>/pr-body.md`) as its description, **as it is**. The script wrote it
 (`.factory/precheck --pr-body`): the `## PR` section of the PR text plus one `<issues.link> #<nr>`
 line (`Closes #N`) for every issue the job fixes (a bundle: the bundle issue and every member;
-`CLOSING:` lists them) and the Claude Code footer. An issue the approver marked partial (`Refs #N
-(left: <what>)`, `PARTIAL:`) stays open after the merge. Never replace the closing lines by `Refs`
+`CLOSING:` lists them) and the Claude Code footer. An issue named only with `Refs #N` (write
+`Refs #N (left: <what>)`; `PARTIAL:`) stays open after the merge. Never replace the closing lines by `Refs`
 or a promise to close the issues by hand: two bundle MRs did that and left 8 issues open. If you
 must write a body yourself (no `PR-BODY:` line, `/factory deliver <id> pr` of a pushed job), run
 `.factory/precheck --pr-body <id>` first, or check your file with `.factory/precheck --closes <id>

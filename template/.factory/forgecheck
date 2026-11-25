@@ -170,13 +170,12 @@ def validate_block(push, pr, draft, cfg):
     if push == "yes":
         return {"mode": "ci", "open_pr": False}, "a pushed job branch gets a pipeline: push it and wait for that"
     if pr == "yes" and draft == "yes":
-        return ({"mode": "ci", "open_pr": True, "draft": True},
+        return ({"mode": "ci", "open_pr": True},
                 "CI runs on PRs/MRs, drafts too: open a draft PR/MR at validation and wait for its pipeline")
-    if pr == "yes" and d.get("draft") is False:
-        return ({"mode": "ci", "open_pr": True, "draft": False},
-                "CI runs on PRs/MRs (drafts unclear): open the PR/MR ready, as delivery would")
-    return {"mode": "local"}, ("CI would not run on a draft and delivery.draft is true, or CI on a job branch is "
-                               "unclear: validation stays local (ask the user, or set delivery.draft false)")
+    # The validation's PR/MR is always a draft until delivery (v0.17.0): a ready one was auto-merged
+    # before the approver ran. Without CI on drafts the validation stays local.
+    return {"mode": "local"}, ("CI does not run (or may not run) on a draft PR/MR, or CI on a job branch is "
+                               "unclear: validation stays local (the validation's PR/MR is always a draft)")
 
 
 def gitlab_drafts():

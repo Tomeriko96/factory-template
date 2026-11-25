@@ -6,6 +6,11 @@
   .factory/ci <job-id>         refresh + show that job's pipeline stages/jobs
   .factory/ci --others         also list recent pipelines outside factory/* branches
   .factory/ci --quiet          refresh, print nothing (for .factory/watch loop)
+  .factory/ci wait <job-id> [--timeout S]
+                               block until the pipeline/checks of the job's current head SHA finish;
+                               print one line `CI: SUCCESS|FAILED|INFRA|MERGED|CLOSED|TIMEOUT <job> …`;
+                               exit 0 on SUCCESS/MERGED, else 1. Start it as a background command so
+                               the harness wakes the session when CI is done (never a polling loop).
 
 Cache: .factory/cache/ci-<job-id>.json + ci-others.json, so `watch` never blocks on
 the API. Forge comes from .factory/config.json (`github` | `gitlab`).
@@ -20,6 +25,16 @@ failing test in the log, is INFRA, not a code failure (`infra_reason()`). The re
 a pipeline once by itself (GitLab: `POST jobs/:id/retry`; GitHub: `gh run rerun <run> --failed`)
 and reports `CI: INFRA (<reason>), retried`; `precheck --validate` does the same and never turns
 it into a rework round.
+
+A PR/MR the forge shows merged or closed while the job still says otherwise: the refresh runs
+`.factory/job prs <job-id>` at once (it marks the job merged and closes its issues, or reports the
+closed PR/MR), so a merge outside the factory is never stale until the next `/factory status`.
+
+Preview cleanup (config `ci.preview_cleanup_job`, e.g. `kubernetes:deploy-preview:cleanup`): a failed
+preview deploy (a job matching `ci.preview_jobs`, default `*preview*`, whose log shows a Helm upgrade
+failure, a failed pre-upgrade hook or `timed out waiting for the condition`) is INFRA; before its one
+retry the cleanup job of the same pipeline is played (manual) or retried and waited for, so the
+deploy starts on a fresh preview namespace. Without the key nothing changes.
 
 Requires: `gh` (github) or `glab` (gitlab) logged in. Missing CLI/auth -> cached
 state is kept and the error is reported once, never crashes watch.
@@ -460,16 +475,53 @@ def log_infra_reason(text):
     return None
 
 
+# A preview deploy that failed on the state of an old preview namespace (prompt-library !706: the Helm
+# pre-upgrade migrate Job in a 16 h old namespace). Only with config ci.preview_cleanup_job.
+PREVIEW_PATTERNS = [
+    (re.compile(r"pre-upgrade hooks? failed|failed pre-upgrade|pre-upgrade hook\S* .*\bfailed\b|"
+                r"job failed: BackoffLimitExceeded", re.I), "pre-upgrade hook job failed"),
+    (re.compile(r"UPGRADE FAILED|helm upgrade\b.*\bfailed\b|another operation \(install/upgrade/rollback\) is in progress",
+                re.I), "Helm upgrade failed"),
+    (re.compile(r"timed out waiting for the condition", re.I), "timed out waiting for the condition"),
+]
+
+
+def preview_config():
+    """(cleanup job name, [globs of preview jobs]) from config.json `ci`, or None when not set."""
+    c = load_config().get("ci")
+    name = c.get("preview_cleanup_job") if isinstance(c, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return None
+    globs = c.get("preview_jobs") or ["*preview*"]
+    return name.strip(), [g for g in ([globs] if isinstance(globs, str) else globs) if isinstance(g, str)]
+
+
+def preview_reason(job, text):
+    """`preview deploy failed (<why>)` when ci.preview_cleanup_job is set, the job's name matches
+    ci.preview_jobs (never the cleanup job itself) and its log shows a preview deploy failure."""
+    import fnmatch
+    pc = preview_config()
+    name = str((job or {}).get("name") or "")
+    if not pc or name == pc[0] or not any(fnmatch.fnmatchcase(name, g) for g in pc[1]):
+        return None
+    text = ANSI.sub("", text or "")   # no test-failure check: a deploy job runs no tests ("1 error occurred" is Helm's)
+    for rx, why in PREVIEW_PATTERNS:
+        if rx.search(text):
+            return f"preview deploy failed ({why})"
+    return None
+
+
 def infra_reason(jobs, logs):
     """`<reason>` when EVERY failed job of a pipeline failed on infrastructure (its GitLab
-    failure_reason or its log, see log_infra_reason), else None: one code failure is enough to
-    make the whole pipeline a code failure."""
+    failure_reason, a preview deploy failure (preview_reason) or its log, see log_infra_reason),
+    else None: one code failure is enough to make the whole pipeline a code failure."""
     failed = [j for j in jobs if j.get("status") == "failed"]
     if not failed:
         return None
     whys = []
     for j in failed:
-        why = GL_INFRA_REASONS.get(str(j.get("failure_reason") or "")) or log_infra_reason(logs.get(j.get("name")))
+        why = GL_INFRA_REASONS.get(str(j.get("failure_reason") or "")) or \
+            preview_reason(j, logs.get(j.get("name"))) or log_infra_reason(logs.get(j.get("name")))
         if not why:
             return None
         whys.append(why)
@@ -511,6 +563,61 @@ def retry_failed(forge, jobs, repo_flag=None):
     return done, ("; ".join(errs) or None)
 
 
+def gl_job_id(j):
+    m = re.search(r"/-/jobs/(\d+)", j.get("url") or "")
+    return m.group(1) if m else (str(j["id"]) if j.get("id") else None)
+
+
+def preview_cleanup(forge, all_jobs):
+    """Play (manual) or retry the pipeline's ci.preview_cleanup_job and wait until it finishes
+    (FACTORY_CI_CLEANUP_WAIT seconds, default 420). Returns a note for the report line."""
+    pc = preview_config()
+    if not pc:
+        return None
+    if forge != "gitlab":
+        return f"preview cleanup {pc[0]}: only on GitLab, not run"
+    job = next((j for j in all_jobs or [] if j.get("name") == pc[0]), None)
+    jid = gl_job_id(job) if job else None
+    if not jid:
+        return f"preview cleanup {pc[0]}: not in this pipeline, not run"
+    if job.get("status") in ("running", "pending"):
+        new = {"id": jid}
+    else:
+        verb = "play" if job.get("status") in ("manual", "created") else "retry"
+        new, err = run(["glab", "api", "-X", "POST", f"projects/:id/jobs/{jid}/{verb}"], cwd=REPO)
+        if err or not isinstance(new, dict):
+            return f"preview cleanup {pc[0]}: {verb} failed ({err or 'no job'})"
+    nid = str(new.get("id") or jid)
+    try:
+        limit = float(os.environ.get("FACTORY_CI_CLEANUP_WAIT", "420"))
+        poll = float(os.environ.get("FACTORY_CI_POLL", "15"))
+    except ValueError:
+        limit, poll = 420.0, 15.0
+    end, st = time.time() + limit, None
+    while True:
+        cur, err = run(["glab", "api", f"projects/:id/jobs/{nid}"], cwd=REPO)
+        st = normalize_gl((cur or {}).get("status")) if not err and isinstance(cur, dict) else None
+        if st in ("success", "failed", "canceled", "skipped"):
+            break
+        if time.time() + poll > end:
+            return f"preview cleanup {pc[0]} still {st or 'unknown'} after {int(limit)}s"
+        time.sleep(max(poll, 0))
+    return f"preview cleanup {pc[0]}: {st}"
+
+
+def retry_infra(forge, failed, all_jobs=None, repo_flag=None, logs=None):
+    """retry_failed, with the preview cleanup first when a failed job is a preview deploy failure
+    (preview_reason on its log). Returns (retried keys, error or None, cleanup note or None)."""
+    note = None
+    failed = [j for j in failed if j.get("status") == "failed"]
+    if preview_config() and logs is None:
+        logs = failed_logs(forge, failed)
+    if preview_config() and any(preview_reason(j, (logs or {}).get(j.get("name"))) for j in failed):
+        note = preview_cleanup(forge, all_jobs or failed)
+    done, err = retry_failed(forge, failed, repo_flag)
+    return done, err, note
+
+
 def infra_check(forge, data, old, repo_flag=None):
     """For a failed pipeline of a pr-open job: classify it once (logs of the failed jobs) and retry an
     infrastructure failure once. Sets data["infra"] = {reason, retried, keys, error?} and returns the
@@ -529,7 +636,8 @@ def infra_check(forge, data, old, repo_flag=None):
     if prev.get("retried") and set(keys) & set(prev.get("retried_keys") or []):
         data["infra"] = prev   # the forge still lists the jobs the retry replaces
         return prev.get("line")
-    why = infra_reason(failed, failed_logs(forge, failed))
+    logs = failed_logs(forge, failed)
+    why = infra_reason(failed, logs)
     if not why:
         data["infra"] = {"keys": keys, "reason": None}
         return None
@@ -537,8 +645,9 @@ def infra_check(forge, data, old, repo_flag=None):
         line = f"CI: INFRA ({why}), failed again after one retry: not a code failure, a human looks"
         data["infra"] = {"keys": keys, "reason": why, "retried": prev["retried"], "line": line, "again": True}
         return line
-    done, err = retry_failed(forge, failed, repo_flag)
-    line = f"CI: INFRA ({why}), retried" if done else f"CI: INFRA ({why}), retry failed: {err}"
+    done, err, note = retry_infra(forge, failed, data.get("jobs"), repo_flag, logs)
+    line = (f"CI: INFRA ({why}), " + (f"{note}, " if note else "")
+            + ("retried" if done else f"retry failed: {err}"))
     data["infra"] = {"keys": keys, "reason": why, "retried": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if done else None,
                      "retried_keys": done, "line": line, **({"error": err} if err else {})}
     return line
@@ -594,11 +703,163 @@ def refresh_job(job, forge, ttl, force, quiet, pid=None):
         if line and not quiet:
             print(f"{job['id']}: {line}")
         write_cache(path, data)
+        st, was = forge_state(data), forge_state(old or {})
+        if st == "merged" or (st == "closed" and was != "closed"):
+            for l in job_prs(job["id"]):
+                if not quiet:
+                    print(f"{job['id']}: {l}")
     return data
+
+
+def forge_state(data):
+    """merged|closed|open|'' of a cached CI entry (GitLab mr_state, GitHub pr_state)."""
+    st = str(data.get("mr_state") or data.get("pr_state") or "").lower()
+    return {"opened": "open"}.get(st, st)
+
+
+def job_prs(job_id):
+    """Run `.factory/job prs <id>` (the only writer of job.json): a merged PR/MR marks the job merged
+    and closes its issues, a closed one is reported. Returns its output lines."""
+    try:
+        r = subprocess.run([os.path.join(HERE, "job"), "prs", job_id], capture_output=True, text=True,
+                           timeout=300, cwd=REPO)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return [f"job prs failed: {e}"]
+    return [l for l in (r.stdout or r.stderr or "").splitlines() if l.strip()]
+
+
+# ---------- wait for the job's head pipeline (`.factory/ci wait <job-id>`) ----------
+
+def git_out(*args, cwd=None):
+    r = subprocess.run(["git", *args], capture_output=True, text=True, cwd=cwd or REPO)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def job_head(job):
+    """The job's current head: its worktree's HEAD, else its local branch, else the remote one."""
+    wt = job.get("worktree")
+    if wt and os.path.isdir(wt):
+        sha = git_out("rev-parse", "HEAD", cwd=wt)
+        if sha:
+            return sha
+    br = job.get("branch") or ""
+    remote = (load_config().get("delivery") or {}).get("remote") or "origin"
+    for ref in (f"refs/heads/{br}", f"refs/remotes/{remote}/{br}"):
+        sha = git_out("rev-parse", "-q", "--verify", ref + "^{commit}") if br else ""
+        if sha:
+            return sha
+    return None
+
+
+def push_time(job, sha):
+    """ISO time a minute before the head was pushed (validate.json of a round with that head), else
+    before its commit time: a GitLab merged-results pipeline created after it counts."""
+    jd = os.path.join(HERE, "jobs", job["id"])
+    for p in sorted(glob_rounds(jd), reverse=True):
+        try:
+            st = json.load(open(os.path.join(p, "validate.json")))
+        except (OSError, ValueError):
+            continue
+        if st.get("head") == sha and isinstance(st.get("pushed_at"), (int, float)):
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(st["pushed_at"] - 60))
+    ct = git_out("show", "-s", "--format=%ct", sha)
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(ct) - 60)) if ct.isdigit() else None
+
+
+def glob_rounds(jd):
+    try:
+        return [os.path.join(jd, d) for d in os.listdir(jd) if re.match(r"round-\d+$", d)]
+    except OSError:
+        return []
+
+
+def pr_state_now(forge, job):
+    """merged|closed|open|None of the job's PR/MR on the forge."""
+    url = job.get("pr_url")
+    if not url:
+        return None
+    if forge == "gitlab":
+        mr = fetch_gitlab({"pr_url": url}, pid=":id")
+        return None if mr.get("error") else forge_state(mr)
+    if forge == "github":
+        pr, err = run(["gh", "pr", "view", url, "--json", "state"])
+        return None if err or not isinstance(pr, dict) else forge_state({"pr_state": pr.get("state")})
+    return None
+
+
+def cmd_wait(args):
+    """`wait <job-id> [--timeout S]`: one final line, exit 0 (SUCCESS, MERGED) or 1 (see the doc)."""
+    timeout = 3600.0
+    if "--timeout" in args:
+        try:
+            timeout = float(args[args.index("--timeout") + 1])
+        except (IndexError, ValueError):
+            print("CI: ERROR usage: .factory/ci wait <job-id> [--timeout S]")
+            return 2
+    ids = [a for i, a in enumerate(args) if not a.startswith("-") and (i == 0 or args[i - 1] != "--timeout")]
+    jobs = [j for j in load_jobs() if ids and (j["id"] == ids[0] or j["id"].startswith(ids[0] + "-"))]
+    if len(jobs) != 1:
+        print(f"CI: ERROR no job '{ids[0] if ids else ''}'")
+        return 2
+    job, cfg = jobs[0], load_config()
+    forge = (cfg.get("forge") or "github").lower()
+    os.chdir(REPO)   # gh/glab find the project from the checkout's remote
+    v = cfg.get("validate") if isinstance(cfg.get("validate"), dict) else {}
+    try:
+        poll = float(os.environ.get("FACTORY_CI_POLL", v.get("poll_s", 30)))
+    except (TypeError, ValueError):
+        poll = 30.0
+    sha = job_head(job)
+    if not sha:
+        print(f"CI: ERROR {job['id']}: no head commit (no worktree, no branch {job.get('branch')})")
+        return 1
+    since, end, errors, res = push_time(job, sha), time.time() + timeout, 0, {}
+    tag = f"{job['id']} {sha[:12]}"
+    while True:
+        st = pr_state_now(forge, job)
+        if st == "merged":
+            lines = job_prs(job["id"])
+            print(f"CI: MERGED {tag} {job.get('pr_url')}: merged on the forge"
+                  + (f" ({'; '.join(l for l in lines if not l.startswith('DONE:'))[:300]})" if lines else ""))
+            return 0
+        if st == "closed":
+            print(f"CI: CLOSED {tag} {job.get('pr_url')}: closed without merge, a human decides")
+            return 1
+        res = head_pipeline(forge, job.get("branch") or "", sha, job.get("pr_url"), since)
+        if res.get("error"):
+            errors += 1
+            if errors >= 10:
+                print(f"CI: ERROR {tag}: the forge did not answer {errors} times in a row ({res['error'][:160]})")
+                return 1
+        else:
+            errors = 0
+            p, js = res.get("pipeline"), res.get("jobs") or []
+            url = f" {res['url']}" if res.get("url") else ""
+            if p == "success" or (p in ("skipped", "manual") and js and
+                                  all(j.get("status") in ("success", "skipped", "manual") for j in js)):
+                print(f"CI: SUCCESS {tag}: {len(js)} jobs passed{url}")
+                return 0
+            if p in ("failed", "canceled"):
+                bad = [j for j in js if j.get("status") in ("failed", "canceled")]
+                names = ", ".join(j["name"] for j in bad[:6]) or f"pipeline {p}"
+                why = infra_reason(js, failed_logs(forge, js)) if p == "failed" and \
+                    all(j.get("status") == "failed" for j in bad) else None
+                if why:
+                    print(f"CI: INFRA ({why}) {tag}: {names}{url}")
+                else:
+                    print(f"CI: FAILED {tag}: {names}{url}")
+                return 1
+        if time.time() + poll > end:
+            last = res.get("error") or res.get("pipeline") or "none"
+            print(f"CI: TIMEOUT {tag}: still {last} after {int(timeout)}s; start the wait again")
+            return 1
+        time.sleep(max(poll, 0))
 
 
 def main():
     args = sys.argv[1:]
+    if args[:1] == ["wait"]:
+        sys.exit(cmd_wait(args[1:]))
     ttl = TTL_DEFAULT
     quiet = "--quiet" in args
     force = "--ttl" in args and "0" in args

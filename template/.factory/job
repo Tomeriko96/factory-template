@@ -46,7 +46,12 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job prs [<id>]                      ask the forge about every pr-open job: merged -> merged + close-issues;
                                       conflict or behind the base -> ACTION: sync (syncs go before new jobs);
                                       and about unfinished jobs that already have a PR/MR (validate.mode ci):
-                                      OPEN (with the pipeline), MERGED, RESUME (an infra failure, now green)
+                                      OPEN (with the pipeline), MERGED, RESUME (an infra failure, now green),
+                                      MERGED-UNAPPROVED (merged before the approver: stage merged-unapproved,
+                                      `job next` runs the approver as a post-merge review, findings -> issues)
+  job may-auto-merge <pr|mr nr|id>    AUTO-MERGE: yes (exit 0) only for a job at deliver/pr-open whose delivery
+                                      gate allowed it; no (exit 1) for a validation PR/MR before the approver;
+                                      exit 3: not a factory job. Ask it before switching auto-merge on by hand
   job close-issues <id>               after a merge: close the job's issues the forge left open ("Fixed in
                                       !N (<sha>)"); a partial issue (Refs #N, left: ...) stays open, reported
   job fail <id> "<reason>"            -> needs-human
@@ -91,6 +96,9 @@ ACTIVE = ("spec", "build", "review", "approve", "deliver")
 ACTIVE_SYNCS = 2   # limits.active_syncs: syncs of open PRs/MRs at once (they need no job slot)
 AT_REST = ("needs-human", "merged", "pushed", "pr-open", "superseded")
 NEEDS_WORKTREE = ("spec", "build", "review", "approve", "deliver")
+# The forge merged the PR/MR before the approver ran: the approver reviews it afterwards (post-merge.md)
+# and every finding becomes an issue; then `merged`. Takes no job slot.
+POST_MERGE = ("merged-unapproved",)
 ID_RE = re.compile(r"^\d{3}-[a-z0-9]+(-[a-z0-9]+)*$")
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 OFFSET = {"ux": 1, "ui": 2, "audit": 3}
@@ -1015,6 +1023,10 @@ def auto_merge_gate(job):
     if mode != "pr" or not d.get("auto_merge") or d.get("draft", True):
         return None
     jd, hard, soft = jdir(job["id"]), [], []
+    if job.get("stage") not in ("deliver", "pr-open"):   # never before delivery, auto_merge_held or not
+        hard.append(f"the job is at {job.get('stage')}: auto-merge only at deliver/pr-open, after the approver")
+    if job.get("merged_unapproved"):
+        hard.append("merged before the approver ran")
     conflict = "an agent resolved merge conflicts with the base (sync); a human merges"
     if job.get("adopted"):   # made outside the factory: only the conflict patch counts
         if sync_conflicts(job) > 0:
@@ -1129,11 +1141,12 @@ def ci_pr(job, state_path, out):
     except (OSError, ValueError):
         return
     url = st.get("pr_url")
-    if url and job.get("pr_url") != url:
+    if url:
+        if job.get("pr_url") != url:
+            out.notes.append(f"NOTE: the CI validation opened {url} ({'draft' if st.get('pr_draft') else 'ready'}); "
+                             "delivery reuses it")
         job["pr_url"] = url
         job["validate_pr"] = {"url": url, "draft": bool(st.get("pr_draft"))}
-        out.notes.append(f"NOTE: the CI validation opened {url} ({'draft' if st.get('pr_draft') else 'ready'}); "
-                         "delivery reuses it")
 
 
 def merge_had_conflicts(wt):
@@ -1185,6 +1198,8 @@ def step(job, out, start=None):
             continue
         if s == "pr-open" and job.get("syncing"):
             return sync_step(job, out, start)
+        if s in POST_MERGE:
+            return post_merge_step(job, out)
         if s in AT_REST:
             out.main.append(f"DONE: {s}" + (f": {job['reason']}" if job.get("reason") else ""))
             if s != start and s in ("needs-human", "superseded"):
@@ -1656,6 +1671,8 @@ def cmd_show(args):
             want = [f"round-{k[7:]}/review-{x}.md" for x in (job.get("review_sets") or {}).get(k[7:], [])]
         elif k.startswith("approve-"):
             want = ["decision.md"]
+        elif k == "post-merge":
+            want = ["post-merge.md"]
         for w in want or []:
             lines.append(f"  {'written' if os.path.exists(os.path.join(jd, w)) else 'missing'}: {w}")
         lines.append(f"NEXT: when the agent{'s have' if len(want or []) > 1 else ' has'} returned: .factory/job next {job['id']}"
@@ -2451,6 +2468,149 @@ def mark_merged(job, out, sha=None):
     cleanup(job, out, remove_worktree=True)
 
 
+def approved(job):
+    """True when a merge of the job's PR/MR is no surprise: an approver MERGE (or a clean docs job),
+    approval by hand, or a stage where a human was in charge (needs-human, queued, pr-open, deliver)."""
+    if job.get("stage") in ("deliver", "pr-open", "needs-human", "queued") or job.get("approved_by"):
+        return True
+    dp = os.path.join(jdir(job["id"]), "decision.md")
+    return job.get("stage") == "approve" and (first_line(dp) or "").startswith("DECISION: MERGE")
+
+
+def mark_unapproved(job, out, sha=None):
+    """The forge merged the job's PR/MR before the approver: stage merged-unapproved, whose
+    `job next` spawns the approver as a post-merge review. The worktree stays for that review."""
+    job.pop("syncing", None)
+    job["merged_unapproved"] = {"at": now(), "stage": job.get("stage"), "round": int(job.get("round") or 0)}
+    job["delivery"] = dict(job.get("delivery") or {}, mode="pr", merged=now())
+    if sha:
+        job["merge_sha"] = sha
+    job.pop("pending", None)
+    set_stage(job, "merged-unapproved", f"merged on the forge at {job['merged_unapproved']['stage']}, before the approver")
+    job["reason"] = f"merged on the forge at {job['merged_unapproved']['stage']}, before the approver ran"
+
+
+POST_MERGE_PROMPT = (
+    "\nPost-merge review. {pr} was merged on the forge ({sha}) while the job was at {stage}, BEFORE you ran: "
+    "this is no gate any more, nothing can be held back. Review it as the final round {n} as usual "
+    "(spec.md, round-{n}/build.md, the reviews there, `git diff <Base>...<Branch>`; the Worktree may be gone: "
+    "then run git in <Repo>), but write {file} instead of decision.md. First line exactly "
+    "`POST-MERGE: CLEAN` (nothing to fix) or `POST-MERGE: FINDINGS`. With FINDINGS, one section per problem "
+    "that must be fixed (an unmet acceptance criterion, a bug, a security or privacy issue, a missing test, "
+    "a failing check): `## Issue: <title, imperative, under 70 chars>`, then what is wrong, the evidence "
+    "(command + output or path:line) and numbered testable acceptance criteria. Non-blocking remarks go "
+    "under `## Leftovers`, not in an issue. The script files every `## Issue:` section as an issue on the "
+    "forge; no code, diffs, personal data or secrets in them.")
+
+
+def post_merge_round(job):
+    n = int(job.get("round") or 0)
+    while n > 1 and not os.path.exists(os.path.join(jdir(job["id"]), f"round-{n}", "build.md")):
+        n -= 1
+    return max(n, 1)
+
+
+def post_merge_issues(text):
+    """[(title, body)] of the `## Issue: <title>` sections of post-merge.md."""
+    parts = re.split(r"^## Issue:[ \t]*(.*)$", text or "", flags=re.M)
+    out = []
+    for i in range(1, len(parts) - 1, 2):
+        body = re.split(r"^## (?!#)", parts[i + 1], maxsplit=1, flags=re.M)[0].strip()
+        if parts[i].strip():
+            out.append((parts[i].strip()[:120], body))
+    return out
+
+
+def forge_create_issue(title, body):
+    """(issue number, None) or (None, error): open an issue as the logged-in user."""
+    forge = config().get("forge")
+    if forge == "github" and shutil.which("gh"):
+        r = run(["gh", "issue", "create", "--title", title, "--body", body], timeout=60)
+        m = re.search(r"/issues/(\d+)", r.stdout or "")
+        return (int(m.group(1)), None) if r.returncode == 0 and m else \
+            (None, ((r.stderr or r.stdout or "").strip().splitlines() or ["failed"])[0][:160])
+    if forge == "gitlab" and shutil.which("glab"):
+        x, err = forge_json(["glab", "api", "-X", "POST", "projects/:id/issues", "-f", f"title={title}",
+                             "-f", f"description={body}"])
+        return (int(x["iid"]), None) if isinstance(x, dict) and x.get("iid") else (None, err or "no iid")
+    return None, f"no forge CLI for config.forge {forge!r}"
+
+
+def post_merge_step(job, out):
+    """merged-unapproved: spawn the post-merge approver; then file its findings and end as merged."""
+    jd = jdir(job["id"])
+    p = os.path.join(jd, "post-merge.md")
+    if not os.path.exists(p):
+        n = post_merge_round(job)
+        mu = job.get("merged_unapproved") or {}
+        prompt = paths(job) + f"Final round: {n}. Mode: {job.get('mode')}." + POST_MERGE_PROMPT.format(
+            pr=job.get("pr_url") or "the PR/MR", sha=(job.get("merge_sha") or "?")[:12], stage=mu.get("stage") or "?",
+            n=n, file=p)
+        return spawn(job, out, "post-merge", [("factory-approver", "opus", prompt, "post-merge.md")])
+    text = open(p, errors="replace").read()
+    fl = (text.splitlines() or [""])[0].strip()
+    verdict = "CLEAN" if fl == "POST-MERGE: CLEAN" else "FINDINGS" if fl == "POST-MERGE: FINDINGS" else "INVALID"
+    if (job.get("pending") or {}).get("key") == "post-merge":
+        verdict_metric(job, "factory-approver", "post-merge", p, verdict)
+        job.pop("pending", None)
+    pm = job.setdefault("post_merge", {"verdict": verdict, "issues": {}})
+    pm["verdict"] = verdict
+    found = post_merge_issues(text)
+    if verdict == "INVALID":
+        out.main.append(f"WARN: {job['id']}: post-merge.md starts with {fl[:60]!r}, not POST-MERGE: CLEAN|FINDINGS: "
+                        "read it yourself and file its findings as issues")
+    elif verdict == "FINDINGS" and not found:
+        out.main.append(f"WARN: {job['id']}: POST-MERGE: FINDINGS without a `## Issue:` section: read post-merge.md")
+    failed = []
+    footer = (f"\n\nFound by the factory's post-merge review of job {job['id']}: {job.get('pr_url') or 'its PR/MR'} was "
+              f"merged ({(job.get('merge_sha') or '?')[:12]}) before the approver ran.\n\n"
+              "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n")
+    for title, body in found:
+        if title in pm["issues"]:
+            continue
+        nr, err = forge_create_issue(title, body + footer)
+        if nr is None:
+            failed.append(title)
+            out.main.append(f"ERROR-ISSUE: {job['id']}: filing \"{title}\" failed ({err}); .factory/job next {job['id']} tries again")
+            continue
+        pm["issues"][title] = nr
+        out.main.append(f"FILED: #{nr} {title} (post-merge review of {job['id']})")
+    if failed:
+        out.main.insert(0, f"WAIT: {job['id']}: {len(failed)} post-merge finding(s) not filed yet")
+        return
+    nrs = sorted(pm["issues"].values())
+    if verdict != "CLEAN":   # the job's own issues stay open: the merged change is not done yet
+        left = "left: post-merge review findings " + (", ".join(f"#{x}" for x in nrs) if nrs else "(see post-merge.md)")
+        job["partial_issues"] = {str(x): left for x in job_issues(job)}
+    set_stage(job, "merged")
+    cleanup(job, out, remove_worktree=True)
+    close_issues(job, all_jobs(), out)
+    out.main.insert(0, f"DONE: merged (merged before the approver; post-merge review {verdict}"
+                       + (f", filed {', '.join(f'#{x}' for x in nrs)}" if nrs else "") + ")")
+
+
+def may_auto_merge(nr_or_id):
+    """(exit code, line): may the forge's auto-merge be switched on for this PR/MR (or job)?"""
+    jobs = all_jobs()
+    job = next((j for j in jobs if j["id"] == nr_or_id), None)
+    if job is None and str(nr_or_id).lstrip("!#").isdigit():   # the live job of that PR/MR, else the latest
+        mine = [j for j in jobs if pr_number(j) == int(str(nr_or_id).lstrip("!#"))]
+        job = next((j for j in reversed(mine) if j.get("stage") in ACTIVE + ("queued", "pr-open") + POST_MERGE),
+                   mine[-1] if mine else None)
+    if job is None:
+        return 3, f"AUTO-MERGE: not a factory job ({nr_or_id}): the factory has no say"
+    st = job.get("stage")
+    if st not in ("deliver", "pr-open") or job.get("merged_unapproved"):
+        return 1, (f"AUTO-MERGE: no ({job['id']} is at {st}: auto-merge only after the approver, at "
+                   "deliver/pr-open; never on a validation PR/MR)")
+    rec = job.get("auto_merge")
+    if not isinstance(rec, dict):
+        return 1, f"AUTO-MERGE: no ({job['id']}: no delivery gate recorded; delivery.auto_merge is off or not delivered yet)"
+    if not rec.get("allowed"):
+        return 1, f"AUTO-MERGE: no ({job['id']}: " + ("; ".join(rec.get("reasons") or []) or "held") + ")"
+    return 0, f"AUTO-MERGE: yes ({job['id']} at {st}, through the delivery gate)"
+
+
 def ci_module():
     """.factory/ci as a module (its infra classifier)."""
     import importlib.machinery, importlib.util
@@ -2572,15 +2732,18 @@ def cmd_prs(args):
                     j["pr_url"] = pr["url"]
                     tag = f"{j['id']} ({pr['url']})"
                 if pr["state"] == "merged":
-                    if j.get("stage") in ("needs-human", "queued"):
-                        was = j.get("stage")
+                    was = j.get("stage")
+                    if approved(j):
                         mark_merged(j, out, pr.get("sha"))
                         other.append(f"MERGED: {tag}: merged on the forge while the job was at {was}")
                     else:
-                        other.append(f"MERGED: {tag}: merged on the forge while the job is at {j.get('stage')}: "
-                                     f"stop it (.factory/job fail {j['id']} \"merged\") or check")
+                        mark_unapproved(j, out, pr.get("sha"))
+                        other.insert(0, f"MERGED-UNAPPROVED: {tag}: merged on the forge while the job was at {was}, "
+                                        "before the approver: a post-merge review runs now and files its findings as "
+                                        f"issues: .factory/job next {j['id']}")
                 elif pr["state"] != "open":
-                    other.append(f"CLOSED: {tag}: {pr['state']} without merge, the job is at {j.get('stage')}")
+                    other.append(f"CLOSED: {tag}: {pr['state']} without merge while the job is at {j.get('stage')}: "
+                                 "for the human (the job goes on; .factory/job drop or rework it)")
                 else:
                     merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
                     if pr.get("behind") and not pr["conflict"]:
@@ -2603,7 +2766,8 @@ def cmd_prs(args):
                 elif pr["state"] != "open":
                     j.pop("syncing", None)
                     set_stage(j, "needs-human", f"PR/MR {pr['state']} without merge")
-                    other.append(f"CLOSED: {tag}: {pr['state']} without merge -> needs-human")
+                    other.append(f"CLOSED: {tag}: {pr['state']} without merge -> needs-human, for the human "
+                                 "(reopen it and /factory sync, or /factory drop)")
                 else:
                     merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
                     if pr.get("behind") and not pr["conflict"]:
@@ -3360,6 +3524,12 @@ def main():
         if argv[0] == "show":
             print(cmd_show(argv[1:]))
             return 0
+        if argv[0] == "may-auto-merge":
+            if len(argv) < 2:
+                raise Fail("usage: job may-auto-merge <pr|mr nr or job id>")
+            rc, line = may_auto_merge(argv[1])
+            print(line)
+            return rc
         if argv[0] not in cmds:
             raise Fail(f"unknown command {argv[0]!r} (see .factory/job --help)")
         fn, need = cmds[argv[0]]

@@ -220,3 +220,7 @@ A .factory/heavy --priority low -- .factory/shoot 'http://localhost:{port}' --se
 R .factory/shoot 'http://localhost:{port}' --serve 'npm run dev -- --port {port}' --out x
 A pgrep -af vite
 A pkill --version
+# --- v0.17.0: waiting on CI in the background, the auto-merge question
+A .factory/ci wait 004-zq --timeout 3600
+A /abs/repo/.factory/ci wait 004
+A .factory/job may-auto-merge 711

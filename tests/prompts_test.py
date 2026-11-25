@@ -80,7 +80,7 @@ check("--validate" in JOB and "VALIDATE: PENDING" in open(os.path.join(T, ".fact
 
 # Stages the job script uses must all be documented in SKILL.md
 stages = set()
-for const in ("ACTIVE", "AT_REST"):
+for const in ("ACTIVE", "AT_REST", "POST_MERGE"):
     m = re.search(rf"^{const} = \(([^)]*)\)", JOB, re.M)
     check(bool(m), f"job: {const} not found")
     if m:
@@ -288,6 +288,19 @@ check("Waiting on infrastructure" in SKILL_CORE and "sleep 3600" in SKILL_CORE a
       "SKILL.md: no background hourly retry for infrastructure waits")
 
 # The SKILL.md split: a lean core, one pointer line per commands/ file, hard rules stay in the core
+# v0.17.0: waiting on CI is a background `ci wait`, in SKILL.md's core (read on every turn), not in commands/
+check(".factory/ci wait <id>" in SKILL_CORE and "run_in_background" in SKILL_CORE.split("**Waiting on CI.**", 1)[-1][:600]
+      and "**Waiting on CI.**" in SKILL_CORE, "SKILL.md core: the Waiting on CI rule (background .factory/ci wait)")
+check("def cmd_wait" in open(os.path.join(T, ".factory", "ci")).read(), "ci: no wait command")
+# merged before the approver: the job prints it, SKILL.md says what to do; auto-merge asks may-auto-merge
+check('"MERGED-UNAPPROVED: ' in JOB and "MERGED-UNAPPROVED:" in SKILL_CORE and "POST-MERGE: CLEAN" in JOB,
+      "MERGED-UNAPPROVED: not in job and SKILL.md core")
+check('"may-auto-merge"' in JOB and "may-auto-merge" in SKILL_CORE and "may-auto-merge" in CMD_FILES.get("auto-merge", ""),
+      "may-auto-merge: not in job, SKILL.md and commands/auto-merge.md")
+check("validate.draft" in CMD_FILES.get("config", "") and "deprecated" in CMD_FILES.get("config", ""),
+      "commands/config.md: validate.draft not marked deprecated")
+check("preview_cleanup_job" in CMD_FILES.get("config", "") and "preview_cleanup_job" in open(os.path.join(T, ".factory", "ci")).read(),
+      "ci.preview_cleanup_job: not in ci and commands/config.md")
 check(len(SKILL_CORE.encode()) <= 40000, f"SKILL.md is {len(SKILL_CORE.encode())} bytes: keep it lean (move rarely used text to commands/)")
 check(len(CMD_FILES) >= 10, f"commands/: {len(CMD_FILES)} files")
 for cname in CMD_FILES:

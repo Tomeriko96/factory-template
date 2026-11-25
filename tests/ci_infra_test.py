@@ -4,6 +4,8 @@
 
 An infra failure (OOMKilled, exit 137, runner/scheduler, a registry push error after green tests)
 is retried once and never becomes a rework round; anything with a failing test stays a code failure.
+With ci.preview_cleanup_job a failed preview deploy (a Helm upgrade or pre-upgrade hook failure, a timeout
+waiting for the condition) counts as infra too: its retry plays the cleanup job first.
 """
 import importlib.machinery, importlib.util, os, sys
 
@@ -75,6 +77,44 @@ expect(ci.infra_reason(jobs(("deploy", "failed", "runner_system_failure")), {}),
        "GitLab failure_reason without a log")
 expect(ci.infra_reason(jobs(("deploy", "failed", "script_failure")), {"deploy": CODE}), None, "script_failure")
 expect(ci.infra_reason(jobs(("test", "success", None)), {}), None, "no failed job")
+
+# preview deploys (config ci.preview_cleanup_job): prompt-library !706, job 1978792 (git.sdp.surf.nl,
+# 2026-11-25): the tenant HelmRelease of a 16 h old preview namespace never became ready
+PREVIEW_TIMEOUT = """namespace/ci-706-services-prompt-library annotated
+Error from server (AlreadyExists): error when creating "STDIN": secrets "sdp-gitlab-registry-token" already exists
+Applying tenant HelmRelease.
+helmrelease.helm.toolkit.fluxcd.io/ci-706-prompt-library-tenant configured
+error: timed out waiting for the condition on helmreleases/ci-706-prompt-library-tenant
+ERROR: Something went wrong during tenant creation. Try to increase the value for the timeout parameter, or reach out to the SURF Developer Platform team.
+ERROR: Job failed: command terminated with exit code 1
+"""
+# Helm's own words when the pre-upgrade migrate Job fails in a namespace that holds an earlier round's state
+PREVIEW_HOOK = """Release "prompt-library" exists. Upgrading.
+Error: UPGRADE FAILED: pre-upgrade hooks failed: 1 error occurred:
+\t* job prompt-library-migrate failed: BackoffLimitExceeded
+ERROR: Job failed: command terminated with exit code 1
+"""
+PREVIEW_HELM = "helm upgrade --install prompt-library ./charts/app\nError: UPGRADE FAILED: context deadline exceeded\n"
+dep = {"name": "kubernetes:deploy-preview", "status": "failed", "id": 1}
+cln = {"name": "kubernetes:deploy-preview:cleanup", "status": "manual", "id": 2}
+real_cfg = ci.load_config
+ci.load_config = lambda: {}
+expect(ci.preview_reason(dep, PREVIEW_HOOK), None, "no ci.preview_cleanup_job: no preview reason")
+expect(ci.infra_reason([dep], {dep["name"]: PREVIEW_HOOK}), None, "no config: a failed hook job is a code failure")
+expect(ci.infra_reason([dep], {dep["name"]: PREVIEW_TIMEOUT}), "deploy environment timed out", "no config: timeout as before")
+ci.load_config = lambda: {"ci": {"preview_cleanup_job": "kubernetes:deploy-preview:cleanup"}}
+expect(ci.preview_reason(dep, PREVIEW_TIMEOUT), "preview deploy failed (timed out waiting for the condition)", "!706 timeout")
+expect(ci.preview_reason(dep, PREVIEW_HOOK), "preview deploy failed (pre-upgrade hook job failed)", "pre-upgrade hook")
+expect(ci.preview_reason(dep, PREVIEW_HELM), "preview deploy failed (Helm upgrade failed)", "helm upgrade failed")
+expect(ci.preview_reason(dep, CODE), None, "a test failure in a preview job is no preview failure")
+expect(ci.preview_reason({"name": "python:test", "status": "failed"}, PREVIEW_HOOK), None, "a job outside ci.preview_jobs")
+expect(ci.preview_reason(cln, PREVIEW_HOOK), None, "the cleanup job itself")
+expect(ci.infra_reason([dep, cln], {dep["name"]: PREVIEW_HOOK}), "preview deploy failed (pre-upgrade hook job failed)",
+       "pipeline with a failed preview deploy")
+ci.load_config = lambda: {"ci": {"preview_cleanup_job": "env:cleanup", "preview_jobs": "review:*"}}
+expect(ci.preview_reason({"name": "review:deploy", "status": "failed"}, PREVIEW_HOOK) is not None, True, "ci.preview_jobs as a string")
+expect(ci.preview_reason(dep, PREVIEW_HOOK), None, "ci.preview_jobs narrows the jobs")
+ci.load_config = real_cfg
 
 for f in fails:
     print("FAIL", f)

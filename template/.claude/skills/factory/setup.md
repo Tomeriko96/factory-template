@@ -118,8 +118,9 @@ add `--offline` if `gh`/`glab` is not logged in; write `delivery` to config.json
   runs the full suite (check that `.github/workflows/*`/`.gitlab-ci.yml` runs the same tests as the
   Validate commands; if CI runs only lint, keep `local`). `VALIDATE: local` → leave `validate` out
   and say why (its RECOMMEND line). Tell the user that in `ci` mode the PR/MR exists from the
-  validation step on (a draft when `draft: true`), before the approver.
-- `draft` stays `false` whatever `CI-ON-DRAFT` says; set `true` only when the user asks for drafts.
+  validation step on, always as a draft until delivery (so CI must run on drafts: `forgecheck` only
+  proposes `ci` then), before the approver.
+- `delivery.draft` stays `false` whatever `CI-ON-DRAFT` says; set `true` only when the user asks for drafts.
 - Only when `REQUIRED-CHECKS: yes`: ask whether the factory should switch on auto-merge (`auto_merge`, default `false`; it needs
   `draft: false`, and only on the user's explicit yes). Explain what it does: the forge merges
   once its own checks pass, but `.factory/job` only lets a job through that was approved with

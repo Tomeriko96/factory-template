@@ -105,20 +105,20 @@ try:
     check(run(r, "--offline", "--json")["validate"] == {"mode": "local"}, "delivery local: validate stays local")
     r = repo("github", gh("  push:\n    branches: [main]\n  pull_request:"), "ghv-pr")
     cfg(r, {"mode": "pr", "draft": True})
-    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": True, "draft": True},
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": True},
           "PR pipelines on drafts: ci with a draft PR")
     r = repo("github", gh("  push:\n    branches: [main]\n  pull_request:\n    types: [ready_for_review]"), "ghv-ready")
     cfg(r, {"mode": "pr", "draft": True})
     check(run(r, "--offline", "--json")["validate"] == {"mode": "local"}, "drafts skipped and delivery.draft: local")
     cfg(r, {"mode": "pr", "draft": False})
-    check(run(r, "--offline", "--json")["validate"] == {"mode": "ci", "open_pr": True, "draft": False},
-          "drafts skipped, delivery.draft false: ci with a ready PR")
+    check(run(r, "--offline", "--json")["validate"] == {"mode": "local"},
+          "drafts skipped, delivery.draft false: still local (the validation PR is always a draft)")
     glmr = "workflow:\n  rules:\n    - if: $CI_PIPELINE_SOURCE == \"merge_request_event\"\n"
     r = repo("gitlab", {".gitlab-ci.yml": glmr + "test:\n  script: [make test]\n"}, "glv-mr")
     cfg(r, {"mode": "pr", "draft": True})
     res = run(r, "--offline", "--json")
     check((res["ci_on_push"], res["ci_on_pr"], res["ci_on_draft"]) == ("no", "yes", "yes") and
-          res["validate"] == {"mode": "ci", "open_pr": True, "draft": True}, f"gitlab MR pipelines: draft MR at validation, got {res}")
+          res["validate"] == {"mode": "ci", "open_pr": True}, f"gitlab MR pipelines: draft MR at validation, got {res}")
     r = repo("gitlab", {".gitlab-ci.yml": glmr + "    - if: $CI_COMMIT_BRANCH\n"}, "glv-both")
     res = run(r, "--offline", "--json")
     check((res["ci_on_push"], res["ci_on_pr"]) == ("yes", "yes"), f"gitlab branch + MR pipelines: {res['ci_on_push']}/{res['ci_on_pr']}")

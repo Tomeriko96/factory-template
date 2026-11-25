@@ -43,6 +43,14 @@ Except under `delivery.auto_merge_held` on GitHub (above), never ask the forge t
 needs `factory/<id>` after a merge. The repo's own "delete branch after merge" setting
 is the owner's choice.
 
+**Never before the approver.** Auto-merge (also under `delivery.auto_merge_held`) is only for a job at
+`deliver` or `pr-open`: the gate refuses any other stage. The validation's PR/MR is a draft until
+delivery; never switch auto-merge on for it, also not when someone made it ready by hand (prompt-library
+!711 merged that way before its approver ran). Unsure whether a PR/MR may get auto-merge (a sweep over
+open MRs, an orchestrator): `.factory/job may-auto-merge <nr>` prints `AUTO-MERGE: yes|no (…)`, exit 0
+only for yes, 3 for a PR/MR of no factory job. A merge before approval is caught by `job prs` as
+`MERGED-UNAPPROVED`: the approver then reviews it after the fact and files issues.
+
 Not set after a retry, or the MR sits on a conflict or a missing approval → report it and
 leave the MR open; never work around it. Report whether auto-merge is on in the same line
 as the URL.

@@ -142,10 +142,29 @@ try:
     json.dump({"pipeline": "success", "merge": "not_open", "jobs": [{"name": "t", "status": "success"}]},
               open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
     out = watch("--once")
-    check("no longer open → sync" in out, "a merged/closed MR is not flagged as stale")
+    check("no longer open → /factory status" in out, "a merged/closed MR is not flagged as stale")
     check("refs/merge-requests" not in out, "GitLab merge-request refs shown under other CI")
     nxt = {d["id"]: d["next"] for d in json.loads(watch("--json"))}
-    check(nxt.get("005-open-pr") == "/factory sync 005-open-pr", f"next for a no-longer-open MR: {nxt.get('005-open-pr')}")
+    check(nxt.get("005-open-pr") == "/factory status", f"next for a no-longer-open MR: {nxt.get('005-open-pr')}")
+    # merged on the forge: `job prs` (through /factory status or .factory/ci) marks it merged, never a sync
+    json.dump({"pipeline": "success", "merge": "merged", "mr_state": "merged", "jobs": [{"name": "t", "status": "success"}]},
+              open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
+    out = watch("--once")
+    check("merged on the forge → /factory status" in out and "→ sync" not in out, "a merged MR shown as needing a sync")
+    json.dump({"pipeline": "success", "merge": "closed", "mr_state": "closed", "jobs": []},
+              open(os.path.join(fd, "cache", "ci-005-open-pr.json"), "w"))
+    check("closed without merge → human" in watch("--once"), "a closed MR is not flagged for the human")
+    # merged before the approver (v0.17.0): NEEDS YOU, with the post-merge review as the next step
+    mu = os.path.join(fd, "jobs", "012-merged-unapproved")
+    os.makedirs(mu)
+    json.dump(job("012-merged-unapproved", "merged-unapproved", pr_url="https://gitlab.example/g/p/-/merge_requests/711",
+                  reason="merged on the forge at review, before the approver ran"), open(os.path.join(mu, "job.json"), "w"))
+    board = json.loads(watch("--json"))
+    row = next((d for d in board if d["id"] == "012-merged-unapproved"), {})
+    check(row.get("section") == "needs" and row.get("next") == "/factory resume 012-merged-unapproved",
+          f"merged-unapproved not under NEEDS YOU with /factory resume: {row}")
+    check("merged-unapproved' is not one" not in watch("--once"), "merged-unapproved shown as an unknown stage")
+    shutil.rmtree(mu)
     json.dump({"pipeline": "failed", "merge": "dirty", "jobs": [
         {"name": "lint", "status": "success"}, {"name": "lint", "status": "failed"},
         {"name": "unit", "status": "success"}, {"name": "unit", "status": "success"}]},

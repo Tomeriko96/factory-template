@@ -1252,6 +1252,7 @@ echo "gh $*" >> "$FF/calls"
 case "$1 $2" in
   "pr list") cat "$FF/prlist.json" 2>/dev/null || echo '[]' ;;
   "pr create") echo "Creating pull request"; echo "https://github.example/o/r/pull/41" ;;
+  "pr ready") echo "ok" ;;
   "run view") printf 'setup ok\n\033[31mFAILED tests/test_x.py::test_y - AssertionError\033[0m\n' ;;
   "api "*check-runs*) sha="${2#*commits/}"; sha="${sha%%/*}"; if [ -f "$FF/checks-$sha.json" ]; then cat "$FF/checks-$sha.json"; else cat "$FF/checks.json" 2>/dev/null || echo '{"check_runs": []}'; fi ;;
   "api "*/status) echo '{"statuses": []}' ;;
@@ -1264,6 +1265,7 @@ echo "glab $*" >> "$FF/calls"
 case "$*" in
   "api projects/:id/merge_requests?source_branch="*) cat "$FF/mrlist.json" 2>/dev/null || echo '[]' ;;
   "api -X POST projects/:id/merge_requests "*) echo '{"iid": 52, "web_url": "https://gitlab.example/g/p/-/merge_requests/52", "draft": true}' ;;
+  "api -X PUT projects/:id/merge_requests/52 "*) echo '{"iid": 52, "draft": true}' ;;
   "api projects/:id/merge_requests/52") cat "$FF/mr52.json" ;;
   "api projects/:id/pipelines/900/jobs"*) echo '[{"id": 7001, "name": "unit", "stage": "test", "status": "failed", "web_url": "https://gitlab.example/g/p/-/jobs/7001"}, {"id": 7002, "name": "lint", "stage": "test", "status": "success", "web_url": "https://gitlab.example/g/p/-/jobs/7002"}]' ;;
   "api projects/:id/jobs/7001/trace") printf 'collecting\nE   assert 2 == 3\n' ;;
@@ -1327,10 +1329,28 @@ has "$out" "❌ test: failed (https://github.example/o/r/actions/runs/5/job/77)"
 has "$out" "FAILED tests/test_x.py::test_y - AssertionError"; lacks "$out" $'\033'
 has "$out" "[blocking] the CI pipeline fails"
 command grep -qF "run view --job 77 --log-failed" "$FF/calls" && ok || bad "log not fetched by job id"
-command grep -qF -- "--draft" "$FF/calls" && bad "ready PR opened as draft" || ok        # delivery.draft false
+command grep -qF -- "--draft" "$FF/calls" && ok || bad "validation PR not a draft with delivery.draft false"   # always a draft (v0.17.0)
 out="$(J next "$C2")"; has "$out" "Build round 2."; has "$out" "read round-1/validate.md"
 field "$C2" "j['pr_url']" "https://github.example/o/r/pull/41"
 park "$C2"
+# !711: the validation's PR/MR is always a draft; validate.draft false is ignored; a ready one is made a draft again
+vcfg github false '{"mode": "ci", "open_pr": true, "draft": false}'; checks pass
+echo '[{"url": "https://github.example/o/r/pull/41", "isDraft": false}]' > "$FF/prlist.json"
+C2B="$(newjob "zq vci ready")"; tovalidate "$C2B" src/c2b.py; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$C2B")"; first "$out" "VALIDATE: PASS"; has "$out" "(draft, opened for the CI validation)"
+has "$out" "validate.draft is deprecated and ignored"
+command grep -qF "pr ready https://github.example/o/r/pull/41 --undo" "$FF/calls" && ok || bad "ready PR not made a draft: $(cat "$FF/calls")"
+out="$(J next "$C2B")"; has "$out" "AGENT: factory-approver"; field "$C2B" "j['validate_pr']['draft']" True
+first "$(J may-auto-merge 41)" "AUTO-MERGE: no ($C2B is at approve"; J may-auto-merge 41 >/dev/null; [ $? = 1 ] && ok || bad "may-auto-merge before the approver: exit not 1"
+merge_decision "$C2B"; out="$(J next "$C2B")"; first "$out" "ACTION: deliver"
+has "$out" "is already open (a draft, opened by the CI validation)"; has "$out" "mark it ready (delivery.draft is false)"
+# the ready PR cannot be made a draft: no validation on a ready PR/MR before the approver
+printf '#!/usr/bin/env bash\n[ "$1 $2" = "pr ready" ] && { echo "denied" >&2; exit 1; }\nexec "%s/bin/gh" "$@"\n' "$T" > "$T/gh-deny"
+mkdir -p "$T/bin-deny"; mv "$T/gh-deny" "$T/bin-deny/gh"; chmod +x "$T/bin-deny/gh"
+C2C="$(newjob "zq vci deny")"; tovalidate "$C2C" src/c2c.py
+out="$(PATH="$T/bin-deny:$PATH" "$R/.factory/precheck" --validate "$C2C")"; first "$out" "VALIDATE: ERROR the PR/MR for the CI pipeline could not be opened"
+has "$out" "could not be made a draft"
+park "$C2B"; park "$C2C"; rm -f "$FF/prlist.json"
 # no PR needed (push pipelines): nothing opened; no pipeline at all for the commit -> ERROR -> needs-human
 vcfg github true '{"mode": "ci", "open_pr": false}'; echo '{"check_runs": []}' > "$FF/checks.json"
 C3="$(newjob "zq vci none")"; tovalidate "$C3" src/c3.py; : > "$FF/calls"
@@ -1356,6 +1376,13 @@ out="$("$R/.factory/precheck" --validate "$C5")"; first "$out" "VALIDATE: FAIL";
 has "$out" "E   assert 2 == 3"; has "$out" "Pipeline: https://gitlab.example/g/p/-/pipelines/900"
 has "$out" "PR: https://gitlab.example/g/p/-/merge_requests/52 (draft"
 park "$C5"
+# GitLab: an open ready MR for the branch is made a draft again (title "Draft: …")
+echo '[{"iid": 52, "web_url": "https://gitlab.example/g/p/-/merge_requests/52", "title": "zq ready mr", "draft": false}]' > "$FF/mrlist.json"
+C5B="$(newjob "zq vci gitlab ready")"; tovalidate "$C5B" src/c5b.py; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$C5B")"
+command grep -qF -- "api -X PUT projects/:id/merge_requests/52 -f title=Draft: zq ready mr" "$FF/calls" && ok || bad "ready MR not made a draft: $(cat "$FF/calls")"
+first "$out" "VALIDATE: PENDING"; field "$C5B" "json.load(open('$(jd "$C5B")/round-1/validate.json'))['pr_draft']" True
+park "$C5B"; rm -f "$FF/mrlist.json"
 # a merged-results pipeline (other sha) created after the push counts, also with a UTC offset; one from before the push does not
 C6="$(newjob "zq vci gitlab merged")"; tovalidate "$C6" src/c6.py
 echo '{"iid": 52, "state": "opened", "head_pipeline": {"id": 901, "sha": "0000000", "status": "success", "created_at": "2000-01-01T01:00:00.000+01:00"}}' > "$FF/mr52.json"
@@ -1554,9 +1581,15 @@ case "$*" in
   "api -X POST projects/:id/merge_requests "*) n="$(cat "$FF/next_iid")"; echo $((n + 1)) > "$FF/next_iid"
     echo "{\"iid\": $n, \"web_url\": \"https://gitlab.example/g/p/-/merge_requests/$n\", \"draft\": false}" ;;
   "api -X POST projects/"*/jobs/*/retry) echo '{"id": 1}' ;;
+  "api -X POST projects/"*/jobs/*/play) j="${4%/play}"; echo "{\"id\": ${j##*/}}" ;;
+  "api -X POST projects/:id/issues -f"*) n="$(cat "$FF/next_issue")"; echo $((n + 1)) > "$FF/next_issue"; echo "{\"iid\": $n}" ;;
+  "api -X POST projects/:id/issues/"*) echo '{}' ;;
+  "api -X PUT projects/:id/issues/"*) echo '{"state": "closed"}' > "$FF/issue-${4##*/}.json"; echo '{}' ;;
+  "api projects/:id/issues/"*) cat "$FF/issue-${2##*/}.json" ;;
   "api projects/"*/merge_requests/*) cat "$FF/mr-${2##*/}.json" ;;
   "api projects/"*/pipelines/*/jobs*) p="${2#projects/*/pipelines/}"; cat "$FF/jobs-${p%%/*}.json" ;;
   "api projects/"*/jobs/*/trace) j="${2%/trace}"; cat "$FF/trace-${j##*/}.txt" ;;
+  "api projects/:id/jobs/"*) cat "$FF/job-${2##*/}.json" ;;
   "mr list "*) cat "$FF/mrlist.json" 2>/dev/null || echo '[]' ;;
   *) echo "fake glab: $*" >&2; exit 1 ;;
 esac
@@ -1664,6 +1697,148 @@ gljobs 950 7001 failed; : > "$FF/calls"; out="$("$R/.factory/ci" "$I5" --ttl 0)"
 lacks "$out" "CI: INFRA"; command grep -qF "/retry" "$FF/calls" && bad "a code failure was retried by .factory/ci" || ok
 git remote set-url origin "$T/origin.git"
 park "$I5"
+
+# ---------- v0.17.0: merged before the approver, a merge outside the factory, ci wait, preview cleanup ----------
+scenario=merged-unapproved
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["issues"]={"allowed_authors": ["me"], "link": "Closes"}; json.dump(c, open(".factory/config.json","w"))'
+echo 700 > "$FF/next_issue"; echo 65 > "$FF/next_iid"
+# toapprove <id> <path> <iid>: validated on the forge (MR <iid>, green), the approver spawned
+toapprove() {
+  tovalidate "$1" "$2"; local h; h="$(git -C "$(wt "$1")" rev-parse HEAD)"
+  glmr "$3" "$(( $3 * 10 ))" success "$h"; gljobs "$(( $3 * 10 ))" "$(( $3 * 100 ))" success
+  "$R/.factory/precheck" --validate "$1" >/dev/null; J next "$1" >/dev/null
+}
+# U1 (prompt-library !711): the MR merged on the forge while the approver was still to run
+U1="$(newjob --issue 801 "zq unapproved")"; toapprove "$U1" src/u1.py 65; HU1="$(git -C "$(wt "$U1")" rev-parse HEAD)"
+field "$U1" "j['stage'], j['validate_pr']['draft']" "approve True"
+first "$(J may-auto-merge 65)" "AUTO-MERGE: no ($U1 is at approve: auto-merge only after the approver"
+glmr 65 650 success "$HU1" merged; echo '{"state": "opened"}' > "$FF/issue-801.json"
+out="$(J prs)"; has "$out" "MERGED-UNAPPROVED: $U1 (https://gitlab.example/g/p/-/merge_requests/65): merged on the forge while the job was at approve, before the approver"
+has "$out" ".factory/job next $U1"
+field "$U1" "j['stage'], j['merged_unapproved']['stage'], j['reason']" "merged-unapproved approve merged on the forge at approve, before the approver ran"
+first "$(J may-auto-merge 65)" "AUTO-MERGE: no ($U1 is at merged-unapproved"
+J may-auto-merge 65 >/dev/null; [ $? = 1 ] && ok || bad "may-auto-merge on an unapproved merge: exit not 1"
+J may-auto-merge 999 >/dev/null; [ $? = 3 ] && ok || bad "may-auto-merge on an unknown MR: exit not 3"
+out="$(J next "$U1")"; first "$out" "ACTION: spawn 1 agent"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: opus"
+has "$out" "Post-merge review."; has "$out" "WRITES: $(jd "$U1")/post-merge.md"; has "$out" "Final round: 1."; exists "$(wt "$U1")"
+has "$(J show "$U1")" "missing: post-merge.md"
+has "$(J list)" "merged-unapproved"
+printf 'POST-MERGE: FINDINGS\n\nTwo things.\n\n## Issue: Audit log rows can be deleted\n\nEvidence: src/u1.py:1\n\n1. A delete is refused.\n\n## Issue: Retention has no test\n\n1. A test covers the purge.\n\n## Leftovers\n- zqnaming\n' > "$(jd "$U1")/post-merge.md"
+: > "$FF/calls"; out="$(J next "$U1")"
+first "$out" "DONE: merged (merged before the approver; post-merge review FINDINGS, filed #700, #701)"
+has "$out" "FILED: #700 Audit log rows can be deleted"; has "$out" "FILED: #701 Retention has no test"
+has "$out" "LEFT-OPEN: #801 ($U1): partial, left: post-merge review findings #700, #701"
+command grep -qF "api -X POST projects/:id/issues -f title=Retention has no test -f description=1. A test covers the purge." "$FF/calls" && ok || bad "finding not filed: $(cat "$FF/calls")"
+command grep -qF "Found by the factory's post-merge review of job $U1" "$FF/calls" && ok || bad "no footer in the filed issue"
+command grep -qF "zqnaming" "$FF/calls" && bad "a leftover was filed as an issue" || ok
+command grep -qF "issues/801" <(grep -- "-X" "$FF/calls") && bad "#801 closed after FINDINGS" || ok
+field "$U1" "j['stage'], sorted(j['post_merge']['issues'].values()), j['post_merge']['verdict']" "merged [700, 701] FINDINGS"
+missing "$(wt "$U1")"
+out="$(J next "$U1")"; first "$out" "DONE: merged"; lacks "$out" "FILED"            # nothing filed twice
+# U2: merged at approve, post-merge review CLEAN: the job's issue is closed as after any merge
+U2="$(newjob --issue 802 "zq unapproved clean")"; toapprove "$U2" src/u2.py 66; HU2="$(git -C "$(wt "$U2")" rev-parse HEAD)"
+glmr 66 660 success "$HU2" merged; echo '{"state": "opened"}' > "$FF/issue-802.json"
+has "$(J prs)" "MERGED-UNAPPROVED: $U2"; J next "$U2" >/dev/null
+printf 'POST-MERGE: CLEAN\n\nAll criteria hold on main.\n' > "$(jd "$U2")/post-merge.md"
+out="$(J next "$U2")"; first "$out" "DONE: merged (merged before the approver; post-merge review CLEAN)"
+has "$out" "CLOSED: #802 (job $U2"; field "$U2" "j['stage']" merged
+# U3: the approver had written MERGE before the forge merged: an ordinary merge
+U3="$(newjob --issue 803 "zq approved merged")"; toapprove "$U3" src/u3.py 67; HU3="$(git -C "$(wt "$U3")" rev-parse HEAD)"
+merge_decision "$U3"; glmr 67 670 success "$HU3" merged; echo '{"state": "opened"}' > "$FF/issue-803.json"
+out="$(J prs)"; has "$out" "MERGED: $U3"; lacks "$out" "MERGED-UNAPPROVED: $U3"; has "$out" "CLOSED: #803"
+field "$U3" "j['stage'], 'merged_unapproved' in j" "merged False"
+# the auto-merge gate refuses a job that is not at deliver/pr-open (auto_merge_held or not)
+python3 - <<'PY'
+import importlib.machinery, importlib.util, json, os, sys
+c = json.load(open(".factory/config.json")); c["delivery"].update(auto_merge=True, draft=False, auto_merge_held=True)
+json.dump(c, open(".factory/config.json", "w"))
+PY
+U4="$(newjob --issue 804 "zq external merge")"; toapprove "$U4" src/u4.py 68; HU4="$(git -C "$(wt "$U4")" rev-parse HEAD)"
+python3 - "$R/.factory/job" "$U4" <<'PY' && ok || bad "the auto-merge gate let a job at approve through"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("job", sys.argv[1]); spec = importlib.util.spec_from_loader("job", loader)
+job = importlib.util.module_from_spec(spec); loader.exec_module(job)
+j = job.load(sys.argv[2]); allowed, reasons, held = job.auto_merge_gate(j)
+assert not allowed and any("auto-merge only at deliver/pr-open" in r for r in reasons), reasons
+PY
+merge_decision "$U4"; out="$(J next "$U4")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: yes"
+has "$out" "mark it ready (delivery.draft is false)"
+first "$(J may-auto-merge 68)" "AUTO-MERGE: yes ($U4 at deliver"
+J delivered "$U4" pr-open >/dev/null; field "$U4" "j['stage']" pr-open
+J may-auto-merge "$U4" >/dev/null; [ $? = 0 ] && ok || bad "may-auto-merge on a delivered job: exit not 0"
+# a merge outside the factory: .factory/ci's refresh sees it and runs job prs at once (merged + close-issues)
+glmr 68 680 success "$HU4" merged; echo '{"state": "opened"}' > "$FF/issue-804.json"
+git remote set-url origin "https://gitlab.example/g/p.git"
+out="$("$R/.factory/ci" "$U4" --ttl 0)"; has "$out" "$U4: MERGED: $U4"; has "$out" "$U4: CLOSED: #804 (job $U4"
+git remote set-url origin "$T/origin.git"
+field "$U4" "j['stage'], j['issue_closed'] is not None" "merged True"
+# .factory/ci wait <id>: one final line for the job's head pipeline, exit 0/1
+U5="$(newjob "zq ci wait")"; toapprove "$U5" src/u5.py 69; HU5="$(git -C "$(wt "$U5")" rev-parse HEAD)"; S5="${HU5:0:12}"
+out="$("$R/.factory/ci" wait "$U5" --timeout 0)"; rc=$?
+[ "$out" = "CI: SUCCESS $U5 $S5: 2 jobs passed https://gitlab.example/g/p/-/pipelines/690" ] && ok || bad "ci wait success: '$out'"
+[ $rc = 0 ] && ok || bad "ci wait success exit $rc"
+glmr 69 691 failed "$HU5"; gljobs 691 7001 failed
+out="$("$R/.factory/ci" wait "${U5%%-*}" --timeout 0)"; rc=$?; first "$out" "CI: FAILED $U5 $S5: python:test"; [ $rc = 1 ] && ok || bad "ci wait failed exit $rc"
+[ "$(wc -l <<<"$out")" = 1 ] && ok || bad "ci wait printed more than one line: $out"
+gljobs 691 1981060 failed
+out="$("$R/.factory/ci" wait "$U5" --timeout 0)"; first "$out" "CI: INFRA (OOMKilled) $U5 $S5: python:test"
+command grep -qF "/retry" <(tail -3 "$FF/calls") && bad "ci wait retried a job" || ok
+glmr 69 692 running "$HU5"; gljobs 692 7002 running
+out="$("$R/.factory/ci" wait "$U5" --timeout 0)"; rc=$?; first "$out" "CI: TIMEOUT $U5 $S5: still running"; [ $rc = 1 ] && ok || bad "ci wait timeout exit $rc"
+glmr 69 693 success "0000000000000000000000000000000000000000"   # an older head's pipeline never counts
+first "$("$R/.factory/ci" wait "$U5" --timeout 0)" "CI: TIMEOUT $U5 $S5: still none"
+glmr 69 693 success "$HU5" merged
+out="$("$R/.factory/ci" wait "$U5" --timeout 0)"; rc=$?; first "$out" "CI: MERGED $U5 $S5"; [ $rc = 0 ] && ok || bad "ci wait merged exit $rc"
+has "$out" "MERGED-UNAPPROVED: $U5"; field "$U5" "j['stage']" merged-unapproved
+out="$("$R/.factory/ci" wait 999-nope)"; rc=$?; first "$out" "CI: ERROR no job '999-nope'"; [ $rc = 2 ] && ok || bad "ci wait unknown job exit $rc"
+printf 'POST-MERGE: CLEAN\n' > "$(jd "$U5")/post-merge.md"; J next "$U5" >/dev/null
+# preview cleanup before the infra retry (ci.preview_cleanup_job): prompt-library !706, job 1978792
+cat > "$FF/trace-1978792.txt" <<'LOG'
+namespace/ci-706-services-prompt-library annotated
+Error from server (AlreadyExists): error when creating "STDIN": secrets "sdp-gitlab-registry-token" already exists
+Applying tenant HelmRelease.
+helmrelease.helm.toolkit.fluxcd.io/ci-706-prompt-library-tenant configured
+error: timed out waiting for the condition on helmreleases/ci-706-prompt-library-tenant
+ERROR: Something went wrong during tenant creation. Try to increase the value for the timeout parameter, or reach out to the SURF Developer Platform team.
+ERROR: Job failed: command terminated with exit code 1
+LOG
+pvjobs() {  # pvjobs <pipeline id>: a failed preview deploy, its manual cleanup job, a green lint
+  printf '[{"id": 1978792, "name": "kubernetes:deploy-preview", "stage": "deploy", "status": "failed", "web_url": "https://gitlab.example/g/p/-/jobs/1978792"}, {"id": 9100, "name": "kubernetes:deploy-preview:cleanup", "stage": "deploy", "status": "manual", "web_url": "https://gitlab.example/g/p/-/jobs/9100"}, {"id": 5, "name": "lint", "stage": "test", "status": "success", "web_url": "https://gitlab.example/g/p/-/jobs/5"}]' > "$FF/jobs-$1.json"
+}
+pvcfg() { python3 - "$1" <<'PY'
+import json, sys
+c = json.load(open(".factory/config.json"))
+c.pop("ci", None)
+if sys.argv[1] != "off":
+    c["ci"] = {"preview_cleanup_job": "kubernetes:deploy-preview:cleanup"}
+json.dump(c, open(".factory/config.json", "w"))
+PY
+}
+pvcfg off; echo 70 > "$FF/next_iid"
+P1="$(newjob "zq preview plain")"; tovalidate "$P1" src/p1.py; HP1="$(git -C "$(wt "$P1")" rev-parse HEAD)"
+glmr 70 700 failed "$HP1"; pvjobs 700; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$P1")"; has "$out" "CI: INFRA (deploy environment timed out), retried: kubernetes:deploy-preview"
+command grep -qF "/play" "$FF/calls" && bad "cleanup played without ci.preview_cleanup_job" || ok
+park "$P1"
+pvcfg on; echo '{"id": 9100, "status": "success"}' > "$FF/job-9100.json"
+P2="$(newjob "zq preview cleanup")"; tovalidate "$P2" src/p2.py; HP2="$(git -C "$(wt "$P2")" rev-parse HEAD)"
+glmr 71 710 failed "$HP2"; pvjobs 710; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$P2")"; first "$out" "VALIDATE: PENDING"
+has "$out" "CI: INFRA (preview deploy failed (timed out waiting for the condition)), preview cleanup kubernetes:deploy-preview:cleanup: success, retried: kubernetes:deploy-preview"
+play="$(grep -n "jobs/9100/play" "$FF/calls" | cut -d: -f1)"; poll="$(grep -n "api projects/:id/jobs/9100$" "$FF/calls" | head -1 | cut -d: -f1)"
+retry="$(grep -n "jobs/1978792/retry" "$FF/calls" | cut -d: -f1)"
+[ -n "$play" ] && [ -n "$poll" ] && [ -n "$retry" ] && [ "$play" -lt "$poll" ] && [ "$poll" -lt "$retry" ] && ok || bad "not play, wait, then retry: $(cat "$FF/calls")"
+command grep -qF "jobs/9100/retry" "$FF/calls" && bad "the cleanup job was retried instead of played" || ok
+field "$P2" "json.load(open('$(jd "$P2")/round-1/validate.json'))['infra_retry']['cleanup']" "preview cleanup kubernetes:deploy-preview:cleanup: success"
+park "$P2"
+# the cleanup does not finish in time: the deploy is retried anyway, and the line says so
+echo '{"id": 9100, "status": "running"}' > "$FF/job-9100.json"
+P3="$(newjob "zq preview slow")"; tovalidate "$P3" src/p3.py; HP3="$(git -C "$(wt "$P3")" rev-parse HEAD)"
+glmr 72 720 failed "$HP3"; pvjobs 720; : > "$FF/calls"
+out="$(FACTORY_CI_CLEANUP_WAIT=0 "$R/.factory/precheck" --validate "$P3")"
+has "$out" "preview cleanup kubernetes:deploy-preview:cleanup still running after 0s, retried: kubernetes:deploy-preview"
+command grep -qF "jobs/1978792/retry" "$FF/calls" && ok || bad "deploy not retried after a slow cleanup"
+park "$P3"; pvcfg off
 sed -i '/^- Validate/,$d' .factory/repo.md
 unset FACTORY_VALIDATE_BUDGET FACTORY_CI_POLL
 export PATH="$OLDPATH3"; cp "$T/config.infra" .factory/config.json

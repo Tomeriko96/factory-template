@@ -95,8 +95,8 @@ reviewer or builder; `routing.*` in config.json tunes it. Details: `commands/rou
 yourself. It applies the state machine under a lock, from the files the agents wrote:
 job ids and ports, worktrees, rounds and their budget, verdicts, precheck, REWORK, resumes,
 the queue and capacity, delivery bookkeeping and cleanup. Stages: `queued`, `spec`,
-`build`, `review`, `approve`, `deliver` (approved, delivery pending), and at rest
-`needs-human`, `merged`, `pushed`, `pr-open`, `superseded`.
+`build`, `review`, `approve`, `deliver` (approved, delivery pending), `merged-unapproved`
+(post-merge review), and at rest `needs-human`, `merged`, `pushed`, `pr-open`, `superseded`.
 
 The driving loop, for every command that moves a job: run the command, read the first
 line of its output, act, and call `.factory/job next <id>` again:
@@ -129,10 +129,10 @@ line of its output, act, and call `.factory/job next <id>` again:
   tests, never with coverage (coverage is left to CI). `VALIDATE: FAIL` → the script builds
   round N+1 with validate.md as a blocking finding; it is a factory script, not you running
   tests, so the rule below does not forbid it. With `validate.mode: ci` the same command runs
-  nothing locally: it pushes `factory/<id>` (never forced), opens the PR/MR if CI needs one
-  (`PR:` line in validate.md; `job next` records it as the job's `pr_url`), and waits for that
-  commit's pipeline through `.factory/ci` (bounded polls inside the call, then `PENDING`; never a
-  sleep loop of yours). A failing pipeline is `VALIDATE: FAIL` with the failing jobs and their log
+  nothing locally: it pushes `factory/<id>` (never forced), opens the PR/MR if CI needs one, always
+  as a **draft** until delivery (`PR:` line in validate.md; `job next` records it as the job's `pr_url`), and waits for that
+  commit's pipeline through `.factory/ci` (bounded polls inside the call, then `PENDING`: start
+  `.factory/ci wait <id>` in the background, see **Waiting on CI**, then run it again). A failing pipeline is `VALIDATE: FAIL` with the failing jobs and their log
   tails, exactly like a local failure; `VALIDATE: ERROR <why>` (push rejected, PR/MR not opened, no
   pipeline, the forge not answering) sends the job to `needs-human`. A pipeline that failed only on
   infrastructure (OOMKilled, exit 137, runner/scheduler failure, a registry/Harbor push error after
@@ -146,6 +146,9 @@ line of its output, act, and call `.factory/job next <id>` again:
 - `ACTION: push` → only in a sync: read `commands/sync.md` first.
 - `WAIT: …` / `DONE: …` → report it in one line (with `NEXT:` if given) and stop.
 - `STARTED: <id>` (a queued job got a slot) → drive that job with `job next <id>` too.
+- `MERGED-UNAPPROVED: <id> …` (`job prs`, `.factory/ci`): the forge merged its PR/MR before the approver
+  ran; the job is at `merged-unapproved`. Always report it (never a quiet reply), then `job next <id>`:
+  the approver runs as a post-merge review; each finding is filed as an issue (`FILED: #N`), then `merged`.
 - `ERROR: …` → nothing changed; report it, never work around it by editing job.json.
 
 `.factory/job list` shows all jobs and capacity; `.factory/job show <id>` one job and what it
@@ -418,7 +421,7 @@ When `ACTION: deliver` prints a `PR: <url> is already open` line (the CI validat
 push the branch again (a no-op when nothing changed), keep that PR/MR, replace its title and
 description from the PR text (`gh pr edit <url> --title "<title>" --body-file <Job>/pr-body.md`;
 `glab mr update <iid> --title "<title>" --description "$(cat <Job>/pr-body.md)"`) and, when the line
-says so (it was a draft and `delivery.draft` is false), mark it ready (`gh pr ready <url>`;
+says so (it is a draft until delivery and `delivery.draft` is false), mark it ready (`gh pr ready <url>`;
 `glab mr update <iid> --ready`).
 
 - `github`: if `gh pr view factory/<job-id> --json url` already finds one, reuse it.
@@ -441,7 +444,8 @@ auto-merge (switch it off if it is on: `gh pr merge <nr> --disable-auto`, or Git
 merge: never merge directly (except `delivery.auto_merge_held` on GitHub), never skip checks or retry
 them (except the one automatic `CI: INFRA` retry), never touch approval rules, never ask the forge to
 delete the branch (except that `auto_merge_held` case). Report whether auto-merge is on in the same
-line as the URL.
+line as the URL. Never switch auto-merge on for a PR/MR whose job is not at `deliver`/`pr-open` (a
+validation draft): `.factory/job may-auto-merge <nr>` answers (exit 0 = yes; 1 = no; 3 = no factory job).
 - For switching auto-merge on or off, and `AUTO-MERGE: yes (held: …)` (the exact forge commands, how to verify, what to do when it does not stick): read `commands/auto-merge.md` first.
 
 ### After delivery, and when a job ends in `needs-human`/`superseded`
@@ -514,6 +518,11 @@ Builders and reviewers run only targeted tests; the full suite runs once per rou
   notification wakes you, then retry the pipeline or the push once (`.factory/job prs` /
   `/factory sync` for the PR/MR state) and schedule the next one if it still fails. Keep the work
   committed locally while the forge is down; push once it is back.
+- **Waiting on CI.** Whenever you wait on a pipeline (`VALIDATE: PENDING` in ci mode, after a push,
+  a sync or a `CI: INFRA` retry), start `.factory/ci wait <id>` with the Bash tool's `run_in_background`
+  (one per job); its final line (`CI: SUCCESS|FAILED|INFRA|MERGED|CLOSED|TIMEOUT …`) wakes you: then
+  run the step again, `job prs`, or a new wait on `TIMEOUT`. Never post "waiting on the pipeline"
+  without such a wait running, and never idle or poll instead.
 - **Quiet notifications.** A background notification (a task or agent finished, a watch woke
   you) that changes no job state gets a reply of at most one word ("waiting"), or none; never
   a status line that repeats the last one. Post a status line only on a state change (built,

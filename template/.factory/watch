@@ -11,7 +11,7 @@
   .factory/watch --json       the board as JSON (for scripts)
   .factory/watch --tmux       open the board in a split pane at the bottom
 
-Sections, in this order (empty ones hidden): NEEDS YOU (needs-human, with the reason and
+Sections, in this order (empty ones hidden): NEEDS YOU (needs-human or merged-unapproved, with the reason and
 the next command) · RUNNING (spec/build/review/approve/deliver or a sync: what runs now,
 the heavy command in its worktree) · QUEUED · OPEN PRs (age, CI with failing checks named,
 mergeability) · DONE (counts; listed with --all or `a`).
@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.realpath(__file__))  # <repo>/.factory (or the template's)
 ACTIVE = ("spec", "build", "review", "approve", "deliver")
 DONE = ("merged", "pushed", "superseded")
+UNFINISHED = ("queued", "needs-human") + ACTIVE   # as .factory/ci watches them
 SECTIONS = [("needs", "NEEDS YOU", "red"), ("running", "RUNNING", "cyan"), ("queued", "QUEUED", "dim"),
             ("prs", "OPEN PRs", "green"), ("other", "UNKNOWN STAGE", "yellow"), ("done", "DONE", "dim")]
 AGENT = [(r"^spec$", "spec-writer"), (r"^acceptance$", "acceptance-writer"), (r"^build-\d+$", "builder"), (r"^review-\d+$", "reviewers"),
@@ -321,8 +322,12 @@ def merge_state(j, ci):
         return "conflict → sync", "red"
     if m == "behind":
         return "behind base", "yellow"
-    if m in ("not_open", "merged", "closed"):  # the forge says it is no longer open: the job's state is stale
-        return "no longer open → sync", "yellow"
+    if m == "merged":  # merged on the forge, the job not yet: .factory/ci runs `job prs` on its next refresh
+        return "merged on the forge → /factory status", "yellow"
+    if m == "closed":  # closed without merge: a human decides
+        return "closed without merge → human", "red"
+    if m == "not_open":
+        return "no longer open → /factory status", "yellow"
     if "draft" in m:
         return "draft", "dim"
     if m in ("blocked", "not_approved", "discussions_not_resolved"):
@@ -349,7 +354,8 @@ class CIRefresher:
         if self.proc is not None and self.proc.poll() is None:
             return
         cands = [r for r in repos if os.path.exists(os.path.join(r.fd, "ci"))
-                 and any(j.get("stage") == "pr-open" for j in r.jobs)]
+                 and any(j.get("stage") == "pr-open" or (j.get("pr_url") and j.get("stage") in UNFINISHED)
+                         for j in r.jobs)]   # a validation PR/MR too: a merge before the approver is caught
         if not cands:
             return
         todo = cands if wait else [cands[self.i % len(cands)]]
@@ -368,7 +374,7 @@ class CIRefresher:
 
 def section_of(j):
     st = j.get("stage")
-    if st == "needs-human":
+    if st in ("needs-human", "merged-unapproved"):
         return "needs"
     if st in ACTIVE or j["syncing"]:
         return "running"
@@ -436,6 +442,8 @@ def now_line(j):
 def next_command(j):
     """What the user would type next for this job, or None."""
     jid, sec = j["id"], section_of(j)
+    if j.get("stage") == "merged-unapproved":   # merged before the approver: the post-merge review
+        return f"/factory resume {jid}"
     if sec == "needs":
         if j.get("adopted"):   # an adopted PR/MR: the factory only patches its conflicts
             return f"/factory sync {jid}"
@@ -448,8 +456,10 @@ def next_command(j):
     if sec == "prs":
         m, _ = merge_state(j, j["_repo"].ci(jid))
         if j.get("adopted"):
-            return f"/factory sync {jid}" if m.startswith(("conflict", "no longer open")) else None
-        return f"/factory sync {jid}" if m.startswith(("conflict", "no longer open")) else f'/factory rework {jid} "<review comments>"'
+            return f"/factory sync {jid}" if m.startswith("conflict") else None
+        if m.startswith(("merged", "no longer open")):
+            return "/factory status"
+        return f"/factory sync {jid}" if m.startswith("conflict") else f'/factory rework {jid} "<review comments>"'
     if j.get("stage") == "pushed":
         return f"/factory deliver {jid} pr"
     return None

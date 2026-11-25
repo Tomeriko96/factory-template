@@ -10,7 +10,8 @@
                                         prints `VALIDATE: PENDING` and exits 124 (run it again).
                                         With `validate.mode: ci` (config.json, `pr` delivery) it runs
                                         nothing locally: it pushes the job branch, opens the PR/MR when
-                                        `validate.open_pr`, and waits for that commit's pipeline on the
+                                        `validate.open_pr` (always a draft until delivery; an open ready
+                                        one is made a draft again), and waits for that commit's pipeline on the
                                         forge (through .factory/ci); `VALIDATE: ERROR <why>` when the
                                         push, the PR/MR or the pipeline cannot be had (a human looks).
                                         A pipeline that failed only on infrastructure (OOMKilled, exit
@@ -268,8 +269,14 @@ def find_or_open_pr(job, cfg, draft, job_dir):
                 found = json.loads(out)
             except ValueError:
                 found = []
+            if found and not found[0].get("isDraft"):   # ready (a rework of a delivered job): draft again
+                rc, out, err = sh(["gh", "pr", "ready", found[0].get("url") or "", "--undo"], cwd=REPO)
+                if rc != 0:
+                    return None, False, (f"{found[0].get('url')} is ready for review and could not be made a draft "
+                                         f"(gh pr ready --undo: {(err or out).strip()[-200:]}); a ready PR/MR before the "
+                                         "approver could be merged")
             if found:
-                return found[0].get("url"), bool(found[0].get("isDraft")), None
+                return found[0].get("url"), True, None
         rc, out, err = sh(["gh", "pr", "create", "--base", base, "--head", branch, "--title", title,
                            "--body-file", bf] + (["--draft"] if draft else []), cwd=REPO)
         urls = re.findall(r"https?://\S+/pull/\d+", out)
@@ -281,8 +288,15 @@ def find_or_open_pr(job, cfg, draft, job_dir):
             found = json.loads(out) if rc == 0 and out.strip() else []
         except ValueError:
             found = []
+        if found and not (found[0].get("draft") or found[0].get("work_in_progress")):   # ready: draft again
+            t = str(found[0].get("title") or title)
+            rc, out, err = sh(["glab", "api", "-X", "PUT", f"projects/:id/merge_requests/{found[0].get('iid')}",
+                               "-f", f"title=Draft: {t}"], cwd=REPO)
+            if rc != 0:
+                return None, False, (f"{found[0].get('web_url')} is ready for review and could not be made a draft "
+                                     f"({(err or out).strip()[-200:]}); a ready MR before the approver could be merged")
         if found:
-            return found[0].get("web_url"), bool(found[0].get("draft") or found[0].get("work_in_progress")), None
+            return found[0].get("web_url"), True, None
         rc, out, err = sh(["glab", "api", "-X", "POST", "projects/:id/merge_requests",
                            "-f", f"source_branch={branch}", "-f", f"target_branch={base}",
                            "-f", f"title={'Draft: ' if draft else ''}{title}", "-f", f"description={open(bf).read()}"], cwd=REPO)
@@ -318,6 +332,9 @@ def validate_ci(job, job_dir, rdir, rnd, head, cfg):
         lines = [f"VALIDATE: {word}", f"Head: {head}"]
         lines += [f"PR: {pr} ({'draft' if state.get('pr_draft') else 'ready'}, opened for the CI validation)"] if pr else []
         lines += [f"Pipeline: {state['pipeline_url']}"] if state.get("pipeline_url") else []
+        if v.get("draft") is False:
+            body = body + ["", "NOTE: validate.draft is deprecated and ignored (v0.17.0): the validation's PR/MR is "
+                           "always a draft until delivery; delivery marks it ready (delivery.draft)."]
         text = "\n".join(lines + [""] + body) + "\n"
         save()
         open(out, "w").write(text)
@@ -333,8 +350,9 @@ def validate_ci(job, job_dir, rdir, rnd, head, cfg):
         state.update(pushed=head, pushed_at=time.time())
         save()
     if v.get("open_pr", True) and not state.get("pr_url"):
-        draft = v.get("draft") if isinstance(v.get("draft"), bool) else (cfg.get("delivery") or {}).get("draft", True)
-        url, is_draft, err = find_or_open_pr(job, cfg, draft, job_dir)
+        # Always a draft until delivery (v0.17.0): a ready PR/MR at validation got auto-merge switched on
+        # by hand and merged before the approver ran (prompt-library !711). validate.draft is ignored.
+        url, is_draft, err = find_or_open_pr(job, cfg, True, job_dir)
         if err:
             return finish("ERROR the PR/MR for the CI pipeline could not be opened", [err])
         state.update(pr_url=url, pr_draft=is_draft)
@@ -372,11 +390,14 @@ def validate_ci(job, job_dir, rdir, rnd, head, cfg):
                 infra = ci.infra_reason(res.get("jobs") or [], logs) if p == "failed" and \
                     all(j.get("status") == "failed" for j in bad) else None
                 if infra and not state.get("infra_retry"):
-                    keys, err = ci.retry_failed(forge, bad)
-                    state["infra_retry"] = {"reason": infra, "keys": keys, "at": time.time(), "error": err}
+                    # a failed preview deploy (ci.preview_cleanup_job): the cleanup job runs first
+                    keys, err, note = ci.retry_infra(forge, bad, res.get("jobs") or [], logs=logs)
+                    state["infra_retry"] = {"reason": infra, "keys": keys, "at": time.time(), "error": err,
+                                            **({"cleanup": note} if note else {})}
                     save()
                     if keys:
-                        state["infra_retry"]["line"] = f"CI: INFRA ({infra}), retried: " + ", ".join(j["name"] for j in bad)
+                        state["infra_retry"]["line"] = (f"CI: INFRA ({infra}), " + (f"{note}, " if note else "")
+                                                        + "retried: " + ", ".join(j["name"] for j in bad))
                         save()
                         continue
                 if infra:

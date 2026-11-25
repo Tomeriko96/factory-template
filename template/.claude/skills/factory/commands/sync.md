@@ -8,10 +8,14 @@ one `SYNC:`/`RUN:` pair per PR/MR that conflicts with or is behind the base. It 
 **unfinished** job (queued, running, `needs-human`) that has a PR/MR already (`validate.mode: ci` opens
 it before delivery) or a pushed branch with an open one: `OPEN: <id> …: job at <stage>, pipeline
 <state>` (count them as open MRs; never conclude "no open MRs" from the `pr-open` jobs alone),
-`MERGED:` (merged on the forge while the job waited at `needs-human`: marked merged), and
+`MERGED:` (merged on the forge while the job waited at `needs-human`, `queued` or `deliver`, or after an
+approver MERGE: marked merged, issues closed), `MERGED-UNAPPROVED:` (merged before the approver: the job
+goes to `merged-unapproved`; report it loudly and run `job next <id>`, the post-merge review), `CLOSED:`
+(closed without merge: for the human), and
 `RESUME: <id>` (its last validation failed on infrastructure and the head pipeline is green now:
 the validation counts as passed, run `job next <id>`; never build another round for it). After a
-long pause run `job prs` before anything else. What it asks the forge:
+long pause run `job prs` before anything else. `.factory/ci` (the board's refresh, `ci wait`) runs `job prs
+<id>` by itself as soon as it sees a job's PR/MR merged or closed. What it asks the forge:
 
 - `gitlab`: `glab api "projects/:id/merge_requests/<iid>"` → conflict when
   `has_conflicts` is true or `detailed_merge_status` is `conflict` or `need_rebase`.

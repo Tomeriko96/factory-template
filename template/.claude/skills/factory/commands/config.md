@@ -63,13 +63,21 @@ Part of the factory skill: SKILL.md's rules apply here too. Moved out of SKILL.m
   is how often a `BUILD: BLOCKED` is retried one step up in the same round; `routing.security_floor`
   and `routing.security_floor_globs` set when security leaves sonnet. See **Routing**.
 - `validate` (optional): where the round's full validation runs. `{"mode": "local"}` (default):
-  repo.md's Validate commands through `heavy` on this machine. `{"mode": "ci", "open_pr": true|false,
-  "draft": true|false}` (setup writes it when `.factory/forgecheck` finds CI that runs the suite for
+  repo.md's Validate commands through `heavy` on this machine. `{"mode": "ci", "open_pr": true|false}`
+  (setup writes it when `.factory/forgecheck` finds CI that runs the suite for
   a job branch and delivery is `pr`): the validation step pushes the job branch, opens the PR/MR when
-  `open_pr` (a draft when `draft`, else as `delivery.draft`), and waits for that commit's pipeline on
+  `open_pr` (always a draft until delivery, since v0.17.0: `validate.draft` is deprecated and ignored,
+  an open ready one is made a draft again; delivery marks it ready per `delivery.draft`), and waits for that commit's pipeline on
   the forge, without a heavy slot; a job delivered `local`/`push` still validates locally. Optional
   `poll_s` (30), `no_pipeline_min` (10: no pipeline for the pushed commit by then = `VALIDATE: ERROR`),
   `timeout_min` (180).
+- `ci` (optional): `{"preview_cleanup_job": "<job name>", "preview_jobs": ["<glob>", …]}`. A failed
+  preview deploy (a job matching `preview_jobs`, default `*preview*`, whose log shows a Helm upgrade
+  failure, a failed pre-upgrade hook job or `timed out waiting for the condition`) counts as
+  infrastructure; before its one retry the factory plays (manual) or retries `preview_cleanup_job` in the
+  same pipeline (GitLab only) and waits for it (`FACTORY_CI_CLEANUP_WAIT`, 420 s), so the deploy starts
+  on a fresh preview namespace. Without the key nothing changes. prompt-library:
+  `{"preview_cleanup_job": "kubernetes:deploy-preview:cleanup"}`.
 - `ui_review` (optional, default `auto`) and `ui_page_globs`: the form of the ux/ui reviews, see
   **Reviewers**.
 - `worktree_seed` (optional, default `true`): a new job worktree gets the main checkout's

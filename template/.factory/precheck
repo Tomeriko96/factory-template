@@ -511,16 +511,18 @@ def pr_section(path):
 def closing_report(nrs, text, link="Closes"):
     """(closed, partial, missing) for the issues nrs in a PR/MR body: closed = named on a line with a
     closing keyword (or with issues.link when that is not a closing word, e.g. Refs for mirrored repos);
-    partial = {nr: note} named `Refs #N` with a `left:` note on the same line; missing = the rest."""
+    partial = {nr: note} named only with `Refs #N` (a `left:` note on the line says what is left); missing = the rest."""
     closed, partial = [], {}
     words = KEYWORD_RE if re.fullmatch(KEYWORD_RE, link, re.I) else f"(?:{KEYWORD_RE}|{re.escape(link)})"
     for line in (text or "").splitlines():
         for m in re.finditer(rf"\b{words}\b:?[ \t]+((?:#\d+(?:[ \t]*(?:,|and|&)[ \t]*)?)+)", line, re.I):
             closed += [int(x) for x in re.findall(r"#(\d+)", m.group(1))]
         left = re.search(r"\bleft:\s*(.+)", line, re.I)
-        if left:
-            for x in re.findall(r"\bRefs?\b:?[ \t]+#(\d+)", line, re.I):
-                partial.setdefault(int(x), "left: " + left.group(1).strip().rstrip(")").strip()[:200])
+        note = "left: " + left.group(1).strip().rstrip(")").strip()[:200] if left else "refs only: no closing keyword, no `left:` note"
+        if not left and re.search(r"closed? (it |them |these |this )?(by hand|manually)", line, re.I):
+            continue   # "Refs #N, closed by hand after the merge" is a promise, not partial work: it gets a closing line
+        for x in re.findall(r"\bRefs?\b:?[ \t]+#(\d+)", line, re.I):
+            partial.setdefault(int(x), note)   # `Refs #N` never closes (a note after `left:` says what is open)
     closed_set = set(closed)
     missing = [n for n in nrs if n not in closed_set and n not in partial]
     return [n for n in nrs if n in closed_set], {n: v for n, v in partial.items() if n in nrs and n not in closed_set}, missing

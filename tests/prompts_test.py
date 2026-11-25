@@ -358,6 +358,26 @@ check("**Docs rules**" in SETUP and "after the user's yes" in SETUP, "setup.md: 
 check("docs drift" in CMD_FILES.get("discovery", "") and "--docs" in CMD_FILES.get("discovery", "")
       and "label" in CMD_FILES.get("discovery", ""), "commands/discovery.md: no docs drift step")
 
+# v0.19.0: accepted audit deviations, unverified reviews, no idle "next I will", lean contexts
+HEAVY = open(os.path.join(T, ".factory", "heavy")).read()
+check("ACCEPTED: audit row <n>: <reason>" in texts.get("approver", "") and "ACCEPT_RE" in PRECHECK
+      and "def accepted_after_precheck" in JOB and "ACCEPTED_HEADING" in PRECHECK,
+      "approver/precheck/job: the ACCEPTED audit row line is out of step")
+check("VERIFIED: <reviewer>: <command> → <result>" in texts.get("approver", "") and "VERIFIED_RE" in PRECHECK
+      and '"UNVERIFIED"' in JOB, "approver/precheck/job: the VERIFIED line for an unverified review is out of step")
+for n, t in texts.items():
+    if n.startswith("reviewer-") and n != "reviewer-audit":
+        check("VERDICT: PASS (unverified: tests did not run: <reason>)" in t, f"{n}: no unverified PASS for a test run that did not run")
+check("`⏭️ not run: heavy" in texts.get("reviewer-audit", ""), "reviewer-audit: a test still queued in heavy is not ⏭️")
+check("--timeout SECS" in HEAVY and "--timeout SECS" in texts.get("builder", ""), "heavy/builder: no --timeout that skips the queue")
+check('never end a turn with "next i will' in SKILL_CORE.lower() and "start the background wait" in SKILL_CORE,
+      "SKILL.md: no rule against ending a turn on 'next I will …'")
+check("/compact" in SKILL_CORE and "300k" in SKILL_CORE, "SKILL.md: no /compact at ~300k")
+check("at most 200 characters" in JOB, "job: the prompts do not cap the agent's reply")
+for n, t in texts.items():
+    check("at most 200" in t, f"{n}: the reply is not capped")
+check("TAIL_LINES" in HEAVY and "Keep your context lean" in texts.get("builder", ""), "heavy/builder: long outputs are not capped")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

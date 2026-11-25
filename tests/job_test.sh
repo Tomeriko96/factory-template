@@ -99,7 +99,8 @@ python3 - "$out" "$(jd $A)/round-2/review-security.md" <<'PY' && ok || bad "resu
 import sys; p = sys.argv[1].split("PROMPT:\n", 1)[1].split("\n---")[0]
 assert p.startswith(f"Your previous run gave its verdict but wrote no {sys.argv[2]}; write it now from your "
                     "previous conclusion, do not redo the review"), p[:200]
-assert p.rstrip().endswith(f"write {sys.argv[2]} with the Write tool before you reply; a verdict only in your reply is lost."), p[-200:]
+assert p.rstrip().endswith(f"write {sys.argv[2]} with the Write tool before you reply; a verdict only in your reply is lost. "
+                           "Then reply in one line of at most 200 characters (the file and its verdict): details belong in the file."), p[-300:]
 PY
 has "$out" "This is a resume"
 review $A 2 security PASS
@@ -361,6 +362,100 @@ M10T="$(newjob "zq am test mixed")"; drive_audit "$M10T" src/accm.py "⚠️ off
 out="$(J next "$M10T")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$M10T"
 M11T="$(newjob "zq am test env")"; drive_audit "$M11T" src/acce.py "⚠️ ENV: load 9 on 4 cores, 1 s alone | ⚠️ TEST: wrong role · criterion verified by src/a.py:12"
 out="$(J next "$M11T")"; has "$out" "AUTO-MERGE: yes"; park "$M11T"
+
+# v0.19.0: the approver accepts an audit deviation (job 009 of onderwijsdata-chat, #1235 / !1037:
+# row 5 ⏭️ not re-run, row 9 ⚠️ accepted as design; the precheck still held it, so auto-merge was
+# switched on by hand). `ACCEPTED: audit row <n>: <reason>` in decision.md counts as confirmed.
+AUD009='| 5 | Order check across all 29 reload-using files: 860 passed (build.md) | not re-run (599 s; rows 3-4 cover the mechanism with the second polluter) | ⏭️ |
+| 9 | AC3 "whatever route is used" (spec.md) | `tools/store.py:297` (`get`), unchanged since round 1 | as in round 1: CSV, recipe, export, WS isolated; tools read the shared open-data store | ⚠️ |'
+drive_table() {
+  echo SPEC > "$(jd "$1")/spec.md"; J next "$1" >/dev/null
+  buildnew "$1" "$2"; J next "$1" >/dev/null
+  J reviewers "$1" security,code,audit >/dev/null
+  review "$1" 1 security PASS; review "$1" 1 code PASS
+  printf 'VERDICT: PASS\n\n| # | Claim (source) | Command | Measured | |\n|---|---|---|---|---|\n| 1 | AC1 (spec.md) | `t` | 176 passed | ✅ |\n%s\n' "$3" > "$(jd "$1")/round-1/review-audit.md"
+  JV "$1" >/dev/null
+}
+ACC5='ACCEPTED: audit row 5: not an acceptance criterion; rows 3 and 4 and the CI pytest job cover the order dependency'
+ACC9='ACCEPTED: audit row 9: accepted as design, tools read only the shared open-data store (documented in docs/test-environment.md)'
+A1="$(newjob "zq acc both")"; drive_table "$A1" src/acc1.py "$AUD009"
+pc="$(cat "$(jd "$A1")/precheck.md")"; first "$pc" "PRECHECK: ISSUES"; has "$pc" "audit row not confirmed: | 5 |"
+has "$pc" "audit deviation: | 9 |"
+merge_decision "$A1" "Precheck issues:
+- $ACC5
+- $ACC9
+"
+out="$(J next "$A1")"; first "$out" "ACTION: deliver"; has "$out" "AUTO-MERGE: yes"
+pc="$(cat "$(jd "$A1")/precheck.md")"; first "$pc" "PRECHECK: CLEAN"; lacks "$pc" "audit deviation"
+has "$pc" "audit row 9 accepted by the approver: accepted as design"; has "$pc" "audit row 5 accepted by the approver"
+body="$(cat "$(jd "$A1")/pr-body.md")"; has "$body" "## Audit deviations accepted by the approver"
+has "$body" "- $ACC9"; has "$body" "- $ACC5"; park "$A1"
+# only row 9 accepted: row 5 (⏭️) still blocks
+A2="$(newjob "zq acc one")"; drive_table "$A2" src/acc2.py "$AUD009"
+merge_decision "$A2" "$ACC9
+"
+out="$(J next "$A2")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"
+pc="$(cat "$(jd "$A2")/precheck.md")"; has "$pc" "audit row not confirmed: | 5 |"; has "$pc" "audit row 9 accepted"; park "$A2"
+# a reason in prose ("Accepted as design") without the structured line still blocks, as before
+A3="$(newjob "zq acc prose")"; drive_table "$A3" src/acc3.py "| 9 | AC3 | \`t\` | shared store | ⚠️ |"
+merge_decision "$A3" "- Audit row 9 (⚠️, AC3). Accepted as design.
+"
+out="$(J next "$A3")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$A3"
+# a ❌ row (a measured failure) is never accepted
+A4="$(newjob "zq acc fail")"; drive_table "$A4" src/acc4.py "| 2 | AC2 | \`t\` | exit 1 | ❌ |"
+merge_decision "$A4" "ACCEPTED: audit row 2: looks fine to me
+"
+out="$(J next "$A4")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"
+has "$(cat "$(jd "$A4")/precheck.md")" "is ❌ (a measured failure)"; lacks "$(cat "$(jd "$A4")/pr-body.md" 2>/dev/null)" "looks fine"; park "$A4"
+# the row number must match: accepting row 4 does not cover row 9
+A5="$(newjob "zq acc other row")"; drive_table "$A5" src/acc5.py "| 9 | AC3 | \`t\` | shared store | ⚠️ |"
+merge_decision "$A5" "ACCEPTED: audit row 4: something else
+"
+out="$(J next "$A5")"; has "$out" "AUTO-MERGE: no (audit has a deviation"; park "$A5"
+
+# v0.19.0: a review whose tests did not run (job 022: llm-safety got exit 75 from heavy and passed on
+# the diff alone; job 023: a vitest run still queued) is `PASS (unverified: …)`: the round goes on,
+# but the precheck holds it until the approver ran those tests (`VERIFIED: <reviewer>: …`)
+U1="$(newjob "zq unverified")"
+echo SPEC > "$(jd "$U1")/spec.md"; J next "$U1" >/dev/null
+buildnew "$U1" src/unv.py; J next "$U1" >/dev/null; J reviewers "$U1" security,code,audit >/dev/null
+review "$U1" 1 security PASS; review "$U1" 1 audit PASS
+echo 'VERDICT: PASS (unverified: tests did not run: heavy queue, exit 75 twice)' > "$(jd "$U1")/round-1/review-code.md"
+out="$(J next "$U1")"; first "$out" "ACTION: validate"; has "$out" "NOTE: unverified (their tests did not run): code"
+lacks "$out" "Build round 2"; field "$U1" "j['reviews']['code']" UNVERIFIED
+out="$(JV "$U1")"; has "$out" "AGENT: factory-approver"; has "$out" "MODEL: opus"
+pc="$(cat "$(jd "$U1")/precheck.md")"; first "$pc" "PRECHECK: ISSUES"
+has "$pc" "review-code.md (round 1): PASS unverified (unverified: tests did not run: heavy queue, exit 75 twice)"
+merge_decision "$U1"
+out="$(J next "$U1")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"
+merge_decision "$U1" "VERIFIED: code: npx vitest run src/unv.test.js → 12 passed
+"
+out="$(J next "$U1")"; has "$out" "AUTO-MERGE: yes"
+has "$(cat "$(jd "$U1")/precheck.md")" "PASS unverified, run by the approver: npx vitest run src/unv.test.js → 12 passed"
+park "$U1"
+
+# v0.19.0: the diff starts at the merge base with the fetched remote base, not the local one. In
+# onderwijsdata-chat the local main lagged origin/main after merges on the forge; once a sync merged
+# origin/main into the job branch, the other MRs' files (CI config, docs) looked like this job's.
+git push -q origin main   # the real case: local main was in step with the forge when the job started
+S1="$(newjob "zq stale base")"
+echo SPEC > "$(jd "$S1")/spec.md"; J next "$S1" >/dev/null
+buildnew "$S1" src/stale.py; J next "$S1" >/dev/null
+git clone -q "$T/origin.git" "$T/baseS"; git -C "$T/baseS" checkout -q main
+mkdir -p "$T/baseS/.github/workflows"; echo "on: push" > "$T/baseS/.github/workflows/ci.yml"
+git -C "$T/baseS" add -A; git -C "$T/baseS" commit -qm "CI change merged on the forge"; git -C "$T/baseS" push -q origin main
+git -C "$(wt "$S1")" fetch -q origin; git -C "$(wt "$S1")" merge -q --no-edit origin/main   # a sync
+[ "$(git rev-parse main)" != "$(git -C "$T/baseS" rev-parse HEAD)" ] && ok || bad "local main should lag origin/main here"
+lacks "$("$R/.factory/precheck" --hold "$S1")" ".github"
+out="$(J reviewers "$S1" security,code,audit)"; has "$out" "Diff base: $(git -C "$T/baseS" rev-parse HEAD)"
+for r in security code audit; do review "$S1" 1 $r PASS; done
+JV "$S1" >/dev/null
+pc="$(cat "$(jd "$S1")/precheck.md")"; first "$pc" "PRECHECK: CLEAN"; lacks "$pc" "ci.yml"; has "$pc" "1 files"
+has "$pc" "diff base: the merge base with the fetched remote main"
+merge_decision "$S1"; out="$(J next "$S1")"; has "$out" "AUTO-MERGE: yes"; lacks "$out" "CI/pipeline"
+# the old behaviour, for contrast: against the local main the CI file is in the diff
+has "$(git -C "$(wt "$S1")" diff --name-only main...HEAD)" ".github/workflows/ci.yml"; park "$S1"
+git fetch -q origin; git merge -q --ff-only origin/main   # local main catches up, for the scenarios below
 
 # sync: a clean base merge keeps auto-merge (switched on again after the push); resolved conflicts do not
 M12="$(newjob "zq am sync")"; drive "$M12" src/sync_me.py; merge_decision "$M12"

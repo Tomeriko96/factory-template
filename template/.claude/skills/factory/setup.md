@@ -136,7 +136,7 @@ add `--offline` if `gh`/`glab` is not logged in; write `delivery` to config.json
 
 **Limits:** write `"limits": {"active_jobs": 3, "open_prs": 5}`. On a machine with fewer than 8 cores use
 2, with 16 or more use 4. Leave `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` out
-(defaults: commands share 75% of the cores by weight, CPU not above 90%); set them only if the
+(defaults: max(2, cores − 1) commands that share the cores by weight, CPU not above 90%); set them only if the
 user says the machine is shared with other heavy work. Run `.factory/heavy status` and tell the
 user the numbers it shows. `open_prs` is the number
 of PRs/MRs that may be open at once before new jobs wait (every merge makes the others

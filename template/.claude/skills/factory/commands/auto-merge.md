@@ -6,7 +6,8 @@ got here through an approver `MERGE` (or a clean `--docs` precheck), whose prech
 `AUTO-MERGE: yes` (no issues, no audit deviation — an `⚠️ ENV: <cause, measured load>` row,
 caused only by load or network, is not one, nor a `⚠️ TEST: <why> · criterion verified by
 <evidence>` row, where a hidden acceptance test guessed wrong and the audit verified the
-criterion itself — no file in CI/pipeline config, dependencies,
+criterion itself, nor a ⚠️/⏭️ row the approver accepted with `ACCEPTED: audit row <n>: <reason>`
+in decision.md, which the PR/MR quotes — no file in CI/pipeline config, dependencies,
 containers, schema/migrations, auth or `auto_merge_never`), without an approver `HOLD:` line,
 and whose branch has no sync in which an agent resolved conflicts (a clean sync does not
 count). On `AUTO-MERGE: no (<reasons>)` open the

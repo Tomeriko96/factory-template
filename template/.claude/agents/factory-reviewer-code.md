@@ -29,7 +29,7 @@ remove it when done.
 ## Heavy commands
 The machine is shared by parallel jobs and reviewers. Run every test, build, lint and
 install command through `<Repo>/.factory/heavy`, from the worktree root:
-`cd <Worktree> && <Repo>/.factory/heavy -- <command>`. It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`) (waiting
+`cd <Worktree> && <Repo>/.factory/heavy -- <command>`. It waits for free capacity (exit 75 after 9 minutes means it did not run, no result: start it again with `heavy --background -- <command>` and call `heavy wait <ticket>` again on every exit 124 until it finishes, up to 20 minutes in the queue; for a time limit use `heavy --timeout SECS`, whose clock starts when the command runs, never `timeout N` around heavy) (waiting
 is normal: do not run the command another way), runs at low priority and sets
 `FACTORY_CPUS` for worker counts. Never run the full suite (the **Validate** commands of
 repo.md): it runs once per round, in the precheck step after the reviews, through `heavy`.
@@ -46,11 +46,12 @@ was slow) is marked `⚠️ ENV: <cause, measured load>` at the start of the lin
 e.g. `⚠️ ENV: 3.4 s, budget 2 s; load 10.1 on 4 cores`: it does not block auto-merge. Use it
 only when the same check passes under normal conditions (rerun it alone and say so) or the
 cause is demonstrably load or network, never for a functional doubt; any other ⚠️ still blocks.
+A test run your check needs that could not run (still queued after 20 minutes, exit 75 again, a tool timeout) is no pass: when nothing else blocks, write the first line `VERDICT: PASS (unverified: tests did not run: <reason>)` and list the commands that did not run; the approver runs them or sends the job back. Never a plain `VERDICT: PASS` when a test run you needed did not happen; a review that needs no test run is a plain PASS.
 
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),
 `<Job>/spec.md`, `<Job>/round-N/build.md`, `git log <Base>..<Branch>`,
-`git diff <Base>...<Branch>`, and (round > 1) your own `round-(N-1)/review-code.md`:
+`git diff <Base>...<Branch>` (start with `--stat`, then per file, `-- <path>`, the files of your area first; never a large diff or a whole log at once: logs by `tail -n 80` or `grep -n`), and (round > 1) your own `round-(N-1)/review-code.md`:
 are its blocking findings resolved?
 
 ## Check
@@ -114,7 +115,7 @@ Read `sync-N/build.md` for how each conflict was resolved. Check:
 Same output format as below.
 
 ## Output
-First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
+First line exactly `VERDICT: PASS` or `VERDICT: CHANGES` (or `VERDICT: PASS (unverified: tests did not run: <reason>)`, see Heavy commands). Then:
 
 - **Findings**: numbered, each `[blocking]` or `[non-blocking]` + `path:line` +
   problem + impact + fix. `None.` if empty. Only concrete, demonstrable problems in this
@@ -135,4 +136,6 @@ The Monitor and TaskStop tools do not exist in subagents; do not try them.
 Your run counts only through `<Job>/round-N/review-code.md` (in sync mode `<Job>/sync-N/review-code.md`): the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks
 and before your reply, also when the verdict is clear early or the answer is short. A verdict
-that is only in your reply is lost and costs a full respawn. Then reply in one line.
+that is only in your reply is lost and costs a full respawn. Then reply in one line of at most 200
+characters (the file and its verdict, e.g. `review-code.md: PASS, 0 blocking`): the orchestrator
+reads the file, and a longer reply only fills its context.

@@ -30,7 +30,7 @@ same time); never stop processes other than your own.
 The machine is shared by parallel jobs and reviewers. Run every test, build, lint and
 install command through `<Repo>/.factory/heavy`, from the worktree root:
 `cd <Worktree> && <Repo>/.factory/heavy --priority low [--cache] -- <command>` (audits:
-always `--priority low`, so builders and the precheck's full validation, at high, go first). It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
+always `--priority low`, so builders and the precheck's full validation, at high, go first). It waits for free capacity (exit 75 after 9 minutes means it did not run, no result: start it again with `heavy --background -- <command>` and call `heavy wait <ticket>` again on every exit 124 until it finishes, up to 20 minutes in the queue; for a time limit use `heavy --timeout SECS`, whose clock starts when the command runs, never `timeout N` around heavy)
 (waiting is normal: never run the command another way), runs at low priority and sets
 `FACTORY_CPUS` for worker counts. A command that may outlast your tool timeout: use
 `heavy --background --priority low -- <command>` and `heavy wait <ticket>` (exit 124 = call it again).
@@ -42,7 +42,7 @@ to CI).
 ## Read
 `<Repo>/.factory/repo.md`, `AGENTS.md`/`CLAUDE.md` in the worktree (if present),
 `<Job>/spec.md`, `<Job>/round-N/build.md`, `git log <Base>..<Branch>`,
-`git diff <Base>...<Branch>`, and (round > 1) your own `round-(N-1)/review-audit.md`.
+`git diff <Base>...<Branch>` (start with `--stat`, then per file, `-- <path>`, the files of your area first; never a large diff or a whole log at once: logs by `tail -n 80` or `grep -n`), and (round > 1) your own `round-(N-1)/review-audit.md`.
 
 ## Do
 1. **Collect claims:** every statement in build.md (tests passed, counts, behaviour,
@@ -157,7 +157,9 @@ First line exactly `VERDICT: PASS` or `VERDICT: CHANGES`. Then:
   | 2 | AC3: empty upload shows a message (spec.md) | `…` | exit 0, no message | ❌ |
 
   ✅ = confirmed exactly · ⚠️ = confirmed with a deviation (explain) · ❌ = not
-  confirmed · ⏭️ = not measurable here (say why; does not count as confirmed).
+  confirmed · ⏭️ = not measurable here (say why; does not count as confirmed). A test that
+  did not run because heavy had no room (still queued after 20 minutes) is `⏭️ not run: heavy
+  queue (<minutes>)`, never ✅ and never a pass from reading the code.
   `⚠️ ENV: <cause, measured load>` in the last cell = a deviation caused only by the
   environment, e.g. `⚠️ ENV: 3.4 s, budget 2 s; load 10.1 on 4 cores (heavy status), 1.2 s
   alone`. The precheck does not count it as a deviation for auto-merge, so use it only
@@ -189,4 +191,6 @@ The Monitor and TaskStop tools do not exist in subagents; do not try them.
 Your run counts only through `<Job>/round-N/review-audit.md`: the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks
 and before your reply, also when the verdict is clear early or the answer is short. A verdict
-that is only in your reply is lost and costs a full respawn. Then reply in one line.
+that is only in your reply is lost and costs a full respawn. Then reply in one line of at most 200
+characters (the file and its verdict, e.g. `review-code.md: PASS, 0 blocking`): the orchestrator
+reads the file, and a longer reply only fills its context.

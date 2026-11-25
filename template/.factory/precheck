@@ -40,11 +40,15 @@ config.json, default below); if that is the only problem the first line is
 Checks (each failing one is listed under Issues):
   - round-N/build.md exists, and spec.md too (not in docs mode: there the feature text is the spec)
   - round-N/validate.md (written by --validate) does not say `VALIDATE: FAIL`
-  - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`
+  - the latest review of every reviewer (from round 2 on only some re-run) starts with `VERDICT: PASS`;
+    `VERDICT: PASS (unverified: tests did not run: <why>)` is an issue until decision.md has
+    `VERIFIED: <reviewer>: <command → result>` (the approver ran those tests; then a note)
   - audit table: no row marked ❌ or ⏭️ (a ⚠️ row is listed as a note, not an issue; a row whose
     only ⚠️ marks are `⚠️ ENV: <cause with the measured load, or a network cause>` (environment-only)
     or `⚠️ TEST: <why the hidden acceptance test is wrong> · criterion verified by <evidence>`
-    (test-only): noted, but no deviation for the auto-merge gate)
+    (test-only): noted, but no deviation for the auto-merge gate); a ⚠️ or ⏭️ row that the approver
+    accepts in decision.md (`ACCEPTED: audit row <n>: <reason>`) is confirmed: a note, no deviation,
+    and --pr-body quotes the line (.factory/job re-runs the precheck at delivery for it); never a ❌ row
   - the diff touches nothing under .factory/ or .claude/
   - no secret-looking files (.env, keys, certificates, credentials, *.sops.* decrypted copies)
   - no secret-looking content in added lines (tokens, private keys); only the file and kind are shown
@@ -139,6 +143,60 @@ def glob_match(name, g):
 WAIVER_RE = re.compile(r"^[\s>*-]*Docs:\s*not needed\b[^:\n]*:[ \t]*(\S.*)$", re.I | re.M)
 
 
+# The approver accepts an audit row it re-measured or judged (decision.md, MERGE):
+# `ACCEPTED: audit row <n>: <reason>`. A ⚠️ or ⏭️ row with such a line is confirmed: no issue, no
+# deviation, and --pr-body quotes the reason. A ❌ row (a measured failure) is never accepted.
+ACCEPT_RE = re.compile(r"^[\s>*-]*ACCEPTED:\s*audit\s+row\s+#?(\d+)\s*[:\u2014-]\s*(\S.*)$", re.I | re.M)
+ROW_NR_RE = re.compile(r"^\s*\|\s*#?(\d+)\s*\|")
+
+
+# A review whose required test run could not run (heavy queue, a timeout): not a plain pass
+UNVERIFIED_RE = re.compile(r"^VERDICT: PASS \(unverified\b")
+# The approver ran that review's tests itself: `VERIFIED: <reviewer>: <command → result>`
+VERIFIED_RE = re.compile(r"^[\s>*-]*VERIFIED:\s*([\w-]+)\s*:\s*(\S.*)$", re.M)
+
+
+def verified_reviews(job_dir):
+    """{reviewer: what the approver ran} from the `VERIFIED: <reviewer>: …` lines of decision.md."""
+    try:
+        text = open(os.path.join(job_dir, "decision.md"), errors="replace").read()
+    except OSError:
+        return {}
+    return {m.group(1).lower(): m.group(2).strip() for m in VERIFIED_RE.finditer(text)}
+
+
+def accepted_rows(job_dir):
+    """{row number: (reason, line)} from the `ACCEPTED: audit row <n>: <reason>` lines of decision.md."""
+    try:
+        text = open(os.path.join(job_dir, "decision.md"), errors="replace").read()
+    except OSError:
+        return {}
+    return {m.group(1): (m.group(2).strip(), m.group(0).strip().lstrip(">*- ").strip()) for m in ACCEPT_RE.finditer(text)}
+
+
+def latest_audit(job_dir, rnd):
+    """The newest round-N/review-audit.md up to round rnd, or None."""
+    for r in range(rnd, 0, -1):
+        p = os.path.join(job_dir, f"round-{r}", "review-audit.md")
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def accepted_deviations(job_dir, audit):
+    """The approver's ACCEPTED lines that cover a ⚠️ or ⏭️ row (not ❌) of the audit table:
+    {row number: (reason, line)}."""
+    acc = accepted_rows(job_dir)
+    if not acc or not audit:
+        return {}
+    out = {}
+    for line in open(audit, errors="replace"):
+        nr = ROW_NR_RE.match(line)
+        if nr and nr.group(1) in acc and "❌" not in line and ("⚠" in line or "⏭" in line):
+            out[nr.group(1)] = acc[nr.group(1)]
+    return out
+
+
 def docs_rules(cfg):
     """(valid rules, problems) from config.json `docs.rules`: [{"code": [globs], "docs": [globs], "why": str}]."""
     raw = cfg.get("docs").get("rules") if isinstance(cfg.get("docs"), dict) else None
@@ -199,7 +257,7 @@ def job_waiver_texts(job_dir, rnd):
 
 def diff_names(job):
     wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch")
-    names = git("diff", "--name-only", "--no-renames", "-z", f"{base}...{branch}", cwd=wt) \
+    names = git("diff", "--name-only", "--no-renames", "-z", f"{diff_base(job)}...{branch}", cwd=wt) \
         if wt and base and branch and os.path.isdir(wt) else None
     return None if names is None else [n for n in names.split("\0") if n]
 
@@ -219,8 +277,45 @@ def hold_class(name, extra):
 
 
 def git(*args, cwd):
-    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=120,
+                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     return r.stdout if r.returncode == 0 else None
+
+
+_DIFF_BASE = {}
+
+
+def diff_base(job):
+    """The commit the job's diff starts at: the newer of the branch's merge bases with the local
+    `base` and with `<remote>/<base>`, fetched first (`git fetch <remote> <base>`, 60 s at most;
+    FACTORY_NO_FETCH=1 skips it). The local base lags the forge after merges there: once a sync
+    merged the remote base into the job branch, `<local base>...<branch>` would count the other
+    MRs' files (CI config, docs, auth) as this job's and hold it for nothing. Falls back to `base`."""
+    wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch")
+    key = (wt, base, branch)
+    if key in _DIFF_BASE:
+        return _DIFF_BASE[key]
+    if not (wt and base and branch and os.path.isdir(wt)):
+        return base
+    remote = (load_config().get("delivery") or {}).get("remote") or "origin"
+    if os.environ.get("FACTORY_NO_FETCH") != "1" and re.match(r"^[\w.-]+$", remote) and \
+            git("remote", "get-url", remote, cwd=wt) is not None:
+        sh(["git", "fetch", "-q", "--no-tags", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}"],
+           cwd=wt, timeout=60)
+    bases = [b.strip() for b in (git("merge-base", ref, branch, cwd=wt)
+                                 for ref in (base, f"refs/remotes/{remote}/{base}")) if b and b.strip()]
+    pick = None
+    for b in bases:
+        if all(o == b or git("merge-base", "--is-ancestor", o, b, cwd=wt) is not None for o in bases):
+            pick = b
+            break
+    if pick is None and bases:   # diverged (local commits on the base that the remote lacks): the closer one
+        pick = min(bases, key=lambda b: int((git("rev-list", "--count", f"{b}..{branch}", cwd=wt) or "0").strip() or 0))
+    _DIFF_BASE[key] = pick or base
+    return pick
 
 
 def is_doc(name, globs):
@@ -255,7 +350,8 @@ def hold_main(job_id):
     with open(os.path.join(HERE, "jobs", job_id, "job.json")) as f:
         job = json.load(f)
     wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch")
-    names = git("diff", "--name-only", "--no-renames", "-z", f"{base}...{branch}", cwd=wt) if wt and base and branch else None
+    names = git("diff", "--name-only", "--no-renames", "-z", f"{diff_base(job)}...{branch}", cwd=wt) \
+        if wt and base and branch else None
     if names is None:
         sys.exit("cannot diff the job branch")
     extra = extra_hold_globs()
@@ -629,6 +725,7 @@ def validate_main(job_id, rnd=None):
 # ---------- PR/MR body: one closing line per issue ----------
 FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
 HELD_HEADING = "## Auto-merge hold overridden"
+ACCEPTED_HEADING = "## Audit deviations accepted by the approver"
 KEYWORD_RE = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
 
 
@@ -707,6 +804,10 @@ def pr_body_main(job_id):
         quote = [w for _, _, w in waived if w not in body]
         if quote:   # a docs rule waived outside the PR text (build.md): whoever reviews the PR/MR sees why
             lines += list(dict.fromkeys(quote)) + [""]
+    acc = [line for _, line in accepted_deviations(job_dir, latest_audit(job_dir, int(job.get("round") or 1))).values()
+           if line not in body]
+    if acc:   # the approver accepted an audit deviation: whoever reviews the PR/MR sees which and why
+        lines += [ACCEPTED_HEADING, ""] + [f"- {a}" for a in acc] + [""]
     held = (job.get("auto_merge") or {}).get("held") or []
     if held:   # delivery.auto_merge_held: auto-merge is on although the factory would hold it; say why here
         lines += [HELD_HEADING, "", "Auto-merge is on (`delivery.auto_merge_held`), although the factory would "
@@ -806,10 +907,18 @@ def main():
     elif not reviews:
         issues.append(f"no reviews in round-{rnd}")
     info = []
+    verified = verified_reviews(job_dir)
     for f in reviews:
         r, path = latest[f]
         fl = first_line(path) or ""
-        if fl != "VERDICT: PASS":
+        if UNVERIFIED_RE.match(fl):
+            who = f[7:-3]
+            if who in verified:
+                notes.append(f"{f} (round {r}): PASS unverified, run by the approver: {verified[who]}")
+            else:
+                issues.append(f"{f} (round {r}): PASS unverified ({fl[len('VERDICT: PASS ('):].rstrip(')')}): "
+                              f"the approver runs those tests (`VERIFIED: {who}: <command> → <result>`) or sends it back")
+        elif fl != "VERDICT: PASS":
             issues.append(f"{f} (round {r}): first line is {fl!r}, not 'VERDICT: PASS'")
         text = open(path, errors="replace").read()
         info.append(f"{f[7:-3]} {text.count('[blocking]')}b/{text.count('[non-blocking]')}nb" + (f" (r{r})" if r != rnd else ""))
@@ -826,9 +935,18 @@ def main():
             notes.append(f"no full validation for round {rnd} (round-{rnd}/validate.md missing)")
 
     audit = latest.get("review-audit.md", (0, ""))[1]
+    accepted = accepted_rows(job_dir)
     if audit and os.path.exists(audit):
         for line in open(audit, errors="replace"):
             if line.lstrip().startswith("|") and "---" not in line:
+                nr = ROW_NR_RE.match(line)
+                acc = accepted.get(nr.group(1)) if nr else None
+                if acc and "❌" in line:
+                    notes.append(f"ACCEPTED: audit row {nr.group(1)} is ❌ (a measured failure): an approver's "
+                                 "ACCEPTED line does not cover it")
+                elif acc and ("⏭" in line or "⚠" in line):
+                    notes.append(f"audit row {nr.group(1)} accepted by the approver: {acc[0]}")
+                    continue
                 if "❌" in line or "⏭" in line:
                     issues.append("audit row not confirmed: " + re.sub(r"\s+", " ", line.strip())[:140])
                 elif "⚠" in line:
@@ -858,7 +976,13 @@ def main():
     files = lines = 0
     commits = "?"
     if wt and base and branch and os.path.isdir(wt):
-        numstat = git("diff", "--numstat", "--no-renames", "-z", f"{base}...{branch}", cwd=wt)
+        dbase = diff_base(job)
+        if dbase != base:
+            lb = (git("merge-base", base, branch, cwd=wt) or "").strip()
+            if lb and lb != dbase:
+                notes.append(f"diff base: the merge base with the fetched remote {base} ({dbase[:12]}); "
+                             f"the local {base} lags it")
+        numstat = git("diff", "--numstat", "--no-renames", "-z", f"{dbase}...{branch}", cwd=wt)
         if numstat is None:
             issues.append(f"cannot diff {base}...{branch} in {wt}")
         else:
@@ -886,7 +1010,7 @@ def main():
                 issues.append(f"large diff: {files} files, {lines} changed lines")
             found = set()
             patch = git("diff", "--no-renames", "--no-color", "--no-ext-diff", "-U0",
-                        f"{base}...{branch}", cwd=wt) or ""
+                        f"{dbase}...{branch}", cwd=wt) or ""
             name = None
             for line in patch.splitlines():
                 if line.startswith("+++ "):
@@ -899,7 +1023,7 @@ def main():
                             found.add((name, kind))
             for name, kind in sorted(found):
                 issues.append(f"secret-looking content in diff ({kind}): {name}")
-        commits = (git("rev-list", "--count", f"{base}..{branch}", cwd=wt) or "?").strip()
+        commits = (git("rev-list", "--count", f"{dbase}..{branch}", cwd=wt) or "?").strip()
     else:
         issues.append("worktree, base or branch missing in job.json / on disk")
 

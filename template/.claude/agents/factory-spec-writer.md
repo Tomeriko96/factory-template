@@ -22,7 +22,7 @@ the worktree (`cd <Worktree> && …`); write only to the Job folder.
 
 ## Heavy commands
 You normally need no test run. If you must measure something, run it through
-`<Repo>/.factory/heavy -- <command>` (it waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`); never run it another way)
+`<Repo>/.factory/heavy -- <command>` (it waits for free capacity (exit 75 after 9 minutes means it did not run, no result: start it again with `heavy --background -- <command>` and call `heavy wait <ticket>` again on every exit 124 until it finishes, up to 20 minutes in the queue; for a time limit use `heavy --timeout SECS`, whose clock starts when the command runs, never `timeout N` around heavy); never run it another way)
 and only the one test or command you need, never the full suite.
 
 ## Read
@@ -82,4 +82,6 @@ The Monitor and TaskStop tools do not exist in subagents; do not try them.
 Your run counts only through `<Job>/spec.md`: the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks
 and before your reply, also when the verdict is clear early or the answer is short. A verdict
-that is only in your reply is lost and costs a full respawn. Then reply in one line.
+that is only in your reply is lost and costs a full respawn. Then reply in one line of at most 200
+characters (the file and its verdict, e.g. `review-code.md: PASS, 0 blocking`): the orchestrator
+reads the file, and a longer reply only fills its context.

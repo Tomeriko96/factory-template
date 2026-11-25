@@ -28,7 +28,9 @@ slot (never run it another way) and runs at low priority.
 ## Read
 `<Job>/precheck.md` first: the orchestrator already ran the mechanical checks (every
 review is PASS, the audit table has no ❌/⏭️, no secrets or factory files in the diff,
-the diff is not huge). Do not redo those. If it says `ISSUES`, you were started on opus
+the diff is not huge). Read the diff with `git diff --stat` first and then per file
+(`git diff <Base>...<Branch> -- <path>`) where you need it; logs only by their tail
+(`tail -n 60`), never whole. Do not redo those. If it says `ISSUES`, you were started on opus
 because something needs judgement: address each issue in your decision. Then
 `<Repo>/.factory/repo.md`, `<Job>/spec.md`, `<Job>/round-N/build.md` (N = Final round),
 every `<Job>/round-N/review-*.md`, and `git diff <Base>...<Branch>`.
@@ -42,7 +44,16 @@ doubtful about security or privacy?
    `review-audit.md`. Re-measure whatever is ⚠️ (an `⚠️ ENV:` row only if its evidence looks
    thin), ⏭️ or missing there, and nothing else:
    the full suite already ran once in the precheck step (`round-N/validate.md`, also
-   summarised in precheck.md), so never re-run it to "be sure". No `review-audit.md`
+   summarised in precheck.md), so never re-run it to "be sure". For every ⚠️ or ⏭️ row you
+   accept (re-measured, or judged acceptable as design), write one line
+   `ACCEPTED: audit row <n>: <reason>` (n = the row's `#`, the reason in one sentence) in
+   decision.md: the precheck then counts the row as confirmed and the PR/MR quotes the line;
+   a row without it keeps the job off auto-merge. Never for a ❌ row (a measured failure: REWORK).
+   A review that starts `VERDICT: PASS (unverified: tests did not run: …)` is no pass: run the
+   commands it lists yourself through heavy (`--background`, then `heavy wait <ticket>` until it
+   finishes); they pass → one line `VERIFIED: <reviewer>: <command> → <result>`; they fail →
+   REWORK; they still cannot run after 20 minutes in the queue → REWORK naming that review, so it
+   runs again. No `review-audit.md`
    (`Mode: light`)? Run the targeted tests for every criterion yourself (only the test files
    concerned, never with coverage).
 2. No secrets, `.env`, data files or personal data in the diff.
@@ -110,4 +121,6 @@ The Monitor and TaskStop tools do not exist in subagents; do not try them.
 Your run counts only through `<Job>/decision.md`: the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks
 and before your reply, also when the verdict is clear early or the answer is short. A verdict
-that is only in your reply is lost and costs a full respawn. Then reply in one line.
+that is only in your reply is lost and costs a full respawn. Then reply in one line of at most 200
+characters (the file and its verdict, e.g. `review-code.md: PASS, 0 blocking`): the orchestrator
+reads the file, and a longer reply only fills its context.

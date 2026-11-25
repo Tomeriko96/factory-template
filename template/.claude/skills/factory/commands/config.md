@@ -59,8 +59,8 @@ Part of the factory skill: SKILL.md's rules apply here too. Moved out of SKILL.m
   as documentation for `--docs` (default `*.md`, `*.mdx`, `*.rst`, `*.adoc`,
   `docs/**`, `LICENSE*`, `mkdocs.yml`);
   `heavy_slots`, `cpu_budget`, `cpu_max` and `load_max` set the machine-wide limits of
-  `.factory/heavy` (defaults: at most max(2, cores/2) commands at once, together at most
-  75% of the cores, CPU not above 90%, load average ignored). See **Resources**.
+  `.factory/heavy` (defaults: at most max(2, cores − 1) commands at once, weights together at most
+  the cores, CPU not above 90%, load average ignored; before v0.19.0: cores/2 and 75%). See **Resources**.
 - `acceptance_tests` (optional): hidden acceptance tests. Missing → on for `full` jobs only;
   `true` → `full` and `light`; `false` → off; or a list of modes. See `commands/acceptance-tests.md`.
 - `routing` (optional): model and effort per spawn, and the builder's escalation ladder.

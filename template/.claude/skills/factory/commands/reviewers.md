@@ -39,3 +39,6 @@ worktree) concerns, and prints why each was chosen or skipped (`NOTE: reviewer p
 `{"llm-safety": ["agent/**", "**/prompt*"], "privacy": ["src/students/**"], "ui": ["web/**"]}`.
 A glob with a `/` matches the whole path (`x/` = that directory anywhere), one without
 the file name. Reviewers whose latest verdict is not PASS always run again.
+A review `VERDICT: PASS (unverified: tests did not run: <reason>)` is not blocking (the round goes
+on, `job next` prints `NOTE: unverified …`), but it is a precheck issue until the approver ran those
+tests (`VERIFIED: <reviewer>: …` in decision.md), and that reviewer runs again in the next round.

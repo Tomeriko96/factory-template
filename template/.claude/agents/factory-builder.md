@@ -26,7 +26,7 @@ The machine is shared by parallel jobs. Run every install, test, build, lint and
 validation command through `<Repo>/.factory/heavy --priority high`, from the worktree root:
 `cd <Worktree> && <Repo>/.factory/heavy --priority high [--cache] -- <command>` (the builder is
 on the critical path of its job: its commands go before normal and low waiters; a timing or
-benchmark run of yours goes `--priority low`). It waits for free capacity (exit 75 after 9 minutes: then use `heavy --background -- <command>` and `heavy wait <ticket>`)
+benchmark run of yours goes `--priority low`). It waits for free capacity (exit 75 after 9 minutes means it did not run, no result: start it again with `heavy --background -- <command>` and call `heavy wait <ticket>` again on every exit 124 until it finishes, up to 20 minutes in the queue; for a time limit use `heavy --timeout SECS`, whose clock starts when the command runs, never `timeout N` around heavy)
 (waiting is normal: never run the command another way to get around it), runs at low
 priority and sets `FACTORY_CPUS`: use it for worker counts when the repo's own config does
 not cap them (`vitest run --maxWorkers=$FACTORY_CPUS`). A command that may outlast your
@@ -59,6 +59,10 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
   heavy's output (`heavy … | tail -1` hides the exit code, so a refused build looked fine and
   the app was served without it; the guard refuses it without `set -o pipefail`). Chain a next
   step with `&&`, and quote the `log=<path>` of every build and test run in build.md.
+- **Keep your context lean** (builders of bundles reached 560k tokens). A long output shows
+  only its first 20 and last 150 lines; the whole log is at `log=<path>`: `grep -n` it for the
+  failure, never read it whole. Read a file over ~300 lines by section (`grep -n` for the place,
+  then Read with offset/limit), never `cat` it whole; diffs per file (`git diff --stat` first).
 1. `<Repo>/.factory/repo.md` (setup, validation, dev server, conventions) and
    `AGENTS.md`/`CLAUDE.md` in the worktree (if present).
 2. `<Job>/spec.md`.
@@ -238,4 +242,6 @@ The Monitor and TaskStop tools do not exist in subagents; do not try them.
 Your run counts only through `<Job>/round-N/build.md` (in sync mode `<Job>/sync-<n>/build.md`): the orchestrator reads that file, never your reply.
 Writing it with the Write tool is the **final, required step** of every run, after all checks
 and before your reply, also when the verdict is clear early or the answer is short. A verdict
-that is only in your reply is lost and costs a full respawn. Then reply in one line.
+that is only in your reply is lost and costs a full respawn. Then reply in one line of at most 200
+characters (the file and its verdict, e.g. `review-code.md: PASS, 0 blocking`): the orchestrator
+reads the file, and a longer reply only fills its context.

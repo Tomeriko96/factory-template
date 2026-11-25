@@ -524,13 +524,18 @@ Builders and reviewers run only targeted tests; the full suite runs once per rou
   (one per job); its final line (`CI: SUCCESS|FAILED|INFRA|MERGED|CLOSED|TIMEOUT …`) wakes you: then
   run the step again, `job prs`, or a new wait on `TIMEOUT`. Never post "waiting on the pipeline"
   without such a wait running, and never idle or poll instead.
+- **Never end a turn with "next I will …": do it now.** When the next step waits on something,
+  start the background wait (`ci wait`, `heavy wait`, a `sleep 3600` that notifies) before you end
+  the turn; after a merge or a delivery run `/factory next` yourself.
 - **Quiet notifications.** A background notification (a task or agent finished, a watch woke
   you) that changes no job state gets a reply of at most one word ("waiting"), or none; never
   a status line that repeats the last one. Post a status line only on a state change (built,
   reviews in, PR open, merged, needs-human, failed).
-- **Long sessions:** all state is on disk. After about 10 jobs have been delivered in one
-  session, or when the session feels slow, tell the user once: "state is on disk; `/clear`
-  and run `/factory status` to continue with a fresh context".
+- **Long sessions:** all state is on disk. This skill stays in your context: for a later
+  `/factory …` command follow it from there; load it again (the Skill tool, ~40 KB each time) only
+  after a `/compact` or `/clear`. Read agent files by their verdict lines, logs by their tail, never
+  whole. When your context passes ~300k tokens, at a quiet moment (no agent running, nothing asked),
+  run `/compact` keeping the job list, the queue and the agreements (or ask for it in one line).
 - **Never spawn `general-purpose` or `Explore` agents to run tests, builds or validations,
   and never run them yourself:** use the factory agents. (The guard hook covers the factory
   agents, and subagents in general where `install` set up the settings hook; do not rely

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run heavy commands (tests, builds, installs, lints) without flattening the machine.
 
-  .factory/heavy [--cache] [--weight N] [--priority high|normal|low] [--label NAME] [--wait-max SECS] -- <command…>
+  .factory/heavy [--cache] [--weight N] [--priority high|normal|low] [--label NAME] [--wait-max SECS]
+                 [--timeout SECS] [--tail N|--full-output] -- <command…>
   .factory/heavy --background [same options] -- <command…>     -> prints a ticket, returns
   .factory/heavy wait <ticket> [--timeout SECS]                  -> waits, prints the result
   .factory/heavy cancel <ticket>                                 -> stops that background run
@@ -13,12 +14,22 @@ run:    waits until the machine has room, then runs <command> at low priority in
         directory and exits with its exit code. "Room" is measured, not guessed: every heavy
         command declares a weight (cores it may use; default 3 for Node/browser/build tools
         and pre-push scripts, 1 otherwise, or --weight N), and the weights running right now,
-        on this whole machine (all repos, all factory sessions), may not exceed 75% of the
-        cores; and the CPU must not be busier than the limit (default 90%, sampled over
-        one second, not the lagging load average). The command sees FACTORY_CPUS = its
+        on this whole machine (all repos, all factory sessions), may not exceed the cores
+        (cpu_budget); and the CPU must not be busier than the limit (default 90%, sampled over
+        one second, not the lagging load average), nor the load above load_max when set. The command sees FACTORY_CPUS = its
         weight: pass it on, e.g. `vitest run --maxWorkers=$FACTORY_CPUS`.
         Foreground waits at most --wait-max (default 540s, inside a tool call's timeout);
-        exit 75 = no room in time (the command did NOT run): use --background.
+        exit 75 = no room in time (the command did NOT run, it is no result): run it again with
+        --background and call `heavy wait <ticket>` until it finishes.
+--tail N  a foreground run prints its first 20 lines, then only its last N (default 150; env
+        FACTORY_HEAVY_TAIL; 0 or --full-output = all of it) when its stdout is a terminal, a pipe
+        or a tool's capture file, not a file you redirected it to; the whole output is always in
+        the run log (named on stderr first, and in the last line). Read that log with grep or sed
+        ranges, never whole.
+--timeout  the command's own time limit, counted from when it starts running: waiting for a
+        slot never counts. After SECS the command's process group is stopped and heavy exits
+        124 ("ran SECS s"). Use it instead of `timeout N <command>` around heavy, whose clock
+        would include the queue.
         The last line of every run and `wait` is `heavy: exit=<n> log=<path>`, also on a
         refusal: the output is kept in .factory/run/heavy-run-*.log (a day). Do not pipe
         heavy's output (`| tail` hides the exit code; the guard refuses it without pipefail).
@@ -45,10 +56,12 @@ clean:  delete cached results of the given worktrees (no argument: all) and old 
 
 Limits, in order of precedence: env (FACTORY_HEAVY_SLOTS, FACTORY_CPU_BUDGET, FACTORY_CPU_MAX,
 FACTORY_LOAD_MAX, FACTORY_LOCK_DIR), `limits` in .factory/config.json (heavy_slots, cpu_budget,
-cpu_max, load_max), defaults (slots = max(2, cores/2) commands at once, cpu_budget = 75% of
-the cores, cpu_max = 90, load_max = off).
+cpu_max, load_max), defaults (slots = max(2, cores - 1) commands at once, cpu_budget = the
+cores, cpu_max = 90, load_max = off). On a 4-core host the old defaults (2 slots, budget 3) left
+six commands queued at 34% CPU; 3 slots and budget 4 kept the load under 5. The CPU% and
+load_max guards still hold a command back when the machine really is busy.
 """
-import ctypes, fcntl, hashlib, json, os, re, secrets, shutil, signal, subprocess, sys, time
+import collections, ctypes, fcntl, stat, hashlib, json, os, re, secrets, shutil, signal, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))  # <repo>/.factory
 def _cpus():
@@ -68,9 +81,21 @@ def _cpus():
 CPUS = _cpus()
 POLL = 0.5
 FOREGROUND_WAIT = 540
+HEAD_LINES = 20     # a foreground run shows its first lines as they come …
+TAIL_LINES = 150    # … and its last lines at the end; the rest is only in the run log
 BACKGROUND_WAIT = 3600
 MULTI = re.compile(r"vitest|jest|playwright|chromium|\bnpm\b|\bnpx\b|pnpm|yarn|\bnode\b|vite|webpack|\btsc\b|"
                    r"shoot|pre-push|\bmake\b|\bjust\b|cargo|\bgo\b|gradle|mvn|dotnet|\bsbt\b|docker|podman")
+
+
+def default_slots(cpus=None):
+    """Commands at once: one core left for the sessions themselves, at least 2."""
+    return max(2, (cpus or CPUS) - 1)
+
+
+def default_budget(cpus=None):
+    """The summed weights of running commands: the cores (the CPU% guard catches oversubscription)."""
+    return max(1, cpus or CPUS)
 
 
 def limits():
@@ -91,8 +116,8 @@ def limits():
             say(f"ignoring {env}/limits.{key} = {v!r}: not a number; using {default}")
             return default
     return {
-        "slots": max(1, pick("FACTORY_HEAVY_SLOTS", "heavy_slots", max(2, CPUS // 2), int)),
-        "budget": max(1, pick("FACTORY_CPU_BUDGET", "cpu_budget", max(1, int(CPUS * 0.75)), int)),
+        "slots": max(1, pick("FACTORY_HEAVY_SLOTS", "heavy_slots", default_slots(), int)),
+        "budget": max(1, pick("FACTORY_CPU_BUDGET", "cpu_budget", default_budget(), int)),
         "cpu_max": pick("FACTORY_CPU_MAX", "cpu_max", 90.0, float),
         "load_max": pick("FACTORY_LOAD_MAX", "load_max", None, float),
     }
@@ -407,7 +432,11 @@ def cmd_wait(argv):
         if time.time() > end:
             age = int(time.time() - rec.get("created", time.time()))
             sys.stdout.write(tail(rec["log"], 5))
-            say(f"ticket {tid} is still {rec.get('state')} after {age}s; call `heavy wait {tid}` again")
+            if rec.get("state") == "queued":
+                say(f"ticket {tid} is still queued after {age}s, waiting for a slot (not a failure, and no result "
+                    f"yet): call `heavy wait {tid}` again")
+            else:
+                say(f"ticket {tid} is still {rec.get('state')} after {age}s; call `heavy wait {tid}` again")
             result_line(124, rec["log"])
             return 124
         time.sleep(2)
@@ -610,9 +639,27 @@ def holders(path):
     return out
 
 
+def capped_stdout():
+    """True when our stdout goes to a reader's context (a terminal, a pipe, a tool's `*.output`
+    capture file): then a long output is cut to its head and tail. A file the caller redirected
+    to (`heavy -- export > rows.csv`) gets everything."""
+    try:
+        st = os.fstat(sys.stdout.fileno())
+    except (OSError, ValueError):
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        return True
+    try:
+        return os.readlink(f"/proc/self/fd/{sys.stdout.fileno()}").endswith(".output")
+    except OSError:
+        return False
+
+
 def cmd_run(argv):
     lim = limits()
-    use_cache, label, wait_max, weight = False, None, None, None
+    use_cache, label, wait_max, weight, run_max = False, None, None, None, None
+    env_tail = os.environ.get("FACTORY_HEAVY_TAIL", "")
+    tail_n = int(env_tail) if env_tail.isdigit() else TAIL_LINES
     priority = os.environ.get("FACTORY_HEAVY_PRIORITY") or "normal"
     if priority not in PRIORITY:
         say(f"ignoring FACTORY_HEAVY_PRIORITY={priority!r}: not high, normal or low")
@@ -631,6 +678,12 @@ def cmd_run(argv):
                 sys.exit(f"--priority must be high, normal or low, not {priority!r}")
         elif a == "--wait-max":
             wait_max = int(argv.pop(0))
+        elif a == "--timeout":
+            run_max = max(1, int(argv.pop(0)))
+        elif a == "--tail":
+            tail_n = max(0, int(argv.pop(0)))
+        elif a == "--full-output":
+            tail_n = 0
         elif a == "--slots":
             lim["slots"] = max(1, int(argv.pop(0)))
         else:
@@ -695,8 +748,9 @@ def cmd_run(argv):
         say(f"CPU still above {lim['cpu_max']:.0f}% after {wait_max}s; asking for a slot anyway")
     lock = take_slot(lim, weight, max(0, deadline - time.time()), shown, priority)
     if lock is None:
-        return refuse(f"no room within {wait_max}s; the command did NOT run. Run it with --background "
-                      "and `heavy wait <ticket>`", 75)
+        return refuse(f"no room within {wait_max}s; the command did NOT run (no result, not a pass): run it "
+                      "again with --background and call `heavy wait <ticket>` until it finishes (waiting is normal; "
+                      "queue time never counts toward --timeout)", 75)
     if ticket:
         update_ticket(ticket, state="running", started=time.time())
 
@@ -736,21 +790,77 @@ def cmd_run(argv):
     for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(s, forward)
 
+    timed_out = []
+    timer = None
+    if run_max:   # the command's own clock: it starts now, after the queue
+        import threading
+
+        def expire():
+            timed_out.append(True)
+            forward(signal.SIGTERM, None)
+            time.sleep(5)
+            forward(signal.SIGKILL, None)
+        timer = threading.Timer(run_max, expire)
+        timer.daemon = True
+        timer.start()
+
     if log:
-        tty_ok = True
-        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
+        # Everything goes into the run log; stdout gets the first HEAD_LINES lines as they come
+        # and then only the last `tail_n` lines at the end: a 5000-line test log would otherwise
+        # land whole in the agent's context. The log path is printed first, so even a run killed
+        # by a tool timeout can be read back (`tail`, `grep -n`).
+        tty_ok, shown_n, total, pending = True, 0, 0, b""
+        ring = collections.deque(maxlen=max(1, tail_n)) if tail_n and capped_stdout() else None
+
+        def out(data):
+            nonlocal tty_ok
             if tty_ok:
                 try:
-                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.write(data)
                     sys.stdout.buffer.flush()
                 except (BrokenPipeError, OSError):
                     tty_ok = False   # the reader went away (`| head`); keep logging
                     drop_stdout()
+        if ring is not None:
+            say(f"full output in {RESULT_LOG}")
+        for chunk in iter(lambda: proc.stdout.read1(65536), b""):
             log.write(chunk.decode(errors="replace"))
+            if ring is None:
+                out(chunk)
+                continue
+            pending += chunk
+            *lines, pending = pending.split(b"\n")
+            for ln in lines:
+                total += 1
+                if shown_n < HEAD_LINES:
+                    shown_n += 1
+                    out(ln + b"\n")
+                else:
+                    ring.append(ln)
         log.close()
+        if ring is not None:
+            if pending:
+                total += 1
+                if shown_n < HEAD_LINES:
+                    shown_n += 1
+                    out(pending + b"\n")
+                else:
+                    ring.append(pending)
+            skipped = total - shown_n - len(ring)
+            if skipped > 0:
+                out(f"heavy: … {skipped} lines omitted (all {total} in {RESULT_LOG}; read it with "
+                    f"`grep -n <pattern>` or `sed -n <a>,<b>p`, never whole) …\n".encode())
+            for ln in ring:
+                out(ln + b"\n")
     rc = proc.wait()
+    if timer:
+        timer.cancel()
     if rc < 0:
         rc = 128 - rc
+    if timed_out:
+        rc = 124
+        say(f"the command ran {run_max}s (--timeout; the time it waited for a slot does not count) and was stopped")
+
     # Processes the command left running in its group (a server started with `&`, a daemon
     # that did not detach) would keep the slot: the lock is inherited by the whole tree.
     left = stop_group(proc.pid)

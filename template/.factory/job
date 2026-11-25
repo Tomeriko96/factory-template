@@ -139,7 +139,8 @@ RESUME_NOTE = ("This is a resume: your previous run ended without writing its ou
                "Writing it is part of your task and required. If you have no previous conclusion "
                "(no earlier reply below and none in your context), do the work. Reuse your earlier "
                "screenshots in round-N/shots/<name>/ instead of redoing the walk-through.")
-LAST_STEP = "Last step, required: write {file} with the Write tool before you reply; a verdict only in your reply is lost."
+LAST_STEP = ("Last step, required: write {file} with the Write tool before you reply; a verdict only in your reply is lost. "
+             "Then reply in one line of at most 200 characters (the file and its verdict): details belong in the file.")
 
 
 class Fail(Exception):
@@ -308,7 +309,7 @@ def security_floor(job):
         held = hold_files(job)
         why = held[0] if held else None
         if not why and head:
-            names = git("diff", "--name-only", "--no-renames", f"{job['base']}...HEAD", cwd=job["worktree"]) or ""
+            names = git("diff", "--name-only", "--no-renames", f"{diff_base(job)}...HEAD", cwd=job["worktree"]) or ""
             extra = [g for g in (routing().get("security_floor_globs") or []) if isinstance(g, str)]
             hit = [x for x in names.split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, SECRET_PATH_GLOBS + extra)]
             why = f"secrets handling: {hit[0]}" if hit else None
@@ -782,9 +783,48 @@ def tmp_prefix(job):
     return f"/tmp/factory-{repo}-{job['id']}"
 
 
+_DIFF_BASE = {}
+
+
+def diff_base(job):
+    """The commit the job's diff starts at (same rule as precheck's diff_base): the newer of the
+    branch's merge bases with the local base and with the fetched `<remote>/<base>`. The local base
+    lags the forge after merges there; once a sync merged the remote base into the branch,
+    `<base>...HEAD` would count other MRs' files as this job's (reviewer scopes, holds, UI work)."""
+    wt, base, branch = job.get("worktree"), job.get("base"), job.get("branch") or "HEAD"
+    key = (wt, base, branch)
+    if key in _DIFF_BASE:
+        return _DIFF_BASE[key]
+    if not (wt and base and os.path.isdir(wt)):
+        return base
+    remote = (config().get("delivery") or {}).get("remote") or "origin"
+    if os.environ.get("FACTORY_NO_FETCH") != "1" and re.match(r"^[\w.-]+$", remote) and \
+            git("remote", "get-url", remote, cwd=wt) is not None:
+        run(["git", "fetch", "-q", "--no-tags", remote, f"+refs/heads/{base}:refs/remotes/{remote}/{base}"],
+            cwd=wt, timeout=60)
+    bases = [b for b in (git("merge-base", ref, branch, cwd=wt) for ref in (base, f"refs/remotes/{remote}/{base}")) if b]
+    pick = None
+    for b in bases:
+        if all(o == b or run(["git", "merge-base", "--is-ancestor", o, b], cwd=wt).returncode == 0 for o in bases):
+            pick = b
+            break
+    if pick is None and bases:   # diverged (local commits on the base that the remote lacks): the closer one
+        pick = min(bases, key=lambda b: int(git("rev-list", "--count", f"{b}..{branch}", cwd=wt) or 0))
+    _DIFF_BASE[key] = pick or base
+    return pick
+
+
 def paths(job):
-    return (f"Repo: {REPO}\nWorktree: {job['worktree']}\nJob: {jdir(job['id'])}\n"
+    text = (f"Repo: {REPO}\nWorktree: {job['worktree']}\nJob: {jdir(job['id'])}\n"
             f"Base: {job['base']}\nBranch: {job['branch']}\nTmp: {tmp_prefix(job)}\n")
+    wt, base = job.get("worktree"), job.get("base")
+    if wt and base and os.path.isdir(wt):
+        db = diff_base(job)
+        local = git("merge-base", base, job.get("branch") or "HEAD", cwd=wt)
+        if db and db != base and local and db != local:
+            text += (f"Diff base: {db} (the local {base} lags the remote's: diff and log from this commit, "
+                     f"`git diff {db[:12]}...<Branch>`, `git log {db[:12]}..<Branch>`, not from <Base>)\n")
+    return text
 
 
 def feature_line(job):
@@ -813,7 +853,7 @@ def ui_work(job):
     matches one. The builder then reads frontend-design; it is no longer preloaded."""
     globs = ui_paths() or UI_GLOBS
     wt, base = job.get("worktree"), job.get("base")
-    names = git("diff", "--name-only", "--no-renames", f"{base}...HEAD", cwd=wt) if wt and base and os.path.isdir(wt) else None
+    names = git("diff", "--name-only", "--no-renames", f"{diff_base(job)}...HEAD", cwd=wt) if wt and base and os.path.isdir(wt) else None
     hit = [x for x in (names or "").split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, globs)]
     if hit:
         return f"the diff touches {hit[0]}" + (f" (+{len(hit) - 1})" if len(hit) > 1 else "")
@@ -890,7 +930,7 @@ def ui_review(job):
     if job.get("mode") != "full":
         return "light", f"a {job.get('mode')} job"
     wt, base = job.get("worktree"), job.get("base")
-    added = git("diff", "--name-only", "--no-renames", "--diff-filter=A", f"{base}...HEAD", cwd=wt) \
+    added = git("diff", "--name-only", "--no-renames", "--diff-filter=A", f"{diff_base(job)}...HEAD", cwd=wt) \
         if wt and base and os.path.isdir(wt) else None
     globs = [g for g in (config().get("ui_page_globs") or []) if isinstance(g, str)] or PAGE_GLOBS
     new = [x for x in (added or "").split("\n") if x and not SIDE_RE.search(x) and glob_hit(x, globs)]
@@ -990,7 +1030,15 @@ def latest_verdicts(job, upto=None):
     return latest
 
 
+UNVERIFIED_RE = re.compile(r"^VERDICT: PASS \(unverified\b")
+
+
 def word(line):
+    """A review's first line as a word. `VERDICT: PASS (unverified: tests did not run: <why>)` is
+    UNVERIFIED: not blocking (the round goes on), but the precheck lists it until the approver ran
+    those tests (`VERIFIED: <reviewer>: …` in decision.md), and rereview runs that reviewer again."""
+    if UNVERIFIED_RE.match(line or ""):
+        return "UNVERIFIED"
     return {"VERDICT: PASS": "PASS", "VERDICT: CHANGES": "CHANGES"}.get(line, "INVALID")
 
 
@@ -1044,8 +1092,8 @@ def auto_merge_gate(job):
         pp = os.path.join(jd, "precheck.md")
         if held_override() and (first_lines(pp, 4) + [""] * 4)[3].split(":")[0] != f"Job {job['id']}, round {int(job.get('round') or 0)}":
             run_precheck(job, int(job.get("round") or 1))   # approved by hand: the precheck of this round
-        elif docs_waived_after_precheck(jd, pp):
-            run_precheck(job, int(job.get("round") or 1))   # the approver's `Docs: not needed` line counts
+        elif docs_waived_after_precheck(jd, pp) or accepted_after_precheck(jd, pp):
+            run_precheck(job, int(job.get("round") or 1))   # the approver's `Docs: not needed` / `ACCEPTED:` line counts
         pre = (first_lines(pp, 2) + ["", ""])[1]
         if not pre.startswith("AUTO-MERGE:"):
             hard.append("no precheck result for this round")
@@ -1069,6 +1117,20 @@ def docs_waived_after_precheck(jd, pp):
     except OSError:
         return False
     return "DOCS: missing update" in pre and re.search(r"^[\s>*-]*Docs:\s*not needed\b[^:\n]*:[ \t]*\S", dec, re.I | re.M) is not None
+
+
+def accepted_after_precheck(jd, pp):
+    """True when the precheck saw an unconfirmed (⏭️) or deviating (⚠️) audit row, or an unverified
+    review, and the approver's decision.md has the `ACCEPTED: audit row <n>: <reason>` or
+    `VERIFIED: <reviewer>: <command → result>` line it could not see yet."""
+    try:
+        pre = open(pp, errors="replace").read()
+        dec = open(os.path.join(jd, "decision.md"), errors="replace").read()
+    except OSError:
+        return False
+    return (("audit row not confirmed" in pre or "audit deviation" in pre) and
+            re.search(r"^[\s>*-]*ACCEPTED:\s*audit\s+row\s+#?\d+", dec, re.I | re.M) is not None) or \
+        ("PASS unverified" in pre and re.search(r"^[\s>*-]*VERIFIED:\s*[\w-]+\s*:", dec, re.M) is not None)
 
 
 def auto_merge_record(gate):
@@ -1341,7 +1403,11 @@ def step(job, out, start=None):
                 return spawn(job, out, f"review-{n}", [reviewer_block(job, n, x) for x in missing])
             latest = latest_verdicts(job, n)
             job["reviews"] = {x: word(latest[x][1]) for x in names}
-            blocking = sorted(x for x, (_, fl) in latest.items() if fl != "VERDICT: PASS")
+            blocking = sorted(x for x, (_, fl) in latest.items() if word(fl) not in ("PASS", "UNVERIFIED"))
+            unverified = sorted(x for x, (_, fl) in latest.items() if word(fl) == "UNVERIFIED")
+            if unverified:
+                out.notes.append("NOTE: unverified (their tests did not run): " + ", ".join(unverified)
+                                 + "; the approver runs those tests")
             if not (job.get("metric_rounds") or {}).get(str(n)):   # once per round, also after a crash
                 for x in names:
                     verdict_metric(job, f"factory-reviewer-{x}", f"review-{n}",
@@ -1773,7 +1839,7 @@ def changed_lines(wt, rng):
 def select_reviewers(job, n, cand):
     """Drop the candidates whose paths the diff does not touch. Returns (chosen, reasons)."""
     wt, base = job.get("worktree"), job.get("base")
-    names = git("diff", "--name-only", "--no-renames", f"{base}...HEAD", cwd=wt) if wt and os.path.isdir(wt) else None
+    names = git("diff", "--name-only", "--no-renames", f"{diff_base(job)}...HEAD", cwd=wt) if wt and os.path.isdir(wt) else None
     if names is None:
         return cand, ["cannot diff the job branch: running all candidates"]
     files = [x for x in names.split("\n") if x]
@@ -1791,7 +1857,7 @@ def select_reviewers(job, n, cand):
         found = [x for x in paths if glob_hit(x, gl)]
         return found and (found[0] + (f" (+{len(found) - 1})" if len(found) > 1 else ""))
 
-    lines_all = changed_lines(wt, [f"{base}...HEAD"])
+    lines_all = changed_lines(wt, [f"{diff_base(job)}...HEAD"])
     lines_recent = changed_lines(wt, [head, "HEAD"]) if head else lines_all
 
     def small(x, found):

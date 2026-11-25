@@ -14,7 +14,9 @@ reruns and false "flaky" findings cost extra rounds. Three guards:
 3. **`.factory/heavy`** for every test, build, lint, install and validation command the
    agents run, in every repo on this machine. Each command has a weight (the cores it may
    use: 3 for Node, browser and build tools, 1 for the rest); the weights running at the
-   same time, host-wide, stay within 75% of the cores. It runs at low priority and passes
+   same time, host-wide, stay within the cores (at most max(2, cores − 1) commands; `--timeout SECS`
+   counts only the run, never the queue; a long output shows its first 20 and last 150 lines, the
+   rest is in the run log). It runs at low priority and passes
    `FACTORY_CPUS` (its weight) for worker counts. A command that may wait or run longer
    than a tool call lives goes `heavy --background -- <cmd>` (returns a ticket) and
    `heavy wait <ticket>` (repeat while it exits 124). `.factory/heavy status` shows who

@@ -14,6 +14,13 @@ Also a library for `.factory/precheck --validate` in `validate.mode: ci`: `head_
 pipeline of one pushed commit, through its PR/MR or the branch) and `failed_logs()` (the tail
 of each failing job's log).
 
+Infrastructure failures: a failed job whose log shows OOMKilled, `exit code 137`, `ERROR: Job
+failed (system failure)`, a runner or scheduler error, or a registry (Harbor) push error with no
+failing test in the log, is INFRA, not a code failure (`infra_reason()`). The refresh retries such
+a pipeline once by itself (GitLab: `POST jobs/:id/retry`; GitHub: `gh run rerun <run> --failed`)
+and reports `CI: INFRA (<reason>), retried`; `precheck --validate` does the same and never turns
+it into a rework round.
+
 Requires: `gh` (github) or `glab` (gitlab) logged in. Missing CLI/auth -> cached
 state is kept and the error is reported once, never crashes watch.
 """
@@ -291,8 +298,8 @@ def fetch_gitlab(job, pid=None):
         if not jerr and isinstance(js, list):
             for jb in js:
                 jobs.append({"name": jb.get("name", "?"), "stage": jb.get("stage", ""),
-                             "status": normalize_gl(jb.get("status")),
-                             "url": jb.get("web_url", "")})
+                             "status": normalize_gl(jb.get("status")), "id": jb.get("id"),
+                             "url": jb.get("web_url", ""), "failure_reason": jb.get("failure_reason")})
     return {"forge": "gitlab", "pipeline": pipeline, "merge": str(merge).lower(),
             "mr_state": mr.get("state"), "jobs": jobs, "url": pr_url,
             "pipeline_id": pid_pipe, "pipeline_sha": pipe.get("sha"), "pipeline_url": pipe.get("web_url"),
@@ -343,7 +350,8 @@ def gh_commit(sha):
 def gl_pipeline_jobs(pid, pipe_id):
     js, err = run(["glab", "api", f"projects/{pid}/pipelines/{pipe_id}/jobs?per_page=100"], cwd=REPO)
     return [{"name": jb.get("name", "?"), "stage": jb.get("stage", ""), "id": jb.get("id"),
-             "status": normalize_gl(jb.get("status")), "url": jb.get("web_url", "")}
+             "status": normalize_gl(jb.get("status")), "url": jb.get("web_url", ""),
+             "failure_reason": jb.get("failure_reason")}
             for jb in (js if not err and isinstance(js, list) else [])]
 
 
@@ -406,14 +414,154 @@ def failed_logs(forge, jobs, lines=40):
     return out
 
 
+# ---------- infrastructure failures: classify, retry once ----------
+
+# (pattern, reason). Matched against the ANSI-free tail of a failed job's log.
+INFRA_PATTERNS = [
+    (re.compile(r"\bOOMKilled\b"), "OOMKilled"),
+    (re.compile(r"exit(?:ed with)? code:? ?137\b|\bexit status 137\b", re.I), "exit code 137"),
+    (re.compile(r"ERROR: Job failed \(system failure\)", re.I), "runner system failure"),
+    (re.compile(r"runner[ _]system[ _]failure", re.I), "runner system failure"),
+    (re.compile(r"scheduler[ _]failure|\bfailed to schedule\b|\bFailedScheduling\b|\bUnschedulable\b", re.I),
+     "scheduler failure"),
+    (re.compile(r"stuck_or_timeout_failure|This job is stuck because", re.I), "no runner picked the job up"),
+    (re.compile(r"runner has received a shutdown signal|lost communication with the server|"
+                r"The hosted runner encountered an error", re.I), "runner lost"),
+    (re.compile(r"\bNo space left on device\b", re.I), "runner out of disk"),
+    (re.compile(r"timed out waiting for the condition", re.I), "deploy environment timed out"),
+]
+# A registry/Harbor error counts only when no test failed in the same log (a push after the tests).
+REGISTRY_PATTERNS = re.compile(
+    r"quota exceeded|exceeded (?:the )?(?:storage )?quota|storage quota|"
+    r"error pushing|failed to push|push access denied|denied: requested access to the resource is denied|"
+    r"unauthorized: authentication required|toomanyrequests|blob upload (?:unknown|invalid)|"
+    r"received unexpected HTTP status: 5\d\d|error parsing HTTP 5\d\d|"
+    r"(?:cr\.surf\.nl|harbor)\S*.*\b(?:denied|unauthorized|error|failed)\b", re.I)
+TEST_FAILED = re.compile(r"\b[1-9]\d* (?:failed|errors?)\b|^FAILED\b|^E {3}|^\s*Tests?:.*\b[1-9]\d* failed|"
+                         r"npm ERR! Test failed|^--- FAIL\b|test result: FAILED", re.I | re.M)
+# GitLab's own failure_reason values that never come from the code
+GL_INFRA_REASONS = {"runner_system_failure": "runner system failure", "scheduler_failure": "scheduler failure",
+                    "stuck_or_timeout_failure": "no runner picked the job up", "api_failure": "GitLab API failure",
+                    "runner_unsupported": "runner unsupported", "data_integrity_failure": "GitLab data integrity failure"}
+
+
+def log_infra_reason(text):
+    """The infrastructure reason a job log shows, or None when it looks like a code failure."""
+    text = ANSI.sub("", text or "")
+    if not text.strip():
+        return None
+    failed_tests = TEST_FAILED.search(text)
+    for rx, why in INFRA_PATTERNS:
+        if rx.search(text) and not failed_tests:
+            return why
+    m = REGISTRY_PATTERNS.search(text)
+    if m and not failed_tests:
+        return "registry push error (" + m.group(0).strip()[:60] + ")"
+    return None
+
+
+def infra_reason(jobs, logs):
+    """`<reason>` when EVERY failed job of a pipeline failed on infrastructure (its GitLab
+    failure_reason or its log, see log_infra_reason), else None: one code failure is enough to
+    make the whole pipeline a code failure."""
+    failed = [j for j in jobs if j.get("status") == "failed"]
+    if not failed:
+        return None
+    whys = []
+    for j in failed:
+        why = GL_INFRA_REASONS.get(str(j.get("failure_reason") or "")) or log_infra_reason(logs.get(j.get("name")))
+        if not why:
+            return None
+        whys.append(why)
+    return ", ".join(dict.fromkeys(whys))
+
+
+def job_key(j):
+    """A failed job's identity (its id, or its URL): a retry makes a new job, so a new key."""
+    return str(j.get("id") or j.get("url") or j.get("name"))
+
+
+def retry_failed(forge, jobs, repo_flag=None):
+    """Retry the failed jobs once: GitLab `POST jobs/:id/retry` per job, GitHub `gh run rerun <run>
+    --failed` per run. Returns (retried keys, error or None)."""
+    failed = [j for j in jobs if j.get("status") == "failed"]
+    done, errs = [], []
+    if forge == "gitlab":
+        for j in failed:
+            m = re.search(r"/-/jobs/(\d+)", j.get("url") or "")
+            jid = m.group(1) if m else j.get("id")
+            if not jid:
+                errs.append(f"{j.get('name')}: no job id")
+                continue
+            _, err = run(["glab", "api", "-X", "POST", f"projects/:id/jobs/{jid}/retry"], cwd=REPO)
+            (errs.append(f"{j.get('name')}: {err}") if err else done.append(job_key(j)))
+    elif forge == "github":
+        runs = {}
+        for j in failed:
+            m = re.search(r"/actions/runs/(\d+)", j.get("url") or "")
+            if m:
+                runs.setdefault(m.group(1), []).append(j)
+            else:
+                errs.append(f"{j.get('name')}: not a GitHub Actions run (cannot rerun it)")
+        for rid, js in runs.items():
+            _, err = run(["gh", "run", "rerun", rid, "--failed", *(repo_flag or [])], cwd=REPO)
+            (errs.append(f"run {rid}: {err}") if err else done.extend(job_key(j) for j in js))
+    else:
+        errs.append(f"unknown forge '{forge}'")
+    return done, ("; ".join(errs) or None)
+
+
+def infra_check(forge, data, old, repo_flag=None):
+    """For a failed pipeline of a pr-open job: classify it once (logs of the failed jobs) and retry an
+    infrastructure failure once. Sets data["infra"] = {reason, retried, keys, error?} and returns the
+    report line (`CI: INFRA (<reason>), retried`) or None. `old` is the previous cache entry: the
+    classification of the same failed jobs is reused, never fetched again."""
+    failed = [j for j in data.get("jobs") or [] if j.get("status") == "failed"]
+    keys = sorted(job_key(j) for j in failed)
+    prev = (old or {}).get("infra") or {}
+    if data.get("pipeline") != "failed" or not failed:
+        if prev.get("retried"):   # the retry is running (or passed): remember it, so it is never retried twice
+            data["infra"] = dict(prev, state=data.get("pipeline"))
+        return None
+    if prev.get("keys") == keys:   # the same failed jobs as last time: nothing new to fetch
+        data["infra"] = prev
+        return prev.get("line")
+    if prev.get("retried") and set(keys) & set(prev.get("retried_keys") or []):
+        data["infra"] = prev   # the forge still lists the jobs the retry replaces
+        return prev.get("line")
+    why = infra_reason(failed, failed_logs(forge, failed))
+    if not why:
+        data["infra"] = {"keys": keys, "reason": None}
+        return None
+    if prev.get("retried"):
+        line = f"CI: INFRA ({why}), failed again after one retry: not a code failure, a human looks"
+        data["infra"] = {"keys": keys, "reason": why, "retried": prev["retried"], "line": line, "again": True}
+        return line
+    done, err = retry_failed(forge, failed, repo_flag)
+    line = f"CI: INFRA ({why}), retried" if done else f"CI: INFRA ({why}), retry failed: {err}"
+    data["infra"] = {"keys": keys, "reason": why, "retried": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if done else None,
+                     "retried_keys": done, "line": line, **({"error": err} if err else {})}
+    return line
+
+
 # ---------- main ----------
 
+UNFINISHED = ("queued", "spec", "build", "review", "approve", "deliver", "needs-human")
+
+
+def watched(job):
+    """A pr-open job, or an unfinished one whose PR/MR is already open (validate.mode ci opens it
+    before delivery): both have a pipeline to show."""
+    return job.get("stage") == "pr-open" or (job.get("stage") in UNFINISHED and bool(job.get("pr_url")))
+
+
 def refresh_job(job, forge, ttl, force, quiet, pid=None):
-    if job.get("stage") != "pr-open":
+    if not watched(job):
         return None
     path = cache_path(job["id"])
     if not force and cache_fresh(path, ttl):
         return read_cache(path)
+    old = read_cache(path)
     if forge == "gitlab":
         data = fetch_gitlab(job, pid)
     elif forge == "github":
@@ -439,6 +587,12 @@ def refresh_job(job, forge, ttl, force, quiet, pid=None):
         except OSError:
             pass
     else:
+        line = None
+        if job.get("stage") == "pr-open" and not job.get("adopted"):
+            repo = gh_repo(job.get("pr_url"))
+            line = infra_check(forge, data, old, ["-R", repo] if repo else None)
+        if line and not quiet:
+            print(f"{job['id']}: {line}")
         write_cache(path, data)
     return data
 
@@ -464,7 +618,7 @@ def main():
         jobs = [j for j in jobs if j["id"] in targets or j["id"].startswith(targets[0])]
         if not jobs:
             sys.exit(f"no job '{targets[0]}'")
-    pr_jobs = [j for j in jobs if j.get("stage") == "pr-open"]
+    pr_jobs = [j for j in jobs if watched(j)]
     pid = None
     force = force or "--once" in args
     stale = [j for j in pr_jobs if force or not cache_fresh(cache_path(j["id"]), ttl)]
@@ -476,6 +630,8 @@ def main():
     if targets and not quiet:
         for r in results:
             print(f"== {r.get('job')}  pipeline={r.get('pipeline')} merge={r.get('merge')}")
+            if (r.get("infra") or {}).get("line"):
+                print(f"   {r['infra']['line']}")
             if r.get("error"):
                 print(f"   error: {r['error']}")
             for jb in r.get("jobs", []):
@@ -503,11 +659,12 @@ def main():
     if not quiet:
         ok = sum(1 for r in results if not r.get("error"))
         fail = sum(1 for r in results if r.get("pipeline") == "failed")
-        print(f"ci: {len(results)} pr-open jobs, {ok} fetched"
+        print(f"ci: {len(results)} jobs with a PR/MR, {ok} fetched"
               + (f", {fail} failing" if fail else ""))
         for r in results:
             n = len(r.get("jobs", []))
-            print(f"  {r.get('job')}: {r.get('pipeline')} ({n} checks/jobs)")
+            print(f"  {r.get('job')}: {r.get('pipeline')} ({n} checks/jobs)"
+                  + (f"  {r['infra']['line']}" if (r.get("infra") or {}).get("line") else ""))
 
 
 if __name__ == "__main__":

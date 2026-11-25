@@ -12,7 +12,11 @@
                                         nothing locally: it pushes the job branch, opens the PR/MR when
                                         `validate.open_pr`, and waits for that commit's pipeline on the
                                         forge (through .factory/ci); `VALIDATE: ERROR <why>` when the
-                                        push, the PR/MR or the pipeline cannot be had (a human looks)
+                                        push, the PR/MR or the pipeline cannot be had (a human looks).
+                                        A pipeline that failed only on infrastructure (OOMKilled, exit
+                                        137, runner/scheduler, registry push after green tests) is
+                                        retried once (`CI: INFRA (<reason>), retried`); failing again
+                                        it is `VALIDATE: INFRA <reason>`: no rework round
   .factory/precheck --pr-body <job-id>  write <job>/pr-body.md for delivery: the job's PR text (`## PR` of
                                         decision.md or build.md; title = its first line) plus one
                                         `<issues.link> #N` line for every issue of the job it does not
@@ -50,7 +54,9 @@ Checks (each failing one is listed under Issues):
     --pr-body and checks the body with --closes)
 Renames are diffed as delete + add, so a file moved to `.env` or into .factory/ is still seen.
 
-Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>`. The mechanical half
+Second line of the output: `AUTO-MERGE: yes` or `AUTO-MERGE: no: <reasons>` (with
+`delivery.auto_merge_held: true` and no issues: `AUTO-MERGE: held: <reasons>`, which delivery
+overrides; the reasons go into the PR/MR description). The mechanical half
 of the auto-merge gate (.factory/job adds the rest): no issues, no audit deviation (⚠️; an
 `⚠️ ENV:` row with a measured load or network cause, or a `⚠️ TEST:` row with a `verified by`
 part, is not one), and no
@@ -351,12 +357,41 @@ def validate_ci(job, job_dir, rdir, rnd, head, cfg):
             p = res.get("pipeline")
             jobs_ok = all(j.get("status") in ("success", "skipped", "manual") for j in res.get("jobs") or [])
             if p == "success" or (p in ("skipped", "manual") and res.get("jobs") and jobs_ok):
+                retried = state.get("infra_retry") or {}
                 return finish("PASS", [f"The full validation of round {rnd} ran on the forge's CI "
-                                       f"(validate.mode ci): {len(res.get('jobs') or [])} jobs passed.", ""]
-                              + [f"- ✅ {j['name']}: {j['status']}" for j in res.get("jobs") or []])
-            if p in ("failed", "canceled"):
+                                       f"(validate.mode ci): {len(res.get('jobs') or [])} jobs passed."]
+                              + ([f"CI: INFRA ({retried['reason']}), retried: passed on the retry"] if retried.get("keys") else [])
+                              + [""] + [f"- ✅ {j['name']}: {j['status']}" for j in res.get("jobs") or []])
+            if p == "failed" and state.get("infra_retry") and \
+                    set(ci.job_key(j) for j in res.get("jobs") or [] if j.get("status") == "failed") \
+                    & set(state["infra_retry"].get("keys") or []):
+                pass   # the forge still lists the jobs the infra retry replaces: wait for the retry
+            elif p in ("failed", "canceled"):
                 bad = [j for j in res.get("jobs") or [] if j.get("status") in ("failed", "canceled")]
                 logs = ci.failed_logs(forge, res.get("jobs") or [])
+                infra = ci.infra_reason(res.get("jobs") or [], logs) if p == "failed" and \
+                    all(j.get("status") == "failed" for j in bad) else None
+                if infra and not state.get("infra_retry"):
+                    keys, err = ci.retry_failed(forge, bad)
+                    state["infra_retry"] = {"reason": infra, "keys": keys, "at": time.time(), "error": err}
+                    save()
+                    if keys:
+                        state["infra_retry"]["line"] = f"CI: INFRA ({infra}), retried: " + ", ".join(j["name"] for j in bad)
+                        save()
+                        continue
+                if infra:
+                    first = state["infra_retry"]
+                    body = [f"The full validation of round {rnd} ran on the forge's CI (validate.mode ci): the pipeline "
+                            f"failed on infrastructure, not on the change: {infra}.",
+                            f"CI: INFRA ({infra}), " + ("retried once, failed again" if first.get("keys") else
+                                                       f"the retry could not be started ({first.get('error')})"), ""]
+                    body += [f"- ❌ {j['name']}" + (f" [{j['stage']}]" if j.get("stage") else "") + f": {j['status']}"
+                             + (f" ({j['url']})" if j.get("url") else "") for j in bad]
+                    for name, tail in logs.items():
+                        body += ["", f"## Failed: `{name}`", "", "```", tail[-3000:], "```"]
+                    body += ["", "No rework round: the change is not at fault. Retry the pipeline later; once the "
+                             "head pipeline is green on the forge, `.factory/job prs` counts the validation as passed."]
+                    return finish(f"INFRA {infra}", body)
                 body = [f"The full validation of round {rnd} ran on the forge's CI (validate.mode ci): the "
                         f"pipeline {p}.", ""]
                 body += [f"- ❌ {j['name']}" + (f" [{j['stage']}]" if j.get("stage") else "") + f": {j['status']}"
@@ -382,6 +417,8 @@ def validate_ci(job, job_dir, rdir, rnd, head, cfg):
     print(f"VALIDATE: PENDING the CI pipeline is {pend} for {head[:12]}"
           + (f" ({state['pr_url']})" if state.get("pr_url") else "")
           + f": run `.factory/precheck --validate {job['id']}` again")
+    if (state.get("infra_retry") or {}).get("line"):
+        print(state["infra_retry"]["line"])
     return 124
 
 
@@ -476,6 +513,7 @@ def validate_main(job_id, rnd=None):
 
 # ---------- PR/MR body: one closing line per issue ----------
 FOOTER = "🤖 Generated with [Claude Code](https://claude.com/claude-code)"
+HELD_HEADING = "## Auto-merge hold overridden"
 KEYWORD_RE = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)"
 
 
@@ -547,6 +585,10 @@ def pr_body_main(job_id):
     lines = [body.rstrip(), ""]
     if missing:
         lines += [f"{link} #{n}" for n in missing] + [""]
+    held = (job.get("auto_merge") or {}).get("held") or []
+    if held:   # delivery.auto_merge_held: auto-merge is on although the factory would hold it; say why here
+        lines += [HELD_HEADING, "", "Auto-merge is on (`delivery.auto_merge_held`), although the factory would "
+                  "have held this PR/MR for a human:", ""] + [f"- {h}" for h in held] + [""]
     text = "\n".join(lines).rstrip() + "\n"
     if FOOTER not in text:
         text += "\n" + FOOTER + "\n"
@@ -653,6 +695,8 @@ def main():
         vfl = first_line(os.path.join(rdir, "validate.md")) or ""
         if vfl.startswith("VALIDATE: FAIL"):
             issues.append(f"the full validation fails (round-{rnd}/validate.md)")
+        elif vfl.startswith("VALIDATE: INFRA"):
+            issues.append(f"the CI pipeline failed on infrastructure, not checked yet (round-{rnd}/validate.md: {vfl[16:].strip()})")
         elif vfl.startswith("VALIDATE: NONE"):
             notes.append("full validation not run: no Validate commands in repo.md")
         elif not vfl.startswith("VALIDATE: PASS"):
@@ -758,7 +802,11 @@ def main():
     for cls in sorted(set(hold.values())):
         names = sorted(n for n, c in hold.items() if c == cls)
         why.append(f"touches {cls}: " + ", ".join(names[:3]) + (" …" if len(names) > 3 else ""))
-    out = [f"PRECHECK: {verdict}", "AUTO-MERGE: " + ("no: " + "; ".join(why) if why else "yes"), "",
+    # delivery.auto_merge_held: a hold (a file class, an audit deviation) is reported as `held: …` and
+    # delivery switches auto-merge on anyway; a precheck issue (secrets, failing validation …) stays `no:`.
+    held_ok = (load_config().get("delivery") or {}).get("auto_merge_held") is True and verdict == "CLEAN"
+    am = ("held: " if held_ok else "no: ") + "; ".join(why) if why else "yes"
+    out = [f"PRECHECK: {verdict}", "AUTO-MERGE: " + am, "",
            f"Job {job_id}, round {rnd}: {files} files, {lines} changed lines, {commits} commits.",
            "Reviews: " + (", ".join(info) or "none"), "", "## Issues"]
     out += [f"- {i}" for i in issues] or ["None."]

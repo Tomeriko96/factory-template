@@ -1540,6 +1540,218 @@ has "$out" "glab issue list --per-page 100 --output json"
 for j in "$FN" "$B1" "$B2" $(ls "$R/.factory/jobs" | grep -- '-zq-slot-three$'); do park "$j"; done
 export PATH="$OLDPATH2"; cp "$T/config.rq" .factory/config.json
 
+# ---------- infra: OOMKilled/runner/registry failures are retried once, never a rework round (v0.15.0) ----------
+scenario=infra-ci
+cp .factory/config.json "$T/config.infra"
+FF="$T/forge-infra"; mkdir -p "$T/bin3" "$FF"; OLDPATH3="$PATH"; export PATH="$T/bin3:$PATH" FF
+export FACTORY_VALIDATE_BUDGET=0 FACTORY_CI_POLL=0
+echo 60 > "$FF/next_iid"
+cat > "$T/bin3/glab" <<'SH'
+#!/usr/bin/env bash
+echo "glab $*" >> "$FF/calls"
+case "$*" in
+  "api projects/:id/merge_requests?source_branch="*) echo '[]' ;;
+  "api -X POST projects/:id/merge_requests "*) n="$(cat "$FF/next_iid")"; echo $((n + 1)) > "$FF/next_iid"
+    echo "{\"iid\": $n, \"web_url\": \"https://gitlab.example/g/p/-/merge_requests/$n\", \"draft\": false}" ;;
+  "api -X POST projects/"*/jobs/*/retry) echo '{"id": 1}' ;;
+  "api projects/"*/merge_requests/*) cat "$FF/mr-${2##*/}.json" ;;
+  "api projects/"*/pipelines/*/jobs*) p="${2#projects/*/pipelines/}"; cat "$FF/jobs-${p%%/*}.json" ;;
+  "api projects/"*/jobs/*/trace) j="${2%/trace}"; cat "$FF/trace-${j##*/}.txt" ;;
+  "mr list "*) cat "$FF/mrlist.json" 2>/dev/null || echo '[]' ;;
+  *) echo "fake glab: $*" >&2; exit 1 ;;
+esac
+SH
+chmod +x "$T/bin3/glab"
+# the recorded log of onderwijsdata-chat job 1981060 (git.sdp.surf.nl): green tests, then the runner kills the container
+cat > "$FF/trace-1981060.txt" <<'LOG'
+tests/test_zz.py ........                                                [100%]
+================ 916 passed, 94 skipped in 412.31s (0:06:52) =================
+section_end:1795600000:step_script
+Cleaning up project directory and file based variables
+ERROR: Job failed: Error in container build: exit code: 137, reason: 'OOMKilled'
+LOG
+cp "$FF/trace-1981060.txt" "$FF/trace-1981318.txt"   # job 1981318: the same again
+printf 'collecting ...\nE   assert 2 == 3\nFAILED tests/test_x.py::test_y - AssertionError\n=== 1 failed, 915 passed ===\nERROR: Job failed: exit code 1\n' > "$FF/trace-7001.txt"
+python3 - <<'PY'
+import json
+c = json.load(open(".factory/config.json"))
+c["forge"] = "gitlab"
+c["delivery"] = {"mode": "pr", "remote": "origin", "draft": False}
+c["validate"] = {"mode": "ci", "open_pr": True}
+json.dump(c, open(".factory/config.json", "w"))
+PY
+cat >> .factory/repo.md <<'EOF2'
+- Validate (one exact command per line, run as `heavy --cache -- <command>`):
+  - `false`
+EOF2
+glmr() {  # glmr <iid> <pipeline id> <status> <sha> [state]
+  printf '{"iid": %s, "state": "%s", "web_url": "https://gitlab.example/g/p/-/merge_requests/%s", "sha": "%s", "source_branch": "b", "target_branch": "main", "source_project_id": 1, "target_project_id": 1, "detailed_merge_status": "mergeable", "head_pipeline": {"id": %s, "sha": "%s", "status": "%s", "web_url": "https://gitlab.example/g/p/-/pipelines/%s"}}' \
+    "$1" "${5:-opened}" "$1" "$4" "$2" "$4" "$3" "$2" > "$FF/mr-$1.json"
+}
+gljobs() {  # gljobs <pipeline id> <job id> <status> [failure_reason]
+  printf '[{"id": %s, "name": "python:test", "stage": "test", "status": "%s", "failure_reason": %s, "web_url": "https://gitlab.example/g/p/-/jobs/%s"}, {"id": 5, "name": "lint", "stage": "test", "status": "success", "web_url": "https://gitlab.example/g/p/-/jobs/5"}]' \
+    "$2" "$3" "${4:-null}" "$2" > "$FF/jobs-$1.json"
+}
+I1="$(newjob "zq infra oom")"; tovalidate "$I1" src/i1.py; H1="$(git -C "$(wt "$I1")" rev-parse HEAD)"
+glmr 60 900 failed "$H1"; gljobs 900 1981060 failed; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$I1")"; rc=$?
+first "$out" "VALIDATE: PENDING the CI pipeline is failed"; [ $rc = 124 ] && ok || bad "infra retry exit $rc, want 124"
+has "$out" "CI: INFRA (OOMKilled), retried: python:test"
+command grep -qF "api -X POST projects/:id/jobs/1981060/retry" "$FF/calls" && ok || bad "job 1981060 not retried: $(cat "$FF/calls")"
+missing "$(jd "$I1")/round-1/validate.md"
+: > "$FF/calls"; out="$("$R/.factory/precheck" --validate "$I1")"        # the forge still shows the old job: wait
+first "$out" "VALIDATE: PENDING"; command grep -qF "/retry" "$FF/calls" && bad "retried twice" || ok
+gljobs 900 1981318 failed; : > "$FF/calls"                                # the retry (job 1981318) is OOMKilled too
+out="$("$R/.factory/precheck" --validate "$I1")"; first "$out" "VALIDATE: INFRA OOMKilled"
+has "$out" "CI: INFRA (OOMKilled), retried once, failed again"; has "$out" "No rework round"; lacks "$out" "[blocking]"
+command grep -qF "/retry" "$FF/calls" && bad "retried a second time" || ok
+out="$(J next "$I1")"; first "$out" "DONE: needs-human: round 1: CI failed on infrastructure (OOMKilled)"
+field "$I1" "j['round'], j['infra']['reason'], 'escalation' in j" "1 OOMKilled False"
+has "$(J show "$I1")" "STAGE: needs-human"
+# the precheck never counts an infra failure as a code finding of the round
+has "$("$R/.factory/precheck" "$I1")" "failed on infrastructure"
+# the pipeline turns green on the forge (a retry later): job prs continues the job, no round spent
+glmr 60 901 success "$H1"
+out="$(J prs)"; has "$out" "RESUME: $I1 (https://gitlab.example/g/p/-/merge_requests/60): round 1 failed on infrastructure (OOMKilled)"
+has "$out" "open PR/MR"; has "$out" "before delivery"
+field "$I1" "j['stage'], j['round']" "review 1"
+first "$(cat "$(jd "$I1")/round-1/validate.md")" "VALIDATE: PASS"; exists "$(jd "$I1")/round-1/validate-infra.md"
+out="$(J next "$I1")"; has "$out" "AGENT: factory-approver"; park "$I1"
+# a code failure (a failing test, then exit 1) is FAIL: no retry, the next round fixes it
+I2="$(newjob "zq infra code")"; tovalidate "$I2" src/i2.py; H2="$(git -C "$(wt "$I2")" rev-parse HEAD)"
+glmr 61 910 failed "$H2"; gljobs 910 7001 failed; : > "$FF/calls"
+out="$("$R/.factory/precheck" --validate "$I2")"; first "$out" "VALIDATE: FAIL"; lacks "$out" "CI: INFRA"
+command grep -qF "/retry" "$FF/calls" && bad "a code failure was retried" || ok
+has "$(J next "$I2")" "Build round 2."; park "$I2"
+# GitLab's own failure_reason (runner_system_failure) is infra even with an empty log
+I3="$(newjob "zq infra runner")"; tovalidate "$I3" src/i3.py; H3="$(git -C "$(wt "$I3")" rev-parse HEAD)"
+glmr 62 920 failed "$H3"; gljobs 920 7100 failed '"runner_system_failure"'; : > "$FF/trace-7100.txt"
+first "$("$R/.factory/precheck" --validate "$I3")" "VALIDATE: PENDING"
+command grep -qF "jobs/7100/retry" "$FF/calls" && ok || bad "runner failure not retried"
+park "$I3"
+# resume after a pause (prompt-library !705): an old-style FAIL on infra started round 2; the MR is green now
+I4="$(newjob "zq infra resume")"; tovalidate "$I4" src/i4.py; H4="$(git -C "$(wt "$I4")" rev-parse HEAD)"
+printf 'VALIDATE: FAIL\nHead: %s\nPR: https://gitlab.example/g/p/-/merge_requests/63 (ready, opened for the CI validation)\n\nThe full validation of round 1 ran on the forge'"'"'s CI (validate.mode ci): the pipeline failed.\n\n- ❌ kubernetes:deploy-preview [deploy]: failed\n\n## Failed: `kubernetes:deploy-preview`\n\n```\nhelmrelease.helm.toolkit.fluxcd.io/ci-706-prompt-library-tenant configured\nerror: timed out waiting for the condition on helmreleases/ci-706-prompt-library-tenant\nERROR: Something went wrong during tenant creation.\nERROR: Job failed: command terminated with exit code 1\n```\n\n1. [blocking] the CI pipeline fails on this round'"'"'s head (see above): fix the cause.\n' "$H4" > "$(jd "$I4")/round-1/validate.md"
+printf '{"mode": "ci", "head": "%s", "pr_url": "https://gitlab.example/g/p/-/merge_requests/63", "pr_draft": false}' "$H4" > "$(jd "$I4")/round-1/validate.json"
+out="$(J next "$I4")"; has "$out" "Build round 2."; field "$I4" "j['pr_url'], j['escalation']['builder']['steps']" "https://gitlab.example/g/p/-/merge_requests/63 1"
+glmr 63 930 success "$H4"
+out="$(J prs)"; has "$out" "INFRA: $I4: round 1 failed on infrastructure (deploy environment timed out)"; has "$out" "may still run"
+field "$I4" "j['stage']" build
+python3 - "$(jd "$I4")/job.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1])); j["pending"]["ts"] -= 3 * 3600; json.dump(j, open(sys.argv[1], "w"))
+PY
+out="$(J prs)"; has "$out" "RESUME: $I4"; field "$I4" "j['stage'], j['round'], j['escalation']['builder']['steps'], 'pending' in j" "review 1 0 False"
+has "$(J next "$I4")" "AGENT: factory-approver"
+# its MR is merged on the forge while the job waits at needs-human: job prs marks it merged
+park "$I4"; glmr 63 930 success "$H4" merged
+out="$(J prs)"; has "$out" "MERGED: $I4"; has "$out" "while the job was at needs-human"; field "$I4" "j['stage']" merged
+# pr-open: .factory/ci retries an infra failure of the MR pipeline once and reports it
+echo 64 > "$FF/next_iid"; I5="$(newjob "zq infra pr")"; tovalidate "$I5" src/i5.py; H5="$(git -C "$(wt "$I5")" rev-parse HEAD)"
+glmr 64 940 success "$H5"; gljobs 940 8000 success
+first "$("$R/.factory/precheck" --validate "$I5")" "VALIDATE: PASS"
+printf 'DECISION: MERGE\n\n## PR\nTitle\n' > "$(jd "$I5")/decision.md"; J next "$I5" >/dev/null; J next "$I5" >/dev/null
+J delivered "$I5" pr-open >/dev/null; field "$I5" "j['stage']" pr-open
+mkdir -p "$R/.factory/cache"; echo '{"path": "g/p", "id": 1}' > "$R/.factory/cache/ci-gitlab-project.json"
+git remote set-url origin "https://gitlab.example/g/p.git"
+glmr 64 950 failed "$H5"; gljobs 950 1981060 failed; : > "$FF/calls"
+out="$("$R/.factory/ci" "$I5" --ttl 0)"; has "$out" "CI: INFRA (OOMKilled), retried"
+command grep -qF "jobs/1981060/retry" "$FF/calls" && ok || bad ".factory/ci did not retry: $(cat "$FF/calls")"
+: > "$FF/calls"; out="$("$R/.factory/ci" "$I5" --ttl 0)"; has "$out" "CI: INFRA (OOMKilled), retried"
+command grep -qF "/retry" "$FF/calls" && bad ".factory/ci retried twice" || ok
+command grep -qF "/trace" "$FF/calls" && bad ".factory/ci fetched the same logs again" || ok
+gljobs 950 7001 failed; : > "$FF/calls"; out="$("$R/.factory/ci" "$I5" --ttl 0)"   # the retry failed on the code
+lacks "$out" "CI: INFRA"; command grep -qF "/retry" "$FF/calls" && bad "a code failure was retried by .factory/ci" || ok
+git remote set-url origin "$T/origin.git"
+park "$I5"
+sed -i '/^- Validate/,$d' .factory/repo.md
+unset FACTORY_VALIDATE_BUDGET FACTORY_CI_POLL
+export PATH="$OLDPATH3"; cp "$T/config.infra" .factory/config.json
+
+# ---------- effort labels: `easy` / `good first issue` -> light with a sonnet builder (effort.labels) ----------
+scenario=effort-labels
+cp .factory/config.json "$T/config.el"
+mkdir -p .factory/run/triage
+python3 - <<'PY'
+import json
+c = json.load(open(".factory/config.json"))
+c["issues"] = {"allowed_authors": ["me"], "link": "Closes"}
+json.dump(c, open(".factory/config.json", "w"))
+json.dump([{"number": n, "title": t, "body": t + " body", "author": {"login": "me"}, "labels": [{"name": l} for l in ls],
+            "url": f"https://example.test/{n}", "comments": []}
+           for n, t, ls in [(831, "Easy typo", ["easy"]), (832, "Good first", ["good first issue"]),
+                            (833, "Easy but full", ["easy", "factory:full"]), (834, "Plain", []),
+                            (835, "Easy deps", ["Easy"]), (836, "Small one", ["klein"])]],
+          open(".factory/run/triage/raw-el.json", "w"))
+PY
+J triage prepare .factory/run/triage/raw-el.json --no-agent >/dev/null
+out="$(J triage bundle full 831)"; E1="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+has "$out" "mode light  builder sonnet"; has "$out" "NOTE: effort light, not full: a label on the issue asks for it (builder sonnet)"
+echo SPEC > "$(jd "$E1")/spec.md"; out="$(J next "$E1")"; has "$out" "AGENT: factory-builder"; has "$out" "MODEL: sonnet"; has "$out" "EFFORT: medium"
+park "$E1"
+out="$(J triage bundle full 832)"; has "$out" "mode light  builder sonnet"; park "$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+out="$(J triage bundle full 833)"; E3="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; has "$out" "mode full"; lacks "$out" "builder sonnet"
+field "$E3" "'builder_model' in j" False; park "$E3"
+out="$(J triage bundle full 834)"; has "$out" "mode full"; park "$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+# the floor: an easy job whose diff reaches dependencies becomes full and loses the sonnet builder
+out="$(J triage bundle full 835)"; E5="$(awk '/^JOB:/{print $2; exit}' <<<"$out")"; has "$out" "builder sonnet"
+echo SPEC > "$(jd "$E5")/spec.md"; J next "$E5" >/dev/null; buildnew "$E5" package.json
+out="$(J next "$E5")"; has "$out" "MODE: full"; has "$out" "effort label's builder model no longer applies"
+field "$E5" "j['mode'], 'builder_model' in j" "full False"
+J reviewers "$E5" security,code,audit >/dev/null; review "$E5" 1 code CHANGES; review "$E5" 1 security PASS; review "$E5" 1 audit PASS
+out="$(J next "$E5")"; has "$out" "Build round 2."; has "$out" "MODEL: opus"; park "$E5"
+# effort.labels replaces the defaults: `klein` -> light (no builder pin), `easy` no longer counts
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["effort"]={"labels": {"klein": "light"}}; json.dump(c, open(".factory/config.json","w"))'
+J triage prepare .factory/run/triage/raw-el.json --no-agent >/dev/null
+cat > .factory/run/triage/plan.json <<'JSON'
+{"groups": [{"issues": [836], "mode": "full", "reason": "x"}], "skipped": []}
+JSON
+out="$(J triage plan)"; has "$out" "GROUP 1: light #836"; lacks "$out" "builder"
+python3 -c 'import json; c=json.load(open(".factory/config.json")); c["effort"]={"labels": {"klein": {"mode": "light", "builder": "sonnet"}}}; json.dump(c, open(".factory/config.json","w"))'
+out="$(J triage plan)"; has "$out" "GROUP 1: light #836  (builder sonnet)"
+out="$(J triage start 1)"; has "$out" "builder sonnet"; park "$(awk '/^JOB:/{print $2; exit}' <<<"$out")"
+cp "$T/config.el" .factory/config.json
+
+# ---------- delivery.auto_merge_held: auto-merge also for held jobs, the hold in the PR/MR text ----------
+scenario=automerge-held
+cp .factory/config.json "$T/config.amh"
+amcfg() { python3 - "$1" <<'PY'
+import json, sys
+c = json.load(open(".factory/config.json"))
+c["forge"] = "github"
+c["delivery"] = {"mode": "pr", "remote": "origin", "draft": False, "auto_merge": True, "auto_merge_never": ["data/pii/**"],
+                 **({"auto_merge_held": True} if sys.argv[1] == "on" else {})}
+json.dump(c, open(".factory/config.json", "w"))
+PY
+}
+amcfg off
+A0="$(newjob "zq amh off")"; drive "$A0" src/auth/off.py; merge_decision "$A0"
+out="$(J next "$A0")"; has "$out" "AUTO-MERGE: no (touches auth: src/auth/off.py)"; lacks "$out" "held"
+field "$A0" "sorted(j['auto_merge'])" "['allowed', 'reasons']"; first "$(sed -n 2p "$(jd "$A0")/precheck.md")" "AUTO-MERGE: no: touches auth"
+park "$A0"
+amcfg on
+A1="$(newjob "zq amh auth")"; drive "$A1" src/auth/session2.py; merge_decision "$A1"
+first "$(sed -n 2p "$(jd "$A1")/precheck.md")" "AUTO-MERGE: held: touches auth: src/auth/session2.py"
+out="$(J next "$A1")"; first "$out" "ACTION: deliver"
+has "$out" "AUTO-MERGE: yes (held: touches auth: src/auth/session2.py; delivery.auto_merge_held overrides the hold)"
+has "$out" "gh pr merge <nr> --auto --merge --delete-branch"
+field "$A1" "j['auto_merge']['allowed'], j['auto_merge']['held']" "True ['touches auth: src/auth/session2.py']"
+body="$(cat "$(jd "$A1")/pr-body.md")"; has "$body" "## Auto-merge hold overridden"; has "$body" "- touches auth: src/auth/session2.py"
+park "$A1"
+A2="$(newjob "zq amh pii")"; drive "$A2" data/pii/rows2.py; merge_decision "$A2" "HOLD: new table for the export
+"
+out="$(J next "$A2")"; has "$out" "AUTO-MERGE: yes (held: approver: new table for the export; touches delivery.auto_merge_never: data/pii/rows2.py"
+park "$A2"
+# approved by hand: the gate runs the precheck of this round itself
+A3="$(newjob "zq amh approve")"; drive "$A3" src/plain.py; park "$A3"; rm -f "$(jd "$A3")/precheck.md"
+out="$(J approve "$A3")"; has "$out" "AUTO-MERGE: yes (held: approved by hand (/factory approve), no approver pass"
+exists "$(jd "$A3")/precheck.md"; park "$A3"
+# a precheck issue (a secret-looking file) still blocks
+A4="$(newjob "zq amh secret")"; drive "$A4" config/secrets.yaml; merge_decision "$A4"
+first "$(sed -n 2p "$(jd "$A4")/precheck.md")" "AUTO-MERGE: no: precheck ISSUES"
+out="$(J next "$A4")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"; field "$A4" "j['auto_merge']['allowed']" False; park "$A4"
+cp "$T/config.amh" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

@@ -103,7 +103,7 @@ rerun and were reported as flaky, and rounds were spent on load, not on bugs. Fo
 | `heavy: exit=<n> log=<path>` | The last line of every heavy run and `heavy wait`, also when heavy refuses (exit 75: no room in time, the command did not run) or the command is not found (127). The output is kept in `.factory/run/heavy-run-*.log` for a day. The guard refuses `heavy … | …` without `set -o pipefail` in the same command: a pipe hides the exit code, and a refused build once looked fine and the app was served without it. |
 | `heavy --cache -- <cmd>` | A command runs once per commit: a passing run is recorded for the exact tree (clean tree, same command, same worktree, same behaviour-changing env vars such as `CI`/`*_ENV`/`MODE` and `.env*` files; extend with `limits.cache_env`), so the audit replaying the builder's targeted tests and a sync review replaying the sync builder's full validation get an instant `CACHE HIT` (the round's own full validation runs once, after the reviews: `precheck --validate`). Failures, dirty trees and new commits run for real. |
 | `.factory/guard` | A `PreToolUse` hook in every factory agent: a test, build, install, lint, type-check or browser command that is not run through `heavy` is refused with the fix in the message, so the limits do not depend on the agent remembering. It looks through `&&`/`;`/pipes, `$(…)`, loops, `bash -c`/`-lc`, wrappers (`env`, `timeout`, `xargs`, …) and runners (`uv run`, `npx`, `pnpm exec`, `python -m`, …), and knows npm-family script names (`test:*`, `typecheck`, `e2e`), `make -C`/`-j`, Python, Node, JVM, .NET, Go, Rust and R (`Rscript -e 'devtools::test()'`, `R CMD check`); `--version`/`--help` always pass. It refuses `pkill`/`killall` (they kill by name or pattern, also other sessions' processes; kill by PID, `heavy cancel <ticket>` or `serve stop <port>`). It also refuses `git stash` (except `list`/`show`): one clone has one stash stack for all its worktrees, so parallel jobs swapped each other's changes; the message points to a detached base worktree instead. Needs a trusted workspace (Claude Code runs project-agent hooks only after the trust dialog, in bypass mode too); `limits.guard: false` turns it off. `install` also adds a `--subagents-only` variant to `.claude/settings.local.json`, so ad-hoc `general-purpose` subagents are covered while your own session stays unrestricted. |
-| `limits.open_prs` (default 5) | Jobs at `pr-open` before new ones wait: every merge makes the other open PRs conflict, and CI is the slow part (median 3-14 h from PR to merge). `watch` and `status` show open PRs, the oldest and failing pipelines; the factory never retries a pipeline. `watch` shows one live CI/CD line per `pr-open` job (stages/jobs via `.factory/ci`, GitHub Actions + GitLab CI); `watch <id>` shows the full table, `--no-ci` hides it. |
+| `limits.open_prs` (default 5) | Jobs at `pr-open` before new ones wait: every merge makes the other open PRs conflict, and CI is the slow part (median 3-14 h from PR to merge). `watch` and `status` show open PRs, the oldest and failing pipelines; the factory retries a pipeline only once, and only one that failed on infrastructure (see **Infra failures in CI**). `watch` shows one live CI/CD line per `pr-open` job (stages/jobs via `.factory/ci`, GitHub Actions + GitLab CI); `watch <id>` shows the full table, `--no-ci` hides it. |
 | `limits.respawn_after_min` (default 45) | A pending agent whose file is missing counts as still running for this many minutes: `job next` prints `WAIT: <agent> still running (spawned <n>m ago)` and spends no resume; `job next <id> --respawn` when it did return without its file. `job show <id>` looks without side effects. |
 | `heavy gate` | The orchestrator waits (max 10 min, then continues with a warning) while the CPU is above 90% before it spawns a spec-writer, builder or review wave. |
 
@@ -314,7 +314,21 @@ schema/migrations or auth, nor in `delivery.auto_merge_never` (your globs, e.g. 
 paths); no `HOLD: <reason>` line from the approver (breaking change, public API, user-visible
 behaviour); and no sync in which an agent resolved conflicts (one reviewer checked it: a human merges that;
 a sync that merged the base cleanly and passes the validation does not block, and the factory
-switches auto-merge back on after its push). `/factory setup` runs `.factory/forgecheck`: does CI run on a draft
+switches auto-merge back on after its push).
+
+**Auto-merge for held jobs** (`"delivery": {"auto_merge_held": true}`, default `false`): for a repo
+whose owner wants auto-merge on every PR/MR. The precheck still names each hold
+(`AUTO-MERGE: held: <reasons>`, the approver's `HOLD:` lines too), but delivery prints
+`AUTO-MERGE: yes (held: <reasons>; delivery.auto_merge_held overrides the hold)` and switches
+auto-merge on anyway. The reasons go into the PR/MR description under `## Auto-merge hold overridden`.
+On GitHub: `gh pr merge <nr> --auto --merge --delete-branch` when the repo allows auto-merge, else
+`gh pr merge <nr> --merge --delete-branch` once CI passes. It overrides the holds: hold-class files and
+`auto_merge_never`, an approver `HOLD:`, an audit deviation, `/factory approve`, and a sync with
+resolved conflicts. A precheck issue still blocks: a secret-looking file or content, a failing
+validation, an unconfirmed audit row. For a job approved by hand, the gate runs the precheck of its
+round first.
+
+`/factory setup` runs `.factory/forgecheck`: does CI run on a draft
 PR/MR (if not, use `draft: false`), and does the forge require checks before a merge (if not,
 auto-merge has nothing to wait for and is not switched on).
 
@@ -331,6 +345,43 @@ round as a local failure would be; no pipeline after `no_pipeline_min` (10), a r
 forge that keeps failing is `VALIDATE: ERROR` and `needs-human`. Delivery reuses the branch and the
 PR/MR (title and body replaced, marked ready when it was a draft and `delivery.draft` is false).
 Targeted tests during build and review are unchanged.
+
+**Infra failures in CI.** Some failed jobs say nothing about the change, for example
+onderwijsdata-chat jobs 1981060 and 1981318: `916 passed, 94 skipped`, then `ERROR: Job failed: Error in
+container build: exit code: 137, reason: 'OOMKilled'`. `.factory/ci` classifies a failed job as
+**INFRA** when GitLab's `failure_reason` is a runner/scheduler one, or when its log shows one of these
+and no failing test:
+
+| Log | Reason |
+|---|---|
+| `OOMKilled` | OOMKilled |
+| `exit code 137` | exit code 137 |
+| `ERROR: Job failed (system failure)`, `runner_system_failure` | runner system failure |
+| `scheduler_failure`, `FailedScheduling`, `This job is stuck` | scheduler failure, no runner |
+| runner shutdown or lost communication, `No space left on device` | runner lost, runner out of disk |
+| `timed out waiting for the condition` (a deploy) | deploy environment timed out |
+| a registry/Harbor push error (`quota exceeded`, `denied`, `toomanyrequests`, HTTP 5xx) | registry push error |
+
+A pipeline is INFRA only when every failed job is. The factory then retries the failed jobs once
+(GitLab: `POST jobs/:id/retry`; GitHub: `gh run rerun <run> --failed`) and reports
+`CI: INFRA (<reason>), retried`. In the validation step that is `VALIDATE: PENDING`. If the retry
+fails on infrastructure again, the result is `VALIDATE: INFRA <reason>`: `needs-human`, with no rework
+round and no escalation. For a `pr-open` job, `.factory/ci` does the same once per failed set of jobs.
+A failing test is always a code failure.
+
+**Resume after a pause.** In `validate.mode: ci` the PR/MR exists before delivery, while the job
+is still at `review`, `build` or `needs-human`. `job prs` used to ask the forge only about
+`pr-open` jobs. After a 9-hour pause it reported "0 open MRs" in prompt-library while !705 and !706
+were open: their validations had failed on an SDP preview outage before delivery. One job was at
+`needs-human`, the other had started a round-2 build on a green MR. `job prs` (and so
+`/factory status` and `/factory sync`) now reads the MR state from the forge for every unfinished job
+with a PR/MR, or with a pushed branch that has one, and reports it as
+`OPEN: <id> …: job at <stage>, pipeline <state>`. A job whose last validation failed on
+infrastructure (`VALIDATE: INFRA`, or an older `VALIDATE: FAIL` whose logs read as infra) and whose
+head pipeline is now green for the round's head counts as validated: `RESUME: <id>`. Its
+`validate.md` becomes PASS (the old file is kept as `validate-infra.md`) and the job goes back to
+`review`. An unbuilt round that the failure started is cancelled and its escalation step undone.
+A PR/MR merged on the forge while its job waits at `needs-human` marks the job `merged`.
 
 **Closing lines.** The PR/MR description is written by the script (`.factory/precheck --pr-body`
 → `<job>/pr-body.md`): the approver's `## PR` section plus one `Closes #N` line (`issues.link`) for
@@ -466,21 +517,44 @@ The effort has a **floor**: a `light` job whose diff touches CI/pipeline config,
 schema/migrations or auth (or `delivery.auto_merge_never`) becomes `full` automatically; a `docs` job that touches
 code continues as `light`.
 
+**Effort labels.** Besides `factory:docs|light|full`, a label can mark an issue as small. By default
+`easy` and `good first issue` (any case) set `light` with a **sonnet** builder (at the light builder's
+`medium` effort). Before this, onderwijsdata-chat #1215 (`easy`) ran `full` with opus builders at
+xhigh. A label sets the effort in both directions: `/factory issue <nr>` (default `full`) and a triage
+plan that says `full` both yield `light` for an `easy` issue. Labels on one issue: the highest mode
+wins, so `easy` + `factory:full` is `full`. The builder pin only holds while the job is `light` or
+`docs`. The floor still applies: a diff that touches security/auth, schema, dependencies, CI or
+`auto_merge_never` paths lifts the job to `full` and drops the pin. Configure it in `.factory/config.json`;
+your table replaces the default, and `{}` switches it off:
+
+```json
+"effort": { "labels": { "easy": { "mode": "light", "builder": "sonnet" },
+                        "good first issue": { "mode": "light", "builder": "sonnet" },
+                        "docs-only": "docs" } }
+```
+
 ## Status
 
 The factory is in daily use: the `/factory` loop has run 40+ jobs in several repos (among
 them onderwijsdata-chat and prompt-library), from single features to triaged issue bundles,
-with PR delivery, syncs and auto-merge. Feed findings back here and tag stable versions
-(`git tag v0.x.y`), because `install` records `git describe` in `.factory/VERSION`.
+with PR delivery, syncs and auto-merge. Feed findings back here.
+
+**Releases.** A release is one commit whose subject ends in `(vX.Y.Z)`, with an annotated tag `vX.Y.Z` on
+that commit. Push both at once: `git push origin main vX.Y.Z`. `install` records `git describe --tags` in
+`.factory/VERSION`, so a release without its tag installs as the previous version (v0.14.2 did).
+`tests/release_test.py` fails when a commit subject announces a version that has no tag containing it
+(skipped for pull requests, where the tag comes later). CI on main stays red until the tag is pushed.
 
 Every push and PR runs all suites in GitHub Actions (`.github/workflows/test.yml`). Locally:
 
 | Suite | Checks | What |
 |---|---|---|
-| `bash tests/job_test.sh` | 725 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget, resume and sync limits (`limits.max_syncs`); the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; input checks |
+| `bash tests/job_test.sh` | 818 | the state machine in a throwaway repo with a bare remote, the agents played by writing their files: the full loop with CHANGES, REWORK and MERGE; budget, resume and sync limits (`limits.max_syncs`); the queue under six concurrent `new` calls; docs CLEAN/NOT-DOCS; superseded; `pr` delivery; rework after someone pushed; clean and resolved syncs; the auto-merge gate; reviewer selection by path; the full validation step, locally and on the forge's CI (fake `gh`/`glab`: pass, fail with log tails, pending, draft vs ready PR/MR, no pipeline); heavy priorities; metrics and `job report`; effort, routing, the security floor and the escalation ladder; house style; the `UI work:` line; light vs full ui/ux reviews; pause/unpause; requeue and queue order; syncs without a job slot (`job prs`); closing lines in pr-body.md and post-merge closing with a fake `glab`; reuse of a live job for the same issue; a raw.json that is a table; specialists by size and round; the worktree seed (hardlinks, the venv's paths, a differing lockfile); hidden acceptance tests; old job.json files; infra failures in CI (OOMKilled retried once, `VALIDATE: INFRA` without a rework round, a code failure never retried, GitLab `failure_reason`, `.factory/ci` on a `pr-open` MR); `job prs` for unfinished jobs with an MR (resume after an infra failure once the pipeline is green, a merged MR at `needs-human`); effort labels (`easy`, `good first issue`, `effort.labels`, the floor); `delivery.auto_merge_held` on and off; input checks |
 | `python3 -I tests/guard_test.py` | 205 | allow/deny cases for `.factory/guard` (`tests/guard_cases.txt`) |
 | `python3 -I tests/watch_test.py` | 65 | the board, two repos, every key through a pseudo-terminal, `.factory/ci` with a fake `gh` |
 | `python3 -I tests/forgecheck_test.py` | 35 | CI on drafts, on pushed branches and on PRs/MRs, the `validate` block, required checks, with a fake `gh`/`glab` |
+| `python3 -I tests/ci_infra_test.py` | 17 | the infra classifier on recorded CI log snippets (OOMKilled after green tests, system failure, exit 137, registry push after green and after red tests, lint and test failures, a GitHub runner shutdown), per job and per pipeline |
+| `python3 -I tests/release_test.py` | 5 | every `(vX.Y.Z)` in a commit subject has its tag (on a throwaway repo and on this one) |
 | `python3 -I tests/install_test.py` | 19 | install, exclusion of every template skill, re-install, remove, a repo that tracks its own copy of a skill |
 | `python3 -I tests/prompts_test.py` | pass/fail | prompt copies and the contracts between prompts and scripts stay in step (verdict lines, effort pins, sections, vendored skills, NOTICE) |
 

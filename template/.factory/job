@@ -44,7 +44,9 @@ Later lines: details (AGENT/MODEL/PROMPT blocks for spawns), then NOTE: and STAR
   job requeue <id> ["<reason>"]       put a queued job, or one at spec before round 1, at the end of the queue
                                       (state kept: spec.md, acceptance tests, worktree); frees its slot
   job prs [<id>]                      ask the forge about every pr-open job: merged -> merged + close-issues;
-                                      conflict or behind the base -> ACTION: sync (syncs go before new jobs)
+                                      conflict or behind the base -> ACTION: sync (syncs go before new jobs);
+                                      and about unfinished jobs that already have a PR/MR (validate.mode ci):
+                                      OPEN (with the pipeline), MERGED, RESUME (an infra failure, now green)
   job close-issues <id>               after a merge: close the job's issues the forge left open ("Fixed in
                                       !N (<sha>)"); a partial issue (Refs #N, left: ...) stays open, reported
   job fail <id> "<reason>"            -> needs-human
@@ -72,6 +74,9 @@ RESPAWN = False          # `job next --respawn`: the pending agent returned with
 TRIAGE = os.path.join(HERE, "run", "triage")
 MODE_RANK = {"docs": 0, "light": 1, "full": 2}
 MODE_LABELS = {"factory:docs": "docs", "factory:light": "light", "factory:full": "full"}
+# config effort.labels replaces these: issues a person marked as easy get the light path, sonnet builder
+EFFORT_LABELS = {"easy": {"mode": "light", "builder": "sonnet"},
+                 "good first issue": {"mode": "light", "builder": "sonnet"}}
 SOLO_LABEL = "factory:solo"
 BUNDLE_LABEL = "factory:bundle"
 # a bundle issue lists its members as a checklist in its description: "- [ ] #12" or "- [x] #12"
@@ -253,6 +258,9 @@ def route(job, agent, model, key):
     own = own if isinstance(own, dict) else {}
     pick = lambda v: v.get(mode) if isinstance(v, dict) else v
     model, effort = pick(own.get("model")) or model, pick(own.get("effort")) or effort
+    if agent == "factory-builder" and key.startswith("build-") and job.get("builder_model") in MODELS \
+            and mode in ("light", "docs"):
+        model = job["builder_model"]   # an effort label (effort.labels), e.g. `easy`: a sonnet builder
     taken, why = 0, []
     if agent == "factory-reviewer-security" and key.startswith("review-"):
         fl = security_floor(job)
@@ -986,39 +994,88 @@ def run_precheck(job, n):
     return verdict, issues
 
 
+def held_override():
+    """delivery.auto_merge_held: switch auto-merge on also for a job the factory would hold."""
+    return (config().get("delivery") or {}).get("auto_merge_held") is True
+
+
 def auto_merge_gate(job):
-    """None when auto-merge is not switched on in config; else (allowed, reasons).
+    """None when auto-merge is not switched on in config; else (allowed, reasons, held).
 
     delivery.auto_merge is the switch, this is the gate: it only lets a job through that
     got there by an approver MERGE (or a CLEAN docs precheck), whose precheck is clean and
     whose branch carries no agent-resolved conflict. Everything else is delivered as a ready
-    PR/MR without auto-merge, and a human merges it."""
+    PR/MR without auto-merge, and a human merges it.
+
+    With delivery.auto_merge_held the holds (a hold-class file or auto_merge_never path, an approver
+    HOLD, an audit deviation, approval by hand, a resolved sync conflict) no longer block: they are
+    returned as `held` and go into the PR/MR description. Precheck issues still block."""
     d = (config().get("delivery") or {})
     mode = job.get("delivery_mode") or d.get("mode") or "local"
     if mode != "pr" or not d.get("auto_merge") or d.get("draft", True):
         return None
-    jd, why = jdir(job["id"]), []
+    jd, hard, soft = jdir(job["id"]), [], []
+    conflict = "an agent resolved merge conflicts with the base (sync); a human merges"
     if job.get("adopted"):   # made outside the factory: only the conflict patch counts
         if sync_conflicts(job) > 0:
-            why.append("an agent resolved merge conflicts with the base (sync); a human merges")
-        return (not why), why
-    docs = job.get("mode") == "docs"
-    if job.get("approved_by"):
-        why.append("approved by hand (/factory approve), no approver pass")
-    elif not docs and job.get("pr_text") != "decision.md":
-        why.append("no approver MERGE decision")
-    if not docs and os.path.exists(os.path.join(jd, "decision.md")):
-        for line in open(os.path.join(jd, "decision.md"), errors="replace"):
-            if line.startswith("HOLD:"):
-                why.append("approver: " + (line[5:].strip() or "hold"))
-    pre = (first_lines(os.path.join(jd, "precheck.md"), 2) + ["", ""])[1]
-    if not pre.startswith("AUTO-MERGE:"):
-        why.append("no precheck result for this round")
-    elif not pre.startswith("AUTO-MERGE: yes"):
-        why.append(pre[len("AUTO-MERGE:"):].strip().removeprefix("no:").strip() or "precheck")
-    if sync_conflicts(job) > 0:
-        why.append("an agent resolved merge conflicts with the base (sync); a human merges")
-    return (not why), why
+            soft.append(conflict)
+    else:
+        docs = job.get("mode") == "docs"
+        if job.get("approved_by"):
+            soft.append("approved by hand (/factory approve), no approver pass")
+        elif not docs and job.get("pr_text") != "decision.md":
+            hard.append("no approver MERGE decision")
+        if not docs and os.path.exists(os.path.join(jd, "decision.md")):
+            for line in open(os.path.join(jd, "decision.md"), errors="replace"):
+                if line.startswith("HOLD:"):
+                    soft.append("approver: " + (line[5:].strip() or "hold"))
+        pp = os.path.join(jd, "precheck.md")
+        if held_override() and (first_lines(pp, 4) + [""] * 4)[3].split(":")[0] != f"Job {job['id']}, round {int(job.get('round') or 0)}":
+            run_precheck(job, int(job.get("round") or 1))   # approved by hand: the precheck of this round
+        pre = (first_lines(pp, 2) + ["", ""])[1]
+        if not pre.startswith("AUTO-MERGE:"):
+            hard.append("no precheck result for this round")
+        elif pre.startswith("AUTO-MERGE: held:"):
+            soft += [x.strip() for x in pre[len("AUTO-MERGE: held:"):].split(";") if x.strip()]
+        elif not pre.startswith("AUTO-MERGE: yes"):
+            hard.append(pre[len("AUTO-MERGE:"):].strip().removeprefix("no:").strip() or "precheck")
+        if sync_conflicts(job) > 0:
+            soft.append(conflict)
+    if held_override():
+        return (not hard), hard, soft
+    return (not hard and not soft), hard + soft, []
+
+
+def auto_merge_record(gate):
+    """job.json's auto_merge for a gate result (`held` only with delivery.auto_merge_held)."""
+    if gate is None:
+        return None
+    rec = {"allowed": gate[0], "reasons": gate[1]}
+    if held_override():
+        rec["held"] = gate[2]
+    return rec
+
+
+def auto_merge_line(gate, push=False):
+    """The AUTO-MERGE line of a delivery (push=False) or of a sync's push (push=True)."""
+    allowed, why, held = gate
+    if not allowed:
+        return ("AUTO-MERGE: no (" + "; ".join(why) + "): " +
+                ("switch auto-merge off before the push" if push else
+                 "open the PR/MR ready for review, leave auto-merge off, and switch it off if this PR/MR already has it"))
+    if not held:
+        return ("AUTO-MERGE: yes: after the push switch auto-merge on again (the forge may drop it on a new push) "
+                "and verify it" if push else "AUTO-MERGE: yes")
+    return ("AUTO-MERGE: yes (held: " + "; ".join(held) + "; delivery.auto_merge_held overrides the hold): "
+            + ("after the push switch auto-merge on again and verify it" if push else
+               "switch auto-merge on anyway; the PR/MR description lists the hold under \"" + HELD_HEADING + "\""))
+
+
+HELD_HEADING = "## Auto-merge hold overridden"
+HELD_MERGE = {"github": "MERGE: github: `gh pr merge <nr> --auto --merge --delete-branch` when the repo allows auto-merge; "
+                        "else wait until CI passes, then `gh pr merge <nr> --merge --delete-branch`",
+              "gitlab": "MERGE: gitlab: auto-merge as under Delivery (`merge_when_pipeline_succeeds`); the forge merges "
+                        "once the pipeline passes"}
 
 
 def pr_body(job, out):
@@ -1220,6 +1277,8 @@ def step(job, out, start=None):
                 held = hold_files(job)
                 if held:
                     job["mode"], job["mode_from"] = "full", "light"
+                    if job.pop("builder_model", None):
+                        out.notes.append("NOTE: the effort label's builder model no longer applies (full job)")
                     out.notes.append("NOTE: the change touches " + "; ".join(held[:3])
                                      + (" …" if len(held) > 3 else "") + ": running the full review (was --light)")
             if job.get("mode") != "docs":
@@ -1274,7 +1333,8 @@ def step(job, out, start=None):
             v = os.path.join(jd, f"round-{n}", "validate.md")
             vfl = first_line(v) or ""
             head = git("rev-parse", "HEAD", cwd=job["worktree"])
-            if not vfl.startswith(("VALIDATE: PASS", "VALIDATE: FAIL", "VALIDATE: NONE", "VALIDATE: ERROR")) or \
+            if not vfl.startswith(("VALIDATE: PASS", "VALIDATE: FAIL", "VALIDATE: NONE", "VALIDATE: ERROR",
+                                   "VALIDATE: INFRA")) or \
                     (first_lines(v, 2) + ["", ""])[1] != f"Head: {head}":
                 ci = validate_mode(job) == "ci"
                 out.main += ["ACTION: validate",
@@ -1286,6 +1346,14 @@ def step(job, out, start=None):
                              f"THEN: .factory/job next {job['id']}"]
                 return
             ci_pr(job, os.path.join(jd, f"round-{n}", "validate.json"), out)
+            if vfl.startswith("VALIDATE: INFRA"):
+                # Not the change: no rework round, no escalation. `job prs` counts the validation as
+                # passed once the head pipeline is green on the forge (a retry by a human or later).
+                job["infra"] = {"round": n, "reason": vfl[16:].strip(), "at": now()}
+                set_stage(job, "needs-human", f"round {n}: CI failed on infrastructure ({vfl[16:].strip()}), retried "
+                                              "once; not a code failure, no rework round. Retry the pipeline later: "
+                                              ".factory/job prs continues the job once it is green")
+                continue
             if vfl.startswith("VALIDATE: ERROR"):
                 set_stage(job, "needs-human", f"round {n}: the CI validation could not run: {vfl[16:].strip()} "
                                               f"(see round-{n}/validate.md)")
@@ -1340,12 +1408,12 @@ def step(job, out, start=None):
             mode = job.get("delivery_mode") or (config().get("delivery") or {}).get("mode") or "local"
             text = job.get("pr_text")
             gate = auto_merge_gate(job) if mode == "pr" else None
-            job["auto_merge"] = None if gate is None else {"allowed": gate[0], "reasons": gate[1]}
+            job["auto_merge"] = auto_merge_record(gate)
             out.main += ["ACTION: deliver", f"MODE: {mode}"]
             if gate is not None:
-                out.main.append("AUTO-MERGE: yes" if gate[0] else
-                                "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): open the PR/MR ready for review, "
-                                "leave auto-merge off, and switch it off if this PR/MR already has it")
+                out.main.append(auto_merge_line(gate))
+                if gate[0] and gate[2]:
+                    out.main.append(HELD_MERGE.get(config().get("forge"), HELD_MERGE["gitlab"]))
             vpr = job.get("validate_pr") or {}
             if mode == "pr" and vpr.get("url"):
                 out.main.append(f"PR: {vpr['url']} is already open ({'a draft' if vpr.get('draft') else 'ready'}, "
@@ -1419,14 +1487,12 @@ def sync_step(job, out, start):
 def sync_push(job, out, n):
     gate = auto_merge_gate(job)
     if gate is not None:
-        job["auto_merge"] = {"allowed": gate[0], "reasons": gate[1]}
+        job["auto_merge"] = auto_merge_record(gate)
     out.main += ["ACTION: push", f"SYNC: {'conflicts resolved by an agent' if job['syncing']['conflicts'] else 'clean (no conflicts)'}"]
     if gate is not None and gate[0] and job.get("adopted"):
         out.main.append("AUTO-MERGE: keep: an adopted PR/MR; leave its auto-merge setting as it is")
     elif gate is not None:
-        out.main.append("AUTO-MERGE: yes: after the push switch auto-merge on again (the forge may drop it on a new "
-                        "push) and verify it" if gate[0] else
-                        "AUTO-MERGE: no (" + "; ".join(gate[1]) + "): switch auto-merge off before the push")
+        out.main.append(auto_merge_line(gate, push=True))
     out.main += [f"PUSH: git -C {job['worktree']} push {remote()} {job['branch']}   (never --force)",
                  "CHECK: the PR/MR is mergeable again",
                  f"THEN: .factory/job sync-done {job['id']}   (push rejected: .factory/job fail {job['id']} \"<error>\")"]
@@ -1448,7 +1514,7 @@ def job_issues(job):
     return [job["issue"]] if isinstance(job.get("issue"), int) else []
 
 
-def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delivery=None):
+def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delivery=None, builder=None):
     """Create the job (queued or started) and print its first action. Takes the lock itself."""
     base = git("branch", "--show-current")
     if not base:
@@ -1478,12 +1544,14 @@ def create_job(feature, mode="full", issues=(), urls=(), untrusted=False, delive
             job["untrusted"] = True
         if delivery:
             job["delivery_mode"] = delivery
+        if builder in MODELS and mode != "full":
+            job["builder_model"] = builder   # an effort label (effort.labels): e.g. sonnet for `easy`
         os.makedirs(jdir(jid))
         save(job)
         promote(out)
         out.notes = [x for x in out.notes if not x.startswith(f"STARTED: {jid} ")]
         job = load(jid)
-        out.main.append(f"JOB: {jid}  port {port}  base {base}  mode {mode}"
+        out.main.append(f"JOB: {jid}  port {port}  base {base}  mode {mode}" + (f"  builder {builder}" if job.get("builder_model") else "")
                         + (f"  issues {', '.join('#' + str(i) for i in issues)}" if len(issues) > 1 else ""))
         step(job, out)
         save(job)
@@ -2181,7 +2249,8 @@ def norm_pr(x):
                 "fork": x.get("source_project_id") != x.get("target_project_id"),
                 "state": {"opened": "open"}.get(str(x.get("state")), str(x.get("state") or "")), "conflict": conflict,
                 "behind": dms == "need_rebase",
-                "sha": x.get("merge_commit_sha") or x.get("squash_commit_sha") or None}
+                "sha": x.get("merge_commit_sha") or x.get("squash_commit_sha") or None,
+                "head": x.get("sha"), "pipeline": gl_pipeline_state(x.get("head_pipeline"))}
     m = str(x.get("mergeable") or "").upper()
     conflict = True if m == "CONFLICTING" or str(x.get("mergeStateStatus") or "").upper() == "DIRTY" else \
         None if m in ("UNKNOWN", "") else False
@@ -2190,11 +2259,39 @@ def norm_pr(x):
             "branch": x.get("headRefName"), "base": x.get("baseRefName"), "fork": bool(x.get("isCrossRepository")),
             "state": str(x.get("state") or "").lower(), "conflict": conflict,
             "behind": str(x.get("mergeStateStatus") or "").upper() == "BEHIND",
-            "sha": (x.get("mergeCommit") or {}).get("oid") if isinstance(x.get("mergeCommit"), dict) else None}
+            "sha": (x.get("mergeCommit") or {}).get("oid") if isinstance(x.get("mergeCommit"), dict) else None,
+            "head": x.get("headRefOid"), "pipeline": gh_rollup_state(x.get("statusCheckRollup"))}
+
+
+def gl_pipeline_state(p):
+    """success|failed|running|none (None: the forge said nothing) of a GitLab MR's head_pipeline."""
+    if not isinstance(p, dict):
+        return "none" if p is None else None
+    st = str(p.get("status") or "").lower()
+    return {"success": "success", "failed": "failed", "canceled": "failed"}.get(st, "running" if st else None)
+
+
+def gh_rollup_state(rollup):
+    """success|failed|running|none of a GitHub PR's statusCheckRollup (None: not asked for)."""
+    if rollup is None:
+        return None
+    if not rollup:
+        return "none"
+    sts = []
+    for c in rollup:
+        if c.get("__typename") == "StatusContext" or ("state" in c and "status" not in c):
+            st = str(c.get("state") or "").upper()
+            sts.append("success" if st == "SUCCESS" else "failed" if st in ("FAILURE", "ERROR") else "running")
+        elif str(c.get("status") or "").upper() != "COMPLETED":
+            sts.append("running")
+        else:
+            cc = str(c.get("conclusion") or "").upper()
+            sts.append("success" if cc in ("SUCCESS", "NEUTRAL", "SKIPPED") else "failed")
+    return "failed" if "failed" in sts else "running" if "running" in sts else "success"
 
 
 GH_PR_FIELDS = "number,url,title,body,author,headRefName,baseRefName,isCrossRepository,state,mergeable,mergeStateStatus"
-GH_PR_VIEW_FIELDS = GH_PR_FIELDS + ",mergeCommit"
+GH_PR_VIEW_FIELDS = GH_PR_FIELDS + ",mergeCommit,headRefOid,statusCheckRollup"
 
 
 def forge_json(cmd):
@@ -2354,20 +2451,146 @@ def mark_merged(job, out, sha=None):
     cleanup(job, out, remove_worktree=True)
 
 
+def ci_module():
+    """.factory/ci as a module (its infra classifier)."""
+    import importlib.machinery, importlib.util
+    sys.dont_write_bytecode = True
+    loader = importlib.machinery.SourceFileLoader("factory_ci", os.path.join(HERE, "ci"))
+    spec = importlib.util.spec_from_loader("factory_ci", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def infra_failure(job):
+    """(round, reason) when the job's last full validation failed on infrastructure: `VALIDATE: INFRA`,
+    or a `VALIDATE: FAIL` from before v0.15.0 whose every failed job's log reads as infrastructure."""
+    n = int(job.get("round") or 0)
+    v = os.path.join(jdir(job["id"]), f"round-{n}", "validate.md")
+    fl = first_line(v) or ""
+    if fl.startswith("VALIDATE: INFRA"):
+        return n, fl[16:].strip() or "infrastructure"
+    if not fl.startswith("VALIDATE: FAIL"):
+        return None
+    text = open(v, errors="replace").read()
+    parts = re.split(r"^## Failed: `[^`]*`\s*$", text, flags=re.M)[1:]
+    if not parts:
+        return None
+    try:
+        ci = ci_module()
+    except Exception:
+        return None
+    whys = [ci.log_infra_reason(p.split("\n```\n", 2)[1] if p.count("```") >= 2 else p) for p in parts]
+    return (n, ", ".join(dict.fromkeys(whys))) if all(whys) else None
+
+
+def infra_recover(job, pr, out):
+    """The job's last validation failed on infrastructure and the forge's head pipeline of its PR/MR
+    is green for the job's head: count the validation as passed (round-N/validate.md PASS, the old file
+    kept as validate-infra.md) and put the job back at review, without a rework round. A round-N+1
+    build that the failure started and that has not run yet is cancelled (and its escalation undone).
+    Returns the report line or None."""
+    if job.get("stage") not in ("needs-human", "build", "review") or pr.get("pipeline") != "success":
+        return None
+    inf = infra_failure(job)
+    if not inf:
+        return None
+    n, why = inf
+    jd = jdir(job["id"])
+    if job.get("stage") == "build" and os.path.exists(os.path.join(jd, f"round-{n + 1}", "build.md")):
+        return None   # the next round was built already: let it run
+    pend = job.get("pending") or {}
+    if job.get("stage") == "build" and isinstance(pend.get("ts"), (int, float)) and \
+            (time.time() - pend["ts"]) / 60 < respawn_after():
+        return (f"INFRA: {job['id']}: round {n} failed on infrastructure ({why}) and the head pipeline is green now, "
+                f"but the round-{n + 1} builder may still run: stop it, then run .factory/job prs again")
+    head = (job.get("round_heads") or {}).get(str(n))
+    wt_head = git("rev-parse", "HEAD", cwd=job["worktree"]) if os.path.isdir(job.get("worktree") or "") else None
+    if not head or pr.get("head") != head or (wt_head and wt_head != head):
+        return f"INFRA: {job['id']}: round {n} failed on infrastructure ({why}), but the PR/MR head is not the round's head"
+    v = os.path.join(jd, f"round-{n}", "validate.md")
+    os.replace(v, os.path.join(jd, f"round-{n}", "validate-infra.md"))
+    with open(v, "w") as f:
+        f.write(f"VALIDATE: PASS\nHead: {head}\nPR: {job.get('pr_url')}\n\nThe full validation of round {n} failed on "
+                f"infrastructure ({why}; see validate-infra.md). The forge's head pipeline of the PR/MR has since passed "
+                f"for {head[:12]}: it counts as the full validation (`.factory/job prs`, {now()}).\n")
+    if job.get("stage") == "build":
+        if str((job.get("pending") or {}).get("key") or "") == f"build-{n + 1}":
+            job.pop("pending", None)
+        esc = (job.get("escalation") or {}).get("builder") or {}
+        whys = esc.get("why") or []
+        mark = f"round {n}: the full validation failed"
+        if mark in whys:
+            whys.remove(mark)
+            esc["steps"] = max(0, int(esc.get("steps") or 0) - 1)
+    job.pop("infra", None)
+    job.pop("reason", None)
+    set_stage(job, "review", f"round {n}: head pipeline green on the forge after an infrastructure failure ({why})")
+    return (f"RESUME: {job['id']} ({job.get('pr_url')}): round {n} failed on infrastructure ({why}); the head pipeline "
+            f"is green on the forge, so the validation counts as passed: run .factory/job next {job['id']}")
+
+
 def cmd_prs(args):
-    """Ask the forge about every pr-open job (or one): merged, closed, conflicting or behind."""
+    """Ask the forge about every job with a PR/MR: pr-open jobs (merged, closed, conflicting or
+    behind) and unfinished ones whose PR/MR the CI validation opened before delivery (validate.mode ci),
+    or whose branch has an open PR/MR. Those are reported with their pipeline, merged ones are marked
+    merged, and one whose validation failed on infrastructure continues once its head pipeline is green."""
     want = args[0] if args else None
     jobs = [j for j in all_jobs() if (want is None or j["id"] == want)]
     if want and not jobs:
         raise Fail(f"no job {want}")
-    seen = {}
+    seen, early, lookups = {}, {}, []
     for j in jobs:   # forge calls outside the lock
-        if j.get("stage") == "pr-open" and pr_number(j):
+        if j.get("adopted"):
+            if j.get("stage") == "pr-open" and pr_number(j):
+                seen[j["id"]] = forge_pr(pr_number(j))
+        elif j.get("stage") == "pr-open" and pr_number(j):
             seen[j["id"]] = forge_pr(pr_number(j))
+        elif j.get("stage") in UNFINISHED and pr_number(j):
+            early[j["id"]] = forge_pr(pr_number(j))
+        elif j.get("stage") in UNFINISHED and j.get("branch") and int(j.get("round") or 0) >= 1 and \
+                (j.get("delivery_mode") or (config().get("delivery") or {}).get("mode")) == "pr":
+            lookups.append(j)
+    if lookups:   # no PR/MR recorded: is there an open one for the job's branch?
+        prs, _ = forge_open_prs()
+        by_branch = {p["branch"]: p for p in prs if not p.get("fork")}
+        for j in lookups:
+            p = by_branch.get(j["branch"])
+            if p:
+                early[j["id"]] = forge_pr(p["nr"]) if p.get("nr") else (p, None)
     out, syncs, other = Out(), [], []
     with Lock():
         jobs = all_jobs()
         for j in jobs:
+            if j["id"] in early and j.get("stage") in UNFINISHED:
+                pr, err = early[j["id"]]
+                tag = f"{j['id']} ({j.get('pr_url') or (pr or {}).get('url') or pr_number(j)})"
+                if not pr:
+                    other.append(f"UNKNOWN: {tag}: the forge did not answer ({err})")
+                    continue
+                if not j.get("pr_url") and pr.get("url"):
+                    j["pr_url"] = pr["url"]
+                    tag = f"{j['id']} ({pr['url']})"
+                if pr["state"] == "merged":
+                    if j.get("stage") in ("needs-human", "queued"):
+                        was = j.get("stage")
+                        mark_merged(j, out, pr.get("sha"))
+                        other.append(f"MERGED: {tag}: merged on the forge while the job was at {was}")
+                    else:
+                        other.append(f"MERGED: {tag}: merged on the forge while the job is at {j.get('stage')}: "
+                                     f"stop it (.factory/job fail {j['id']} \"merged\") or check")
+                elif pr["state"] != "open":
+                    other.append(f"CLOSED: {tag}: {pr['state']} without merge, the job is at {j.get('stage')}")
+                else:
+                    merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
+                    if pr.get("behind") and not pr["conflict"]:
+                        merge = "behind"
+                    j["pr_state"] = dict(j.get("pr_state") or {}, at=now(), merge=merge,
+                                         **({"pipeline": pr["pipeline"]} if pr.get("pipeline") else {}))
+                    line = infra_recover(j, pr, out)
+                    other.append(line or f"OPEN: {tag}: job at {j.get('stage')} (round {int(j.get('round') or 0)}), "
+                                          f"pipeline {pr.get('pipeline') or '?'}, {merge}")
+                save(j)
             if j["id"] in seen and j.get("stage") == "pr-open":
                 pr, err = seen[j["id"]]
                 tag = f"{j['id']} ({j.get('pr_url') or pr_number(j)})"
@@ -2385,7 +2608,8 @@ def cmd_prs(args):
                     merge = {True: "conflict", False: "mergeable", None: "unknown"}[pr["conflict"]]
                     if pr.get("behind") and not pr["conflict"]:
                         merge = "behind"
-                    j["pr_state"] = dict(j.get("pr_state") or {}, at=now(), merge=merge)
+                    j["pr_state"] = dict(j.get("pr_state") or {}, at=now(), merge=merge,
+                                         **({"pipeline": pr["pipeline"]} if pr.get("pipeline") else {}))
                     if j.get("syncing"):
                         other.append(f"SYNCING: {tag}: a sync is running: .factory/job next {j['id']}")
                     elif merge in ("conflict", "behind"):
@@ -2401,6 +2625,9 @@ def cmd_prs(args):
                 other += sub.main
                 out.notes += sub.notes
         promote(out)
+    n_open = len(seen) + sum(1 for x in early.values() if x[0] and x[0].get("state") == "open")
+    n_early = n_open - len(seen)
+    more = f" ({n_early} of them before delivery)" if n_early else ""
     if syncs:
         out.main.append(f"ACTION: sync {len(syncs)} PR/MR{'s' if len(syncs) > 1 else ''} first (before any new job; "
                         "a sync needs no job slot)")
@@ -2408,7 +2635,7 @@ def cmd_prs(args):
             out.main += [f"SYNC: {j['id']} {j.get('pr_url') or ''} {j['pr_state']['merge']}".rstrip(),
                          f"RUN: .factory/job sync {j['id']}   (then drive it as in /factory sync)"]
     else:
-        out.main.append(f"DONE: {len(seen)} open PR/MR{'s' if len(seen) != 1 else ''} checked: no sync needed")
+        out.main.append(f"DONE: {n_open} open PR/MR{'s' if n_open != 1 else ''} checked{more}: no sync needed")
     out.main += other
     return out
 
@@ -2838,10 +3065,44 @@ def triage_prepare(args):
     return out
 
 
+def effort_labels():
+    """{label (lower case): (mode, builder model or None)}: the factory:docs|light|full labels plus
+    config effort.labels (default EFFORT_LABELS: `easy` and `good first issue` -> light with a sonnet
+    builder). A value is a mode, or {"mode": <docs|light|full>, "builder": <haiku|sonnet|opus>}."""
+    eff = config().get("effort")
+    raw = eff.get("labels") if isinstance(eff, dict) and isinstance(eff.get("labels"), dict) else EFFORT_LABELS
+    out = {k: (v, None) for k, v in MODE_LABELS.items()}
+    for k, v in raw.items():
+        mode, model = (v, None) if isinstance(v, str) else (v.get("mode"), v.get("builder")) if isinstance(v, dict) else (None, None)
+        if mode in MODE_RANK:
+            out[str(k).lower()] = (mode, model if model in MODELS else None)
+    return out
+
+
+def label_route(c):
+    """(mode, builder model) a human asked for with a label (the highest mode if there are several;
+    a builder model only when every label of that mode names the same one), or (None, None)."""
+    table = effort_labels()
+    hits = [table[l.lower()] for l in c.get("labels") or [] if l.lower() in table]
+    if not hits:
+        return None, None
+    mode = max((m for m, _ in hits), key=MODE_RANK.get)
+    models = {b for m, b in hits if m == mode}
+    return mode, (models.pop() if len(models) == 1 and None not in models else None)
+
+
 def issue_override(c):
     """The effort a human asked for with a label (the highest if there are several), or None."""
-    modes = [MODE_LABELS[l.lower()] for l in c["labels"] if l.lower() in MODE_LABELS]
-    return max(modes, key=MODE_RANK.get) if modes else None
+    return label_route(c)[0]
+
+
+def group_builder(cs, mode):
+    """The builder model of a job from issues cs at `mode`: the label's model when every issue has a
+    label that asks for one model and mode is not full (a full job keeps the routing defaults)."""
+    if mode == "full" or not cs:
+        return None
+    models = {label_route(c)[1] if label_route(c)[0] == mode else None for c in cs}
+    return models.pop() if len(models) == 1 and None not in models else None
 
 
 def triage_plan(args):
@@ -2873,7 +3134,11 @@ def triage_plan(args):
             for i in range(0, len(nrs), size):
                 add(nrs[i:i + size], mode, reason)
             return
-        groups.append({"issues": nrs, "mode": final, "reason": reason, "started": None})
+        g = {"issues": nrs, "mode": final, "reason": reason, "started": None}
+        b = group_builder([cands[n] for n in nrs], final)
+        if b:
+            g["builder"] = b
+        groups.append(g)
 
     for g in plan.get("groups") or []:
         if not isinstance(g, dict):
@@ -2930,7 +3195,8 @@ def triage_plan(args):
     for g in groups:
         tags = " ".join(f"#{n}" for n in g["issues"])
         titles = "; ".join(cands[n]["title"][:50] for n in g["issues"][:1 if g.get("bundle") else None])
-        out.main.append(f"GROUP {g['k']}: {g['mode']:<5} {tags}  " + (f"bundle #{g['bundle']}: " if g.get("bundle") else "")
+        out.main.append(f"GROUP {g['k']}: {g['mode']:<5} {tags}  " + (f"(builder {g['builder']}) " if g.get("builder") else "")
+                        + (f"bundle #{g['bundle']}: " if g.get("bundle") else "")
                         + titles + (f"  [{g['reason']}]" if g["reason"] else ""))
     out.main += [f"LEFT-OUT: #{x['issue']}: {x['reason'] or 'no reason given'}" for x in skipped]
     out.notes += notes
@@ -2952,7 +3218,11 @@ def bundle_group(bc, mode, data, notes):
     if len(nrs) - 1 > size:
         notes.append(f"NOTE: bundle #{bc['nr']} has {len(nrs) - 1} member issues, more than a {final} job "
                      f"usually takes ({size}): kept together, it is your grouping")
-    return {"issues": nrs, "mode": final, "bundle": bc["nr"]}
+    g = {"issues": nrs, "mode": final, "bundle": bc["nr"]}
+    b = group_builder([bc] + list(bc.get("members") or []), final)
+    if b:
+        g["builder"] = b
+    return g
 
 
 def issue_text(c):
@@ -3006,7 +3276,8 @@ def triage_start(args):
     if taken & set(group["issues"]):
         raise Fail(f"an issue of group {k} has a job now: run `job triage prepare` again")
     nrs = group["issues"]
-    out = create_job(group_feature(group, cands), group["mode"], nrs, group_urls(group, cands), untrusted=True)
+    out = create_job(group_feature(group, cands), group["mode"], nrs, group_urls(group, cands), untrusted=True,
+                     builder=group.get("builder"))
     jid = next((l.split()[1] for l in out.main if l.startswith("JOB: ")), None)
     group["started"] = jid
     tri_write("groups.json", gdata)
@@ -3042,19 +3313,23 @@ def triage_bundle(args):
         notes = []
         group = bundle_group(cands[bundles[0]], args[0], data, notes)
         out = create_job(group_feature(group, cands), group["mode"], group["issues"], group_urls(group, cands),
-                         untrusted=True)
+                         untrusted=True, builder=group.get("builder"))
         out.notes += notes
         return out
-    mode = max([args[0]] + [issue_override(cands[n]) or args[0] for n in nrs], key=MODE_RANK.get)
+    # A label wins over the asked effort, also downwards: `easy` makes a plain `/factory issue` light
+    mode = max([issue_override(cands[n]) or args[0] for n in nrs], key=MODE_RANK.get)
     size = int(data.get("full_bundle_max") or FULL_BUNDLE_MAX) if mode == "full" else int(data.get("bundle_max") or BUNDLE_MAX)
     if len(nrs) > size:
         raise Fail(f"a {mode} job takes at most {size} issues (limits.bundle_max / full_bundle_max); split it")
     solo = [n for n in nrs if SOLO_LABEL in [l.lower() for l in cands[n]["labels"]]]
     if solo and len(nrs) > 1:
         raise Fail(", ".join(f"#{n}" for n in solo) + f" has {SOLO_LABEL}: it is never bundled")
-    out = create_job(group_feature({"issues": nrs}, cands), mode, nrs, [cands[n].get("url") for n in nrs], untrusted=True)
+    builder = group_builder([cands[n] for n in nrs], mode)
+    out = create_job(group_feature({"issues": nrs}, cands), mode, nrs, [cands[n].get("url") for n in nrs], untrusted=True,
+                     builder=builder)
     if mode != args[0]:
-        out.notes.append(f"NOTE: effort {mode}, not {args[0]}: a label on one of the issues asks for it")
+        out.notes.append(f"NOTE: effort {mode}, not {args[0]}: a label on the issue{'s' if len(nrs) > 1 else ''} asks for it"
+                         + (f" (builder {builder})" if builder else ""))
     return out
 
 

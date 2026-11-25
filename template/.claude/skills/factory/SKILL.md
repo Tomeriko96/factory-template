@@ -48,7 +48,9 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   `issues.skip_labels` (default `blocked`, `wontfix`, `factory:in-progress`). `issues.label`
   is optional: when set, only issues with that label count (older configs have
   `factory:ready`; leave it out to take all). Labels that steer a single issue:
-  `factory:docs|light|full` (the effort, wins over the triage), `factory:solo` (never
+  `factory:docs|light|full` (the effort, wins over the triage), the effort labels of
+  `effort.labels` (default: `easy` and `good first issue` → `light` with a sonnet builder; they
+  win over the triage and over `/factory issue`'s default `full`), `factory:solo` (never
   bundled), `factory:bundle` (a bundle issue: one job for it and its members, see **Bundle
   issues**). `limits.bundle_max` (default 4) is the most issues in one `docs`/`light` job
   (a `full` job takes at most `limits.full_bundle_max`, default 2). `issues.link` is the keyword that
@@ -65,6 +67,16 @@ Read `.factory/config.json` at the start of every command. If it is missing, onl
   Only meaningful with `draft: false` (a draft cannot merge); with both set, ignore the
   auto-merge and say so. It is the switch, not the decision: `.factory/job` gates every
   delivery (`AUTO-MERGE: yes|no` in `ACTION: deliver`, see **Delivery**).
+- `delivery.auto_merge_held` (optional, default `false`): `true` = auto-merge on every PR/MR, also
+  for a job the factory holds (hold-class files or `auto_merge_never`, an approver `HOLD:`, an audit
+  deviation, `/factory approve`, a resolved sync conflict). The precheck still names the hold
+  (`AUTO-MERGE: held: …`) and delivery puts it into the PR/MR description; precheck issues
+  (secrets, failing validation) still block. See **Delivery**.
+- `effort` (optional): `effort.labels` maps an issue label to a mode, or to
+  `{"mode": "light", "builder": "sonnet"}` (the builder's model while the job stays `light`/`docs`).
+  Missing → `easy` and `good first issue` map to light with a sonnet builder; `{}` → no labels
+  beyond `factory:*`. The floor still lifts such a job to `full` (and drops the pin) when its diff
+  touches security/auth, schema, dependencies, CI or `auto_merge_never` paths.
 - `delivery.auto_merge_never` (optional): extra globs that always keep a job off auto-merge,
   for paths CI cannot vouch for: put the personal-data paths here. The defaults already
   cover CI/pipeline config, dependencies and lockfiles, containers and deploy config,
@@ -257,7 +269,14 @@ line of its output, act, and call `.factory/job next <id>` again:
   commit's pipeline through `.factory/ci` (bounded polls inside the call, then `PENDING`; never a
   sleep loop of yours). A failing pipeline is `VALIDATE: FAIL` with the failing jobs and their log
   tails, exactly like a local failure; `VALIDATE: ERROR <why>` (push rejected, PR/MR not opened, no
-  pipeline, the forge not answering) sends the job to `needs-human`.
+  pipeline, the forge not answering) sends the job to `needs-human`. A pipeline that failed only on
+  infrastructure (OOMKilled, exit 137, runner/scheduler failure, a registry/Harbor push error after
+  green tests) is retried once by the script itself: the call prints `VALIDATE: PENDING` plus
+  `CI: INFRA (<reason>), retried`; run it again as usual. Failing on infrastructure again is
+  `VALIDATE: INFRA <reason>`: `needs-human` without a rework round. Report
+  `CI: INFRA (<reason>), retried once, failed again`, never start `/factory rework` for it; once the
+  pipeline is green on the forge (a retry later), `.factory/job prs` continues the job
+  (`RESUME: <id>`, then `job next <id>`).
 - `ACTION: deliver` → see **Delivery**, then `job delivered` (or `job fail`).
 - `ACTION: push` → only in a sync: see `/factory sync`.
 - `WAIT: …` / `DONE: …` → report it in one line (with `NEXT:` if given) and stop.
@@ -400,7 +419,8 @@ Several numbers = **one job for all of them** (a bundle you chose yourself): `mk
 .factory/run/triage`, fetch the open issues as for `next`, `.factory/job triage prepare
 .factory/run/triage/raw.json --no-agent` (the filter, no triage agent), then `.factory/job triage bundle
 <docs|light|full> <nr> <nr>…` (`--docs`/`--light` pick the effort, else `full`; the script applies the
-size limits and the label overrides) and drive the job. Never start a bundle with `job new "<text>"` and
+size limits and the label overrides: a label wins also downwards, so an `easy` issue becomes `light`
+with a sonnet builder, `JOB: … mode light  builder sonnet`) and drive the job. Never start a bundle with `job new "<text>"` and
 a single `--issue`: then only the first issue is recorded and closed. A bundle that was made that way
 anyway is repaired with `.factory/job set <id> issues '[<nr>, <nr>, …]'`.
 
@@ -412,7 +432,8 @@ PR/MR (`/factory rework <id>`) or holds a different set of issues (widen it whil
 `job set <id> issues '[…]'`). Never drop a job to start the same issue again: `requeue` it. Then `/factory <feature>` with
 `feature` = the issue text and `--issue <nr> --issue-url <url>` (the script marks the job
 untrusted, so every prompt carries the untrusted label). The mode is the issue's label
-`factory:docs|light|full` if it has one, else full: an explicit `/factory issue` is not triaged.
+(`factory:docs|light|full` or an `effort.labels` label such as `easy`) if it has one, else full: an
+explicit `/factory issue` is not triaged.
 Bundle by hand: repeat `--issue <nr> --issue-url <url>` in `job new` (the feature text then
 lists every issue).
 
@@ -467,7 +488,14 @@ and `job list` show `PAUSED`.
 Keeps open PRs/MRs mergeable. `.factory/job prs [<id>]` does the asking for every job at `pr-open`
 (or one): `MERGED:` lines (the job is marked merged and its issues closed), `CLOSED:` (closed
 without merge: the job went to `needs-human`), `UNKNOWN:` (ask again later), and `ACTION: sync` with
-one `SYNC:`/`RUN:` pair per PR/MR that conflicts with or is behind the base. What it asks the forge:
+one `SYNC:`/`RUN:` pair per PR/MR that conflicts with or is behind the base. It also asks about every
+**unfinished** job (queued, running, `needs-human`) that has a PR/MR already (`validate.mode: ci` opens
+it before delivery) or a pushed branch with an open one: `OPEN: <id> …: job at <stage>, pipeline
+<state>` (count them as open MRs; never conclude "no open MRs" from the `pr-open` jobs alone),
+`MERGED:` (merged on the forge while the job waited at `needs-human`: marked merged), and
+`RESUME: <id>` (its last validation failed on infrastructure and the head pipeline is green now:
+the validation counts as passed, run `job next <id>`; never build another round for it). After a
+long pause run `job prs` before anything else. What it asks the forge:
 
 - `gitlab`: `glab api "projects/:id/merge_requests/<iid>"` → conflict when
   `has_conflicts` is true or `detailed_merge_status` is `conflict` or `need_rebase`.
@@ -537,7 +565,8 @@ forgets the adoption (the PR/MR and its branch stay). A later conflict on it is 
 
 ### `/factory` (no argument) / `/factory status`
 `.factory/job list` (per job: id, mode, stage, round/budget, reviews, reason or PR).
-For jobs at `pr-open`, first run
+First run `.factory/job prs`: it reads the PR/MR state from the forge for `pr-open` jobs and for
+unfinished jobs whose PR/MR the CI validation opened (see `/factory sync`). For jobs at `pr-open`, run
 `/factory sync` for them (`.factory/job prs`, then on a conflict the fix: the sonnet builder merges
 `base`; a sync beyond `limits.active_syncs` is "postponed"). For those jobs also read the CI state and record it with
 `.factory/job set <id> pr_state '{"at": "<ISO8601>", "pipeline": "<running|success|failed|none>",
@@ -738,9 +767,20 @@ count). On `AUTO-MERGE: no (<reasons>)` open the
 PR/MR ready for review **without** auto-merge, and if this PR/MR already has it on (after a
 rework) switch it off: `gh pr merge <nr> --disable-auto`, or
 `glab api -X POST "projects/:id/merge_requests/<iid>/cancel_merge_when_pipeline_succeeds"`.
-Say the reasons in the report line: that PR/MR waits for a human. This is the only merge-related action the factory takes, and it is a switch, not a merge: the
-forge merges when its own checks pass; the factory never merges directly, never skips or
-retries checks to get green, never touches approval rules. Auto-merge set right after
+Say the reasons in the report line: that PR/MR waits for a human.
+
+With `delivery.auto_merge_held: true` a held job prints `AUTO-MERGE: yes (held: <reasons>;
+delivery.auto_merge_held overrides the hold)` and a `MERGE:` line: switch auto-merge on as for
+`yes`; `pr-body.md` already lists the hold under `## Auto-merge hold overridden`, so use it as it is.
+On GitHub, `gh pr merge <nr> --auto --merge --delete-branch` when the repo allows auto-merge, else
+wait until CI passes and `gh pr merge <nr> --merge --delete-branch` (the owner's choice for this
+flag; it is the one case where the factory merges and deletes the branch). Report the hold reasons
+in the report line.
+
+This is the only merge-related action the factory takes, and it is a switch, not a merge: the
+forge merges when its own checks pass; the factory never merges directly (except the
+`auto_merge_held` case above), never skips checks to get green, never retries them except the one
+automatic retry of an infrastructure failure (`CI: INFRA`), never touches approval rules. Auto-merge set right after
 creation often fails because the pipeline does not exist yet, and some CLIs fail silently:
 
 - `gitlab`: wait until `glab api "projects/:id/merge_requests/<iid>/pipelines"` lists at
@@ -752,7 +792,7 @@ creation often fails because the pipeline does not exist yet, and some CLIs fail
   setting; add `--squash`/`--merge`/`--rebase` only if the repo allows just one). Verify
   with `gh pr view <nr> --json autoMergeRequest` → not null.
 
-Never ask the forge to delete the branch on merge (`--delete-branch`,
+Except under `delivery.auto_merge_held` on GitHub (above), never ask the forge to delete the branch on merge (`--delete-branch`,
 `should_remove_source_branch`): the factory never deletes remote branches, and `rework`
 needs `factory/<id>` after a merge. The repo's own "delete branch after merge" setting
 is the owner's choice.
@@ -773,7 +813,8 @@ entries. Nothing else to do; never remove other `/tmp` prefixes.
   approve or close a PR/MR, never delete remote branches. Issues are closed only as
   described under **Closing issues**.
   Merging the PR/MR is a human's job, unless `delivery.auto_merge` is set: then the factory
-  only switches on the forge's auto-merge (see above), and the forge merges.
+  only switches on the forge's auto-merge (see above), and the forge merges (with
+  `delivery.auto_merge_held` on GitHub: `gh pr merge --merge --delete-branch` once CI passes).
 - Never put code, diffs, raw data, personal data or secrets in a PR/MR body.
 
 ## Resources

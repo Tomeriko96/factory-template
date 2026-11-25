@@ -2,6 +2,12 @@ Part of the factory skill: SKILL.md's rules apply here too. Moved out of SKILL.m
 
 ## Config keys
 
+- `template` and `archetype`: the factory version setup ran with and the repo's archetype (A–E,
+  see `setup.md`); information only.
+- `forge`: `github`, `gitlab` or `none`, the forge of the delivery remote; it picks `gh` or `glab`
+  for PRs/MRs, pipelines and issues. Missing → `github` for the CI calls.
+- `port_base` (default 5100): job `NNN` gets builder port `port_base + 10·NNN`, the ux/ui/audit
+  reviewers `+1`/`+2`/`+3` (see Constants).
 - `reviewers` is the full-review set. Name `x` is agent `factory-reviewer-x`. Each round
   `.factory/job` keeps only those whose paths the diff touches (see **Reviewers**);
   `reviewer_paths` (optional) sets those paths per reviewer.
@@ -23,6 +29,8 @@ Part of the factory skill: SKILL.md's rules apply here too. Moved out of SKILL.m
   **Closing issues**). Missing → `true`; `false` leaves closing to a human.
 - `delivery.mode`: `local` (merge into `base` locally), `push` (push the job branch) or
   `pr` (push + open a PR/MR). Missing → `local`.
+- `delivery.remote`: the remote job branches are pushed to and PRs/MRs are opened on. Missing →
+  `origin`.
 - `delivery.draft`: open the PR/MR as a draft. Missing → `true`.
 - `delivery.auto_merge`: in `pr` mode, switch on the forge's auto-merge after opening the
   PR/MR, so the forge merges it itself once the required checks pass. Missing → `false`.
@@ -94,5 +102,16 @@ Part of the factory skill: SKILL.md's rules apply here too. Moved out of SKILL.m
   `frontend-design` skill (which the builder otherwise reads for new UI, below the repo's
   own design system: not preloaded, but named on a `UI work:` line of the builder's prompt
   when the diff or spec.md touches a UI path). A skill the session does not have is reported, not fatal.
+- `docs` (optional, no default: nothing is checked without it): `{"rules": [{"code": [globs],
+  "docs": [globs], "why": "<what the docs describe>"}]}`. When a job's diff touches a rule's `code`
+  globs and none of its `docs` globs, `.factory/precheck` reports the issue `DOCS: missing update
+  for <why> (<files>)`: a precheck issue, so auto-merge stays off (also with `auto_merge_held`) and
+  the approver sends it back (REWORK). It passes once the docs change, or when the job's text
+  (round-N/build.md, decision.md or pr-body.md) has a line `Docs: not needed: <reason>`; a line
+  that names a rule's `why` (`Docs: not needed (config keys): <reason>`) covers only that rule, one
+  without covers every rule. The precheck notes `DOCS: not needed for <why>: <reason>` and
+  `--pr-body` quotes the line in the PR/MR. Globs: `**` spans directories, `*` stays within one,
+  a glob without `/` matches the file name anywhere. `/factory setup` proposes rules from the
+  repo layout and writes them after the user's yes.
 - `.factory/repo.md` holds the repo facts the agents need (setup, dev server,
   validation, CI). You do not need to read it; the agents do.

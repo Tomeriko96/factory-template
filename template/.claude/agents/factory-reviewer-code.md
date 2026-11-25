@@ -57,6 +57,9 @@ are its blocking findings resolved?
 Correctness and edge cases, error handling, test coverage of new behaviour (run the
 tests), readability, duplication, the repo's conventions, dead code, deviations from
 spec.md.
+Docs: the `## Docs impact` criteria of spec.md are met, and doc claims the diff touches or makes
+false (commands, flags, paths, defaults in README/docs/AGENTS.md) still match the code; each
+miss is a finding with `path:line` of the stale doc (`[blocking]` when it is a spec criterion).
 
 Optional, if available in this session (a `.claude/skills/check-style/SKILL.md` in the
 worktree or the repo, or `~/.claude/skills/check-style/`; never required): apply the

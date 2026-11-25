@@ -143,6 +143,20 @@ of PRs/MRs that may be open at once before new jobs wait (every merge makes the 
 conflict; `0` = no limit, use it when `delivery.mode` is not `pr`). Leave `guard` and
 `docs_globs` out unless the user wants the hook off or the repo keeps docs elsewhere.
 
+**Docs rules** (`docs.rules`, opt-in: nothing is checked without them): propose rules from the
+repo layout so a job that changes code without the docs that describe it is held by the
+precheck (`DOCS: missing update for <why>`) until the docs change or the PR text says
+`Docs: not needed: <reason>`. One rule per pair you can see in the repo, with globs that really
+match files here (`git ls-files '<glob>'`), for example:
+- config code (`src/**/config*.py`, `**/settings*.py`) → the config docs (`docs/configuratie*.md`, `README.md`);
+- the CLI entry point (`src/**/cli*.py`, `bin/*`, `justfile`, `Makefile`) → `README.md` (usage);
+- migrations (`**/migrations/**`, `**/alembic/**`) → the operations/deploy docs (`docs/**/*beheer*`, `docs/**/*deploy*`);
+- CI (`.gitlab-ci.yml`, `.gitlab/**`, `.github/workflows/**`) → `CONTRIBUTING.md`, the CI docs;
+- API routes (`**/routes/**`, `**/api/**`) → the API docs, when the repo has them.
+Show them as a table (code globs → docs globs, why) and write them only after the user's yes
+(`"docs": {"rules": [{"code": [...], "docs": [...], "why": "config keys"}]}`); a repo without
+docs to keep in step gets none. Keep the rules of an existing config.json unless the user changes them.
+
 **Worktree seed:** leave `worktree_seed` out (default `true`: a job worktree whose lockfile
 equals the main checkout's gets its `node_modules`/`.venv` as hardlinks instead of a fresh
 install). It only helps when the main checkout has those folders installed: if repo.md's Setup
@@ -198,11 +212,12 @@ reviewers serve the same worktree at the same time, each on its own port, so def
   "issues": { "allowed_authors": ["<login>"], "skip_labels": ["blocked", "wontfix", "factory:in-progress"], "report": false, "link": "Closes", "close_on_merge": true },
   "delivery": { "mode": "pr", "remote": "origin", "draft": false, "auto_merge": false },
   "limits": { "active_jobs": 3, "open_prs": 5 },
-  "reviewer_paths": { "privacy": ["<personal-data globs>"] }
+  "reviewer_paths": { "privacy": ["<personal-data globs>"] },
+  "docs": { "rules": [{ "code": ["src/**/config*.py"], "docs": ["docs/configuratie*.md", "README.md"], "why": "config keys" }] }
 }
 ```
 
-(`reviewer_paths` only when needed; leave it out otherwise.) Keep `house_style` and `routing`
+(`reviewer_paths` only when needed; leave it out otherwise. `docs` only with the rules the user confirmed.) Keep `house_style` and `routing`
 from an existing config.json as they are; never add them yourself (both are set by whoever
 runs the factory, see SKILL.md). Check that every name in `reviewers` has `.claude/agents/factory-reviewer-<name>.md`.
 

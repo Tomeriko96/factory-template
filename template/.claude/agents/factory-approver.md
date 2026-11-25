@@ -49,6 +49,10 @@ doubtful about security or privacy?
 3. No unresolved `[blocking]` findings in the reviews, no scope creep beyond the spec.
    `[non-blocking]` findings do not block.
 4. The diff is small enough to review; no unexplained breaking changes.
+5. Docs: the criteria of spec.md's `## Docs impact` are met, and doc claims the diff touches
+   (commands, flags, paths, defaults) still match the code; a miss is REWORK with `file:line`. A
+   precheck `DOCS: missing update for <why>` is REWORK, unless that doc truly needs no change:
+   then write `Docs: not needed (<why>): <reason>` in your `## PR` (the precheck accepts it).
 
 ## What `decision.md` holds (written last: see the final section)
 First line exactly one of:

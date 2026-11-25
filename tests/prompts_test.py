@@ -340,6 +340,24 @@ for word in ("except", "or {}", "subprocess", "retries", "warnings", "|| true", 
 for src in ("webapp-testing", "pr-review-toolkit", "no code"):
     check(src in NOTICE, f"NOTICE: {src} missing")
 
+# v0.18.0: docs stay true, in four layers (spec, precheck, approver/code review, discovery)
+SETUP = open(os.path.join(SKILL_DIR, "setup.md")).read()
+check("## Docs impact" in texts.get("spec-writer", "") and "none: <reason>" in texts.get("spec-writer", ""),
+      "spec-writer: no '## Docs impact' section (or its 'none: <reason>')")
+check("Docs impact" in texts.get("builder", "") and "Docs: not needed (<why>): <reason>" in texts.get("builder", ""),
+      "builder: does not meet the Docs impact criteria or name the precheck's waiver line")
+for g in ("approver", "reviewer-code"):
+    check("Docs impact" in texts.get(g, "") and ("path:line" in texts.get(g, "") or "file:line" in texts.get(g, "")),
+          f"{g}: no Docs impact check with file:line")
+check("DOCS: missing update" in texts.get("approver", "") and "DOCS: missing update for" in PRECHECK
+      and "Docs: not needed" in PRECHECK and "def docs_check" in PRECHECK, "precheck/approver: the docs rule hold is out of step")
+check("Docs impact" in texts.get("acceptance-writer", ""), "acceptance-writer: no docs criteria")
+check("`docs`" in CMD_FILES.get("config", "") and "DOCS: missing update" in CMD_FILES.get("config", "") and
+      "`docs`" in SKILL_CORE, "commands/config.md / SKILL.md: docs.rules not documented")
+check("**Docs rules**" in SETUP and "after the user's yes" in SETUP, "setup.md: does not propose docs.rules for confirmation")
+check("docs drift" in CMD_FILES.get("discovery", "") and "--docs" in CMD_FILES.get("discovery", "")
+      and "label" in CMD_FILES.get("discovery", ""), "commands/discovery.md: no docs drift step")
+
 for f in fails:
     print("FAIL", f)
 print(f"prompts_test: {'ok' if not fails else str(len(fails)) + ' failure(s)'}")

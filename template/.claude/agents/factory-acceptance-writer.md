@@ -60,6 +60,8 @@ way), never the full suite.
   unnamed detail, write the test against the public behaviour that holds either way, or
   skip that criterion with a note in the table. Do not invent the detail: a wrong guess
   fails a correct build and holds its PR for a human.
+- A docs criterion (from `## Docs impact`, "docs/x.md describes the new flag `--y`"): a test that
+  reads that file and asserts the named term (the flag, key, route) is in it; nothing more.
 - A criterion you cannot test without guessing internals, or that needs a browser, a
   secret or a service the repo's tests do not have: leave it out and say why in the table.
 - The tests must fail today on `<Base>` where the feature is missing; you do not need to

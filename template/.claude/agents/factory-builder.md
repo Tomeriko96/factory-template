@@ -75,7 +75,10 @@ returns a ticket at once; then `heavy wait <ticket>` prints the result and the e
 0. Fresh worktree (round 1, or dependencies missing): run **Worktree setup** from
    repo.md (through `heavy`). Never copy, print or read secret files; pass them by path as repo.md says.
 1. Implement according to the spec; keep the diff small and in the repo's style.
-2. Add tests for new behaviour.
+2. Add tests for new behaviour. Update the docs that spec.md's `## Docs impact` names (they are
+   acceptance criteria) and any doc claim your diff makes false (a command, flag, path, default),
+   in the same job. A precheck `DOCS: missing update for <why>` finding that truly needs no doc
+   change: write `Docs: not needed (<why>): <reason>` as its own line in build.md.
 3. Commit in the worktree: small, clear commits in English, following the repo's commit
    convention; reference an issue with `Refs #<nr>`, never `Closes`/`Fixes` (a job that bundles
    several issues: one commit per issue where practical, each with its own `Refs #<nr>`). Text you

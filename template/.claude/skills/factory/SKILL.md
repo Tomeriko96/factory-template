@@ -46,7 +46,7 @@ Never edit `config.json` without the user. `.factory/repo.md` holds the repo fac
 (setup, dev server, validation, CI); you do not need to read it.
 
 **More in `commands/` (this skill's directory).** Read a file there only when its line applies:
-- For what a config key means (`issues`, `delivery`, `auto_merge_held`, `effort`, `limits`, `acceptance_tests`, `routing`, `validate`, `ui_review`, `worktree_seed`, `adopt_conflicting`, `house_style`): read `commands/config.md` first.
+- For what a config key means (`issues`, `delivery`, `auto_merge_held`, `effort`, `limits`, `acceptance_tests`, `routing`, `validate`, `ui_review`, `worktree_seed`, `adopt_conflicting`, `house_style`, `docs`): read `commands/config.md` first.
 - For the hidden acceptance tests (`acceptance_tests`, factory-acceptance-writer): read `commands/acceptance-tests.md` first.
 - For model/effort routing, the security floor and the escalation ladder: read `commands/routing.md` first.
 - For where a job's files live (`.factory/`, `jobs/<id>/`, worktrees): read `commands/layout.md` first.
@@ -348,6 +348,7 @@ sub-issues `sub_issues` / GitLab issue `/links`); it is always **one job** with 
 When you open an issue yourself (for example from discovery or an audit) and the session
 has a `write-issue` skill, follow it; without one, write evidence and numbered acceptance
 criteria.
+- For discovery (`/factory next` found nothing and the session looks for work itself; always includes the docs drift check): read `commands/discovery.md` first.
 
 **Reporting back** is off by default. Only with `"report": true` post a one-line comment
 at: start (job-id), `needs-human` (reason) and delivery (PR/MR url, or branch + commit

@@ -1927,6 +1927,73 @@ first "$(sed -n 2p "$(jd "$A4")/precheck.md")" "AUTO-MERGE: no: precheck ISSUES"
 out="$(J next "$A4")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"; field "$A4" "j['auto_merge']['allowed']" False; park "$A4"
 cp "$T/config.amh" .factory/config.json
 
+# ---------- docs rules: code that changed without its docs holds the job (precheck DOCS) ----------
+scenario=docs-rules
+cp .factory/config.json "$T/config.docs"
+docscfg() { python3 - "$1" <<'PY'
+import json, sys
+c = json.load(open(".factory/config.json"))
+c["forge"] = "github"
+c["delivery"] = {"mode": "pr", "remote": "origin", "draft": False, "auto_merge": True}
+c["docs"] = json.loads(sys.argv[1])
+json.dump(c, open(".factory/config.json", "w"))
+PY
+}
+# buildmany <id> <path>…: the builder adds new files; $BUILD_EXTRA goes into build.md
+buildmany() {
+  local id="$1" f; shift
+  mkdir -p "$(jd "$id")/round-1"
+  for f in "$@"; do mkdir -p "$(dirname "$(wt "$id")/$f")"; echo "new" > "$(wt "$id")/$f"; done
+  git -C "$(wt "$id")" add -A; git -C "$(wt "$id")" commit -qm "round 1"
+  printf 'Built\n%b\n## PR\nChange\n' "${BUILD_EXTRA:-}" > "$(jd "$id")/round-1/build.md"
+}
+drivemany() {
+  local id="$1"; shift
+  echo SPEC > "$(jd "$id")/spec.md"; J next "$id" >/dev/null
+  buildmany "$id" "$@"; J next "$id" >/dev/null
+  J reviewers "$id" security,code,audit >/dev/null
+  for r in security code audit; do review "$id" 1 $r PASS; done
+  JV "$id" >/dev/null
+}
+docscfg '{"rules": [{"code": ["src/**/config*.py"], "docs": ["docs/config*.md", "README.md"], "why": "config keys"},
+                    {"code": ["cli/*.py"], "docs": ["README.md"], "why": "CLI usage"}]}'
+# rule hit without docs: DOCS issue, auto-merge off (also after an approver MERGE)
+D1="$(newjob "zq docs miss")"; drivemany "$D1" src/app/config_keys.py
+pc="$(cat "$(jd "$D1")/precheck.md")"; first "$pc" "PRECHECK: ISSUES"
+has "$pc" "DOCS: missing update for config keys (src/app/config_keys.py)"; lacks "$pc" "CLI usage"
+merge_decision "$D1"
+out="$(J next "$D1")"; has "$out" "AUTO-MERGE: no (precheck ISSUES"; field "$D1" "j['auto_merge']['allowed']" False; park "$D1"
+# rule hit with its docs: clean
+D2="$(newjob "zq docs ok")"; drivemany "$D2" src/config.py docs/configuration.md
+pc="$(cat "$(jd "$D2")/precheck.md")"; first "$pc" "PRECHECK: CLEAN"; lacks "$pc" "DOCS:"
+merge_decision "$D2"; out="$(J next "$D2")"; has "$out" "AUTO-MERGE: yes"; park "$D2"
+# code outside every rule: no docs needed
+D3="$(newjob "zq docs none")"; drivemany "$D3" src/feature_x.py
+first "$(cat "$(jd "$D3")/precheck.md")" "PRECHECK: CLEAN"; park "$D3"
+# `Docs: not needed: <reason>` in build.md: passes, the reason is noted and quoted in the PR body
+D4="$(newjob "zq docs waived")"; BUILD_EXTRA='\nDocs: not needed: only an internal default changed\n' drivemany "$D4" src/a/config.py
+pc="$(cat "$(jd "$D4")/precheck.md")"; first "$pc" "PRECHECK: CLEAN"
+has "$pc" "DOCS: not needed for config keys: only an internal default changed"
+merge_decision "$D4"; out="$(J next "$D4")"; has "$out" "AUTO-MERGE: yes"
+has "$(cat "$(jd "$D4")/pr-body.md")" "Docs: not needed: only an internal default changed"; park "$D4"
+# a waiver that names another rule does not cover this one; naming the rule does
+D5="$(newjob "zq docs other")"; BUILD_EXTRA='\nDocs: not needed (CLI usage): no new flag\n' drivemany "$D5" src/b/config.py cli/main.py
+pc="$(cat "$(jd "$D5")/precheck.md")"; first "$pc" "PRECHECK: ISSUES"
+has "$pc" "DOCS: missing update for config keys (src/b/config.py)"; has "$pc" "DOCS: not needed for CLI usage: no new flag"; park "$D5"
+# the approver's line in decision.md (written after the precheck): delivery re-runs the precheck
+D6="$(newjob "zq docs approver")"; drivemany "$D6" src/c/config.py
+first "$(cat "$(jd "$D6")/precheck.md")" "PRECHECK: ISSUES"
+merge_decision "$D6" "Docs: not needed (config keys): a private constant was renamed
+"
+out="$(J next "$D6")"; has "$out" "AUTO-MERGE: yes"
+has "$(cat "$(jd "$D6")/precheck.md")" "DOCS: not needed for config keys: a private constant was renamed"
+has "$(cat "$(jd "$D6")/pr-body.md")" "Docs: not needed (config keys): a private constant was renamed"; park "$D6"
+# a broken rule is reported and ignored, never fatal
+docscfg '{"rules": [{"code": "src/*.py", "docs": ["README.md"]}]}'
+D7="$(newjob "zq docs bad")"; drivemany "$D7" src/d.py
+pc="$(cat "$(jd "$D7")/precheck.md")"; first "$pc" "PRECHECK: CLEAN"; has "$pc" "docs.rules[0] needs non-empty"; park "$D7"
+cp "$T/config.docs" .factory/config.json
+
 # ---------- input checks and concurrency ----------
 scenario=input
 first "$(J next '../../etc')" "ERROR: not a job id"

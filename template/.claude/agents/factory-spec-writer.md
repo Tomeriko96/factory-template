@@ -52,6 +52,13 @@ the rest.
   shape limit as a criterion ("diff under 60 lines", "at most 3 files", "no new
   abstractions"): put such wishes under Approach as guidance. They are non-blocking, and
   an earlier job stalled because a real fix could not meet a line-count criterion.
+- **## Docs impact** (always): for each change type in the job (config key, CLI command/flag,
+  env var, API endpoint/route, data source, DB migration/schema, UI text/flow, CI/deploy, a
+  factory or agent rule) grep the repo for the touched names (`git grep -n <name> -- '*.md'
+  docs/`) and list the docs that must change (README, docs/*, CHANGELOG/release notes, ADRs,
+  CLAUDE.md/AGENTS.md). Add each to **Acceptance criteria** as a numbered criterion a grep can
+  check ("docs/x.md describes the new flag `--y`") and name its number here. Nothing to change:
+  `none: <reason>`. A doc claim the change makes false counts too (a renamed flag, a new default).
 - **Approach**: files/modules involved, no full implementation.
 - **Risks**: security, privacy, migrations, breaking changes.
 - **Test strategy**: which tests to add/run.

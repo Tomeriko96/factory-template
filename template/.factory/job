@@ -1044,6 +1044,8 @@ def auto_merge_gate(job):
         pp = os.path.join(jd, "precheck.md")
         if held_override() and (first_lines(pp, 4) + [""] * 4)[3].split(":")[0] != f"Job {job['id']}, round {int(job.get('round') or 0)}":
             run_precheck(job, int(job.get("round") or 1))   # approved by hand: the precheck of this round
+        elif docs_waived_after_precheck(jd, pp):
+            run_precheck(job, int(job.get("round") or 1))   # the approver's `Docs: not needed` line counts
         pre = (first_lines(pp, 2) + ["", ""])[1]
         if not pre.startswith("AUTO-MERGE:"):
             hard.append("no precheck result for this round")
@@ -1056,6 +1058,17 @@ def auto_merge_gate(job):
     if held_override():
         return (not hard), hard, soft
     return (not hard and not soft), hard + soft, []
+
+
+def docs_waived_after_precheck(jd, pp):
+    """True when the precheck held a docs rule (`DOCS: missing update`) and the approver's decision.md
+    has a `Docs: not needed: <reason>` line the precheck could not see yet (it ran before the approver)."""
+    try:
+        pre = open(pp, errors="replace").read()
+        dec = open(os.path.join(jd, "decision.md"), errors="replace").read()
+    except OSError:
+        return False
+    return "DOCS: missing update" in pre and re.search(r"^[\s>*-]*Docs:\s*not needed\b[^:\n]*:[ \t]*\S", dec, re.I | re.M) is not None
 
 
 def auto_merge_record(gate):
